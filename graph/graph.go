@@ -26,6 +26,13 @@ func (g *Graph) GetTotalCells() int {
 	return g.totalCells
 }
 
+func (g *Graph) SholdSkip(pos int) bool {
+	if g.size%2 != 0 {
+		return pos%2 != 0
+	}
+	return false
+}
+
 func (g *Graph) GetNeighbors(pos int) []int {
 	return g.neighbors[pos]
 }
