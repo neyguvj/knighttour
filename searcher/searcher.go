@@ -37,6 +37,9 @@ func (s *Searcher) GenerateSubtasks(ctx context.Context, p path.Path, depth int)
 	var subtasks []path.Path
 
 	_ = s.countPathsDFS(ctx, p, func(p path.Path) bool {
+		if s.graph.SholdSkip(p.Start()) {
+			return true
+		}
 		if depth == 0 {
 			subtasks = append(subtasks, p)
 			return true
