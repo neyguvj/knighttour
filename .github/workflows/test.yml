@@ -1,0 +1,31 @@
+name: Test
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      
+      - name: go vet
+        run: go vet ./...
+      
+      - name: go fmt
+        run: go fmt ./...
+      
+      - name: go build
+        run: go build ./...
+      
+      - name: go test
+        run: go test -v -race ./...
