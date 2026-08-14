@@ -220,7 +220,7 @@ func TestGenerateSubtasksWithMetadataConsistencyAcrossOrbits(t *testing.T) {
 		wantLen int
 	}{
 		{0, 4},  // corner
-		{1, 8},  // edge
+		{2, 8},  // edge
 		{6, 4},  // diagonal
 		{12, 1}, // center
 	}
