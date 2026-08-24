@@ -14,7 +14,7 @@ import (
 	"knighttour/symmetry"
 )
 
-const DefaultPrecomputeDepth = 0
+const DefaultPrecomputeDepth = 1
 
 type Counter struct {
 	graph    *graph.Graph
