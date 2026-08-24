@@ -272,13 +272,33 @@ DFS(path):
 ```go
 type Path struct {
     state State  // битовая маска посещенных клеток
-    start int    // начальная позиция (неизменяемая)
-    end   int    // текущая позиция
+    start uint8  // начальная позиция (неизменяемая, uint8)
+    end   uint8  // текущая позиция (uint8)
 }
 
+func New(state State, start int, end int) Path
+
+func (p Path) State() State
+func (p Path) Start() int
+func (p Path) End() int
+func (p Path) String() string
+```
+
+Типы для обмена между компонентами:
+```go
 type Result struct {
-    TotalPathsFound int
-    Pruned          int
+    TotalPathsFound int  // количество найденных путей в поддереве
+    CachedPaths     int  // количество закэшированных путей (в GenerateSubtasks)
+}
+
+func (r *Result) Add(other Result)
+
+type Subtask struct {
+    State           state.State  // битовая маска состояния
+    Start           int          // начальная позиция
+    End             int          // конечная позиция
+    Depth           int          // глубина предварительного разбиения (0 по умолчанию)
+    SymmetriesCount int          // количество симметричных вариантов
 }
 ```
 
@@ -379,11 +399,11 @@ type RealMonitor struct {
 
 **Методы:**
 - `NewMonitor() *RealMonitor` — создание монитора
-- `AddTasks(tasks ...types.Subtask)` — добавить задачи (увеличивает totalTasks)
+- `AddTasks(count int)` — добавить задачи (увеличивает totalTasks на count)
 - `Start(ctx context.Context)` — запустить периодический вывод прогресса (каждую секунду)
   - Вывод в формате:
     ```
-    [00:XX:YY] Tasks: 6/6 (100.0%) | Total paths 1728 | Pruned: 116606
+    [00:XX:YY] Tasks: 6/6 (100.0%) | Total paths 1728 | Cached paths: 42
     ```
 - `Finish()` — финальный отчет и завершение мониторинга
   - Вывод:
@@ -392,14 +412,21 @@ type RealMonitor struct {
     Time: XXs
     Tasks completed: 6/6
     Total paths: 1728
-    Connectivity pruned: 116606
+    Cached paths: 42
     ```
-- `RecordTaskCompletion(task types.Subtask, result types.Result)` — зарегистрировать завершение задачи
-  - Увеличивает completed на 1
-  - Умножает TotalPathsFound на SymmetriesCount и добавляет к totalPaths
+- `ReportTaskCompleted()` — зарегистрировать завершение задачи (увеличивает completed на 1)
+- `ReportPathsFound(count int)` — зарегестрировать найденные пути
+- `ReportPathsCached(count int)` — зарегистрировать закэшированные пути
 
 **FakeMonitor (для тестов):**
-- Пустая реализация всех методов интерфейса
+```go
+func (*FakeMonitor) Start(ctx context.Context)      {}
+func (*FakeMonitor) Finish()                        {}
+func (*FakeMonitor) AddTasks(count int)             {}
+func (*FakeMonitor) ReportTaskCompleted()           {}
+func (*FakeMonitor) ReportPathsFound(count int)     {}
+func (*FakeMonitor) ReportPathsCached(count int)    {}
+```
 
 **Использование в Counter:**
 ```go
@@ -409,41 +436,21 @@ defer monitor.Finish()
 
 count := c.ParallelCountWithDepth(ctx, monitor, workers, depth)
 
-// В worker'ах:
-result := searcher.CountPathsDFS(ctx, p)
-total.Add(uint64(result.TotalPathsFound * task.SymmetriesCount))
-monitor.RecordTaskCompletion(task, result)
+// В worker'ах (для кэширования подзадач):
+result := searcher.GenerateSubtasks(ctx, cache, p, orbitSize, depth)
+monitor.ReportPathsCached(result.CachedPaths)
+monitor.ReportTaskCompleted()
+
+// При параллельном подсчете из кэша:
+taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, count int) {
+    result := c.searcher.CountPathsDFS(ctx, p)
+    group := c.symmetry.GetCanonicalGroupByPosition(p.Start())
+    
+    total.Add(uint64(result.TotalPathsFound * count * group.OrbitSize))
+    monitor.ReportPathsFound(result.TotalPathsFound * count * group.OrbitSize)
+    monitor.ReportTaskCompleted()
+})
 ```
-
----
-
-## План реализации
-
-### Этап 1: Базовая инфраструктура (неделя 1)
-1. ✅ `state/state.go` — битовые маски и операции
-2. ✅ `symmetry/symmetry.go` — трансформации координат
-3. 🔄 `graph/graph.go` — добавить Index, Coords, Degree, сортировку
-### types/types.go
-**Ответственность:** Типы данных для обмена между компонентами
-
-```go
-type Result struct {
-    TotalPathsFound int  // найденные пути в поддереве
-    Pruned          int  // количество отсечений
-}
-
-func (r *Result) Add(other Result)
-
-type Subtask struct {
-    State           state.State  // битовая маска состояния
-    Start           int          // начальная позиция
-    End             int          // конечная позиция
-    Depth           int          // глубина предварительного разбиения
-    SymmetriesCount int          // количество симметричных вариантов
-}
-```
-
----
 
 ## План реализации
 

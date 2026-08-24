@@ -67,20 +67,23 @@ func (c *Counter) ParallelCountWithDepth(
     workers int,
     precomputeDepth int,
 ) uint64
-// Параллельный подсчет с предварительным разбиением задач
+// Параллельный подсчет с предварительным разбиением задач через кэш
 ```
 
 **Алгоритм:**
-1. Получить группы канонических позиций: `symmetry.GetCanonicalGroups()`
-2. Для каждой группы сгенерировать подзадачи через `GenerateSubtasksWithMetadata(start, orbitSize, depth)`
-3. Добавить все задачи в мониторинг через `monitor.AddTasks(tasks...)`
-4. Запустить worker pool с лимитом workers через `errgroup.Group`
-5. Для каждой подзадачи:
-   - Создать путь из `task.State`, `task.Start`, `task.End`
-   - Вызвать `CountPathsDFS` для подсчета путей
-   - Умножить результат на `SymmetriesCount` и добавить к общему счетчику
-   - Зарегистрировать завершение через `monitor.RecordTaskCompletion(task, result)`
-6. Вернуть суммарное количество путей
+1. Создать кэш с помощью `cache.NewCache(symmetry)`
+2. Получить группы канонических позиций: `symmetry.GetCanonicalGroups()`
+3. Для каждой группы вызвать `searcher.GenerateSubtasks(ctx, cache, canonicalPos, orbitSize, depth)` для предварительного разбиения
+4. Добавить количество групп в мониторинг через `monitor.AddTasks(len(groups))`
+5. После генерации подзадач добавить их количество (`taskCache.ItemsCount()`)
+6. Запустить worker pool с лимитом workers через `errgroup.Group`
+7. Для каждой записи в кэше:
+   - Получить канонический путь и количество решений
+   - Вызвать `CountPathsDFS` для подсчета путей из этого состояния
+   - Найти группу с помощью `GetCanonicalGroupByPosition(p.Start())`
+   - Умножить результат на `count * group.OrbitSize` и добавить к общему счетчику
+   - Зарегистрировать завершение через `monitor.ReportPathsFound()` и `monitor.ReportTaskCompleted()`
+8. Вернуть суммарное количество путей
 
 **Использование:**
 ```go
@@ -96,7 +99,7 @@ fmt.Printf("Total tours: %d\n", count)
 Мониторинг выводит прогресс каждую секунду:
 
 ```
-[00:XX:YY] Tasks: 6/6 (100.0%) | Total paths 1728 | Pruned: 116606
+[00:XX:YY] Tasks: 6/6 (100.0%) | Total paths 1728 | Cached paths: 42
 ```
 
 И финальный отчет:
@@ -106,16 +109,18 @@ fmt.Printf("Total tours: %d\n", count)
 Time: XXs
 Tasks completed: 6/6
 Total paths: 1728
-Connectivity pruned: 116606
+Cached paths: 42
 ```
 
 **Методы интерфейса Monitor:**
 ```go
 type Monitor interface {
-    AddTasks(tasks ...types.Subtask)
+    AddTasks(count int)
     Start(ctx context.Context)
     Finish()
-    RecordTaskCompletion(task types.Subtask, result types.Result)
+    ReportTaskCompleted()
+    ReportPathsFound(count int)
+    ReportPathsCached(count int)
 }
 ```
 
@@ -173,14 +178,10 @@ groups := symmetry.GetCanonicalGroups()
 for _, group := range groups {
     // Группа канонических позиций с размером орбиты group.OrbitSize
     
-    subtasks := searcher.GenerateSubtasksWithMetadata(
-        ctx, 
-        group.Canonical, 
-        group.OrbitSize, 
-        depth,
-    )
+    cache := cache.NewCache(symmetry)
+    result := searcher.GenerateSubtasks(ctx, cache, group.Canonical, group.OrbitSize, depth)
     
-    // Каждая подзадача содержит SymmetriesCount = orbitSize * countOfCanonicalForms
+    // Кэш содержит подзадачи с количеством решений
 }
 ```
 

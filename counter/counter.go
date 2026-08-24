@@ -12,13 +12,11 @@ import (
 	"knighttour/path"
 	"knighttour/searcher"
 	"knighttour/symmetry"
-	"knighttour/types"
 )
 
 const DefaultPrecomputeDepth = 0
 
 type Counter struct {
-	cache    *cache.Cache
 	graph    *graph.Graph
 	symmetry *symmetry.Symmetry
 	searcher *searcher.Searcher
@@ -44,35 +42,40 @@ func (c *Counter) ParallelCount(ctx context.Context, monitor monitoring.Monitor,
 	return c.ParallelCountWithDepth(ctx, monitor, workers, DefaultPrecomputeDepth)
 }
 
-func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers int, precomputeDepth int) uint64 {
+func (c *Counter) generateSubTasks(ctx context.Context, monitor monitoring.Monitor, workers int, precomputeDepth int) *cache.Cache {
+	cache := cache.NewCache(c.symmetry)
 	groups := c.symmetry.GetCanonicalGroups()
-
-	var allSubtasks []types.Subtask
-	for _, group := range groups {
-		p := group.Canonical
-		subtasks := c.searcher.GenerateSubtasksWithMetadata(ctx, p, group.OrbitSize, precomputeDepth)
-		allSubtasks = append(allSubtasks, subtasks...)
-	}
-
-	monitor.AddTasks(allSubtasks...)
+	monitor.AddTasks(len(groups))
 
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(workers)
+	g.Go(func() error {
+		for _, group := range groups {
+			p := group.Canonical
+			result := c.searcher.GenerateSubtasks(ctx, cache, p, group.OrbitSize, precomputeDepth)
+			monitor.ReportPathsCached(result.CachedPaths)
+			monitor.ReportTaskCompleted()
+		}
+		return nil
+	})
+	_ = g.Wait()
+
+	return cache
+}
+
+func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers int, precomputeDepth int) uint64 {
+	taskCache := c.generateSubTasks(ctx, monitor, workers, precomputeDepth)
+	monitor.AddTasks(taskCache.ItemsCount())
 
 	total := atomic.Uint64{}
-	for _, task := range allSubtasks {
-		g.Go(func() error {
-			p := path.New(task.State, task.Start, task.End)
-			result := c.searcher.CountPathsDFS(ctx, p)
+	taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, count int) {
+		result := c.searcher.CountPathsDFS(ctx, p)
+		group := c.symmetry.GetCanonicalGroupByPosition(p.Start())
 
-			total.Add(uint64(result.TotalPathsFound * task.SymmetriesCount))
-
-			monitor.RecordTaskCompletion(task, result)
-			return nil
-		})
-	}
-
-	_ = g.Wait()
+		total.Add(uint64(result.TotalPathsFound * count * group.OrbitSize))
+		monitor.ReportPathsFound(result.TotalPathsFound * count * group.OrbitSize)
+		monitor.ReportTaskCompleted()
+	})
 
 	return total.Load()
 }

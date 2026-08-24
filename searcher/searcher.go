@@ -33,86 +33,49 @@ func (s *Searcher) CountPaths(ctx context.Context, start int) types.Result {
 	return result
 }
 
-func (s *Searcher) GenerateSubtasks(ctx context.Context, p path.Path, depth int) []path.Path {
-	var subtasks []path.Path
-
-	_ = s.countPathsDFS(ctx, p, func(p path.Path) bool {
+func (s *Searcher) GenerateSubtasks(ctx context.Context, cache *cache.Cache, start int, orbetSize int, depth int) (result types.Result) {
+	startPath := path.New(state.NewState(start), start, start)
+	s.countPathsDFS(ctx, startPath, func(p path.Path) bool {
 		if s.graph.SholdSkip(p.Start()) {
 			return true
 		}
 		if depth == 0 {
-			subtasks = append(subtasks, p)
+			cache.Set(p, 1)
+			result.CachedPaths++
 			return true
 		}
 		if p.State().CountBits() >= depth {
-			subtasks = append(subtasks, p)
+			cache.Set(p, 1)
+			result.CachedPaths++
 			return true
 		}
 		return false
 	})
-	return subtasks
-}
-
-func (s *Searcher) GenerateSubtasksWithMetadata(ctx context.Context, start int, orbitSize int, depth int) []types.Subtask {
-	st := state.State(0).Visit(start)
-	p := path.New(st, start, start)
-
-	rawSubtasks := s.GenerateSubtasks(ctx, p, depth)
-
-	canonizedTasks := make(map[path.Path]int)
-	for _, task := range rawSubtasks {
-		canonicalState := s.sym.CanonicalizePath(task)
-		canonizedTasks[canonicalState]++
-	}
-
-	var subtasks []types.Subtask
-
-	for task, count := range canonizedTasks {
-		subtasks = append(subtasks, types.Subtask{
-			State:           task.State(),
-			Start:           task.Start(),
-			End:             task.End(),
-			Depth:           depth,
-			SymmetriesCount: orbitSize * count,
-		})
-	}
-
-	return subtasks
-}
-
-func (s *Searcher) CountCenterPaths(ctx context.Context, cache *cache.Cache, p path.Path, SymmetriesCount int) (result types.Result) {
-	totalCells := s.graph.GetTotalCells()
-	center := totalCells / 2
-	return s.countPathsDFS(ctx, p, func(p path.Path) bool {
-		if p.Start() == center {
-			return true
-		}
-		if p.End() == center {
-			cache.Set(p, SymmetriesCount)
-			return true
-		}
-		return false
-	})
+	return result
 }
 
 func (s *Searcher) CountPathsDFS(ctx context.Context, p path.Path) (result types.Result) {
 	totalCells := s.graph.GetTotalCells()
 
-	return s.countPathsDFS(ctx, p, func(p path.Path) bool {
-		return p.State().IsFull(totalCells)
+	s.countPathsDFS(ctx, p, func(p path.Path) bool {
+		if p.State().IsFull(totalCells) {
+			result.TotalPathsFound++
+			return true
+		}
+
+		return false
 	})
+	return result
 }
 
-func (s *Searcher) countPathsDFS(ctx context.Context, p path.Path, stopCondition func(path.Path) bool) (result types.Result) {
+func (s *Searcher) countPathsDFS(ctx context.Context, p path.Path, onResult func(path.Path) (stop bool)) {
 	if ctx.Err() != nil {
-		return types.Result{}
+		return
 	}
 
-	if stopCondition(p) {
-		return types.Result{TotalPathsFound: 1}
+	if onResult(p) {
+		return
 	}
-
-	result = types.Result{}
 
 	neighbors := s.graph.GetNeighbors(p.End())
 	for _, neighbor := range neighbors {
@@ -124,13 +87,9 @@ func (s *Searcher) countPathsDFS(ctx context.Context, p path.Path, stopCondition
 		newPos := path.New(newState, p.Start(), neighbor)
 
 		if s.deadend.ShouldPrune(newPos) {
-			result.Pruned++
 			continue
 		}
 
-		childResult := s.countPathsDFS(ctx, newPos, stopCondition)
-		result.Add(childResult)
+		s.countPathsDFS(ctx, newPos, onResult)
 	}
-
-	return result
 }

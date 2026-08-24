@@ -36,6 +36,10 @@ func (g *Graph) Size() int
 func (g *Graph) GetTotalCells() int
 // Возвращает общее количество клеток (N²)
 
+func (g *Graph) SholdSkip(pos int) bool
+// Проверяет, нужно ли пропустить позицию (для симметрии на досках нечетного размера)
+// Возвращает true если size%2 != 0 и pos%2 != 0
+
 func (g *Graph) GetNeighbors(pos int) []int
 // Возвращает список соседей для позиции pos (0..N²-1)
 // Пустой слайс если neighbors[pos] не инициализирован
@@ -74,6 +78,9 @@ degree := graph.GetDegree(0) // → 2
 
 // Битовая маска соседей
 mask := graph.GetNeighborMask(0) // биты 6 и 9 установлены
+
+// Пропуск позиции (для симметрии на досках нечетного размера)
+shouldSkip := graph.SholdSkip(3) // → true если pos%2 != 0 и size%2 != 0
 
 // Обход соседей в поиске
 for _, neighbor := range graph.GetNeighbors(currentPos) {

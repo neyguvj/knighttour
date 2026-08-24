@@ -27,9 +27,9 @@ type DeadEndPruner struct {
 **Алгоритм:**
 1. Если все клетки посещены → не отсекать
 2. Если осталась одна клетка:
-   - Проверить достижимость через neighborMasks
+   - Проверить достижимость через `GetNeighborMask` и пересечение с текущей позицией
    - Если текущая позиция и последняя клетка не соединены → отсечь
-3. Для каждой непосещенной клетки проверить, есть ли у нее непосещенные соседи
+3. Для каждой непосещенной клетки проверить, есть ли у нее непосещенные соседи (через `Intersect(unvisitedMask)`)
 4. Если найдена изолированная клетка → отсечь
 
 ## Использование в Searcher
@@ -40,14 +40,13 @@ type Searcher struct {
     deadend *DeadEndPruner
 }
 
-func (s *Searcher) countPathsDFS(ctx context.Context, p path.Path, stopCondition func(path.Path) bool) types.Result {
-    if stopCondition(p) {
-        return types.Result{TotalPathsFound: 1}
+func (s *Searcher) countPathsDFS(ctx context.Context, p path.Path, onResult func(path.Path) (stop bool)) {
+    if onResult(p) {
+        return
     }
     
-    var result types.Result
-    
-    for _, neighbor := range s.graph.GetNeighbors(p.End()) {
+    neighbors := s.graph.GetNeighbors(p.End())
+    for _, neighbor := range neighbors {
         if p.State().IsVisited(neighbor) {
             continue
         }
@@ -56,15 +55,11 @@ func (s *Searcher) countPathsDFS(ctx context.Context, p path.Path, stopCondition
         newPos := path.New(newState, p.Start(), neighbor)
         
         if s.deadend.ShouldPrune(newPos) {
-            result.Pruned++
-            continue
+            continue  // пропускаем отсеченную ветвь
         }
         
-        childResult := s.countPathsDFS(ctx, newPos, stopCondition)
-        result.Add(childResult)
+        s.countPathsDFS(ctx, newPos, onResult)
     }
-    
-    return result
 }
 ```
 

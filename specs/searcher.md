@@ -36,7 +36,27 @@ result := searcher.CountPaths(context.Background(), 0)
 fmt.Printf("Found %d paths from position 0\n", result.TotalPathsFound)
 ```
 
-### 2. CountPathsDFS(ctx context.Context, p path.Path) types.Result
+### 2. GenerateSubtasks(ctx context.Context, cache *Cache, start int, orbitSize int, depth int) types.Result
+
+```go
+func (s *Searcher) GenerateSubtasks(
+    ctx context.Context,
+    cache *Cache,
+    start int,
+    orbitSize int,
+    depth int,
+) types.Result
+// Генерирует подзадачи и сохраняет их в кэш для последующего использования
+```
+
+**Алгоритм:**
+1. Создает начальный путь из стартовой клетки
+2. Запускает DFS с пользовательской функцией остановки:
+   - Если `SholdSkip(start)` — пропустить эту позицию
+   - Если глубина достигнута (`depth == 0` или CountBits >= depth) — сохранить в кэш и вернуться
+3. Возвращает `types.Result.CachedPaths` — количество закэшированных путей
+
+### 3. CountPathsDFS(ctx context.Context, p path.Path) types.Result
 
 ```go
 func (s *Searcher) CountPathsDFS(ctx context.Context, p path.Path) types.Result
@@ -44,67 +64,25 @@ func (s *Searcher) CountPathsDFS(ctx context.Context, p path.Path) types.Result
 ```
 
 **Алгоритм:**
-1. Если достигнута целевая клетка (все посещено), вернуть результат {TotalPathsFound: 1}
+1. Если достигнута целевая клетка (все посещено), увеличить `TotalPathsFound`
 2. Для каждого непосещенного соседа:
    - Проверить Dead-end pruner на новом состоянии
    - Если не отсечен, рекурсивно вызвать DFS
-   - Суммировать результаты и отсечения
+3. Возвращает результат с найденными путями
 
-### 3. countPathsDFS(ctx context.Context, p path.Path, stopCondition func(path.Path) bool) types.Result
+### 4. countPathsDFS(ctx context.Context, p path.Path, onResult func(path.Path) (stop bool))
 
 ```go
-func (s *Searcher) countPathsDFS(ctx context.Context, p path.Path, stopCondition func(path.Path) bool) types.Result
-// Внутренняя рекурсивная функция с пользовательским условием остановки
+func (s *Searcher) countPathsDFS(
+    ctx context.Context,
+    p path.Path,
+    onResult func(path.Path) (stop bool),
+)
+// Внутренняя рекурсивная функция с пользовательской обратной связью
 ```
 
 **Параметры:**
-- `stopCondition`: функция, возвращающая true когда нужно прекратить спуск и вернуть результат
-
-### 4. GenerateSubtasks(ctx context.Context, p path.Path, depth int) []path.Path
-
-```go
-func (s *Searcher) GenerateSubtasks(ctx context.Context, p path.Path, depth int) []path.Path
-// Генерирует все пути глубины depth из заданного пути
-```
-
-**Алгоритм:**
-- Рекурсивно строит дерево поиска
-- Когда `depth == 0` или достигнута заданная глубина (по CountBits), путь добавляется в результат
-
-### 5. GenerateSubtasksWithMetadata(ctx context.Context, start int, orbitSize int, depth int) []types.Subtask
-
-```go
-func (s *Searcher) GenerateSubtasksWithMetadata(
-    ctx context.Context,
-    start int,
-    orbitSize int,
-    depth int,
-) []types.Subtask
-// Генерирует подзадачи с учетом симметрий
-```
-
-**Алгоритм:**
-1. Создает начальный путь из стартовой клетки
-2. Генерирует все пути глубины depth через GenerateSubtasks
-3. Для каждого пути находит каноническую форму через symmetry.CanonicalizePath
-4. Подсчитывает количество дубликатов каждой канонической формы
-5. Создает Subtask с `SymmetriesCount = orbitSize * count`
-
-### 6. CountCenterPaths(ctx context.Context, cache *Cache, p path.Path, SymmetriesCount int) types.Result
-
-```go
-func (s *Searcher) CountCenterPaths(
-    ctx context.Context,
-    cache *Cache,
-    p path.Path,
-    SymmetriesCount int,
-) types.Result
-// Специализированный поиск с остановкой в центре доски и кэшированием результата
-```
-
-**Алгоритм:**
-- Продолжает поиск пока не достигнет центра (totalCells/2)
-- При достижении центра сохраняет результат в кэш с указанным SymmetriesCount
+- `onResult`: функция, возвращающая true когда нужно прекратить спуск и вернуться
 
 ## Типы данных
 
@@ -113,8 +91,8 @@ func (s *Searcher) CountCenterPaths(
 ```go
 type Path struct {
     state State  // битовая маска посещенных клеток
-    start int    // начальная позиция (неизменяемая)
-    end   int    // текущая позиция
+    start uint8  // начальная позиция (неизменяемая, uint8)
+    end   uint8  // текущая позиция (uint8)
 }
 
 func New(state State, start int, end int) Path
@@ -122,6 +100,7 @@ func New(state State, start int, end int) Path
 func (p Path) State() State
 func (p Path) Start() int
 func (p Path) End() int
+func (p Path) String() string
 ```
 
 ### Result
@@ -129,67 +108,28 @@ func (p Path) End() int
 ```go
 type Result struct {
     TotalPathsFound int  // количество найденных путей в поддереве
-    Pruned          int  // количество отсечений (Dead-end pruner)
+    CachedPaths     int  // количество закэшированных путей (в GenerateSubtasks)
 }
 
 func (r *Result) Add(other Result)
 // Суммирует поля result и other
 ```
 
-### Subtask
-
-```go
-type Subtask struct {
-    State           state.State  // битовая маска состояния
-    Start           int          // начальная позиция
-    End             int          // конечная позиция
-    Depth           int          // глубина предварительного разбиения (0 по умолчанию)
-    SymmetriesCount int          // количество симметричных вариантов
-}
-```
-
 ## Использование в Counter
 
 ```go
-func (c *Counter) ParallelCountWithDepth(
-    ctx context.Context,
-    monitor monitoring.Monitor,
-    workers int,
-    precomputeDepth int,
-) uint64 {
-    groups := c.symmetry.GetCanonicalGroups()
+// Генерация подзадач через кэш:
+cache := cache.NewCache(c.symmetry)
+result := c.searcher.GenerateSubtasks(ctx, cache, start, orbitSize, depth)
+
+// Параллельный подсчет из кэша:
+total := atomic.Uint64{}
+taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, count int) {
+    result := c.searcher.CountPathsDFS(ctx, p)
+    group := c.symmetry.GetCanonicalGroupByPosition(p.Start())
     
-    var allSubtasks []types.Subtask
-    for _, group := range groups {
-        subtasks := c.searcher.GenerateSubtasksWithMetadata(
-            ctx, 
-            group.Canonical, 
-            group.OrbitSize, 
-            precomputeDepth,
-        )
-        allSubtasks = append(allSubtasks, subtasks...)
-    }
-    
-    monitor.AddTasks(allSubtasks...)
-    
-    total := atomic.Uint64{}
-    g, _ := errgroup.WithContext(ctx)
-    g.SetLimit(workers)
-    
-    for _, task := range allSubtasks {
-        g.Go(func() error {
-            p := path.New(task.State, task.Start, task.End)
-            result := c.searcher.CountPathsDFS(ctx, p)
-            
-            total.Add(uint64(result.TotalPathsFound * task.SymmetriesCount))
-            monitor.RecordTaskCompletion(task, result)
-            return nil
-        })
-    }
-    
-    _ = g.Wait()
-    return total.Load()
-}
+    total.Add(uint64(result.TotalPathsFound * count * group.OrbitSize))
+})
 ```
 
 ## Dead-end Pruning
@@ -210,7 +150,6 @@ func (p *DeadEndPruner) ShouldPrune(path path.Path) bool {
         return false  // все посещено
     }
     
-    // Если осталась одна клетка, проверяем достижимость
     if unvisitedMask.CountBits() == 1 {
         lastPos := int(unvisitedMask.TrailingZeroBits())
         currentMask := state.NewState().Visit(path.End())
@@ -220,7 +159,6 @@ func (p *DeadEndPruner) ShouldPrune(path path.Path) bool {
         return false
     }
     
-    // Проверяем изолированные клетки (нет непосещенных соседей)
     for i := 0; i < totalCells; i++ {
         if s.IsUnvisited(i) {
             neighborMask := p.graph.GetNeighborMask(i)
@@ -252,10 +190,10 @@ func TestSearcherGenerateSubtasks(t *testing.T) {
     sym := symmetry.NewSymmetry(5)
     searcher := searcher.NewSearcher(graph, sym)
     
-    p := path.New(state.State(0).Visit(0), 0, 0)
-    subtasks := searcher.GenerateSubtasks(context.Background(), p, 3)
+    cache := cache.NewCache(sym)
+    result := searcher.GenerateSubtasks(context.Background(), cache, 0, 4, 3)
     
-    require.NotEmpty(t, subtasks)
+    require.Greater(t, result.CachedPaths, 0)
 }
 
 func TestSearcherDeadEndPrune(t *testing.T) {

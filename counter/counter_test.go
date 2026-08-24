@@ -10,23 +10,33 @@ import (
 	"knighttour/monitoring"
 )
 
-func TestCounterCountAllTours(t *testing.T) {
+func TestSequentalCount(t *testing.T) {
 	g := graph.New(5)
 	counter := NewCounter(g)
 
 	count := counter.ParallelCount(context.Background(), monitoring.NewFakeMonitor(), 1)
 
-	assert.NotZero(t, count, "Expected positive count for 5x5 board")
+	assert.Equal(t, uint64(1728), count, "Expected %d count for 5x5 board, got %d", 1728, count)
 }
 
-func TestCounterParallel(t *testing.T) {
+func TestParallelCount(t *testing.T) {
 	g := graph.New(5)
 	counter := NewCounter(g)
 
-	countSeq := counter.ParallelCount(context.Background(), monitoring.NewFakeMonitor(), 1)
-	countPar := counter.ParallelCount(context.Background(), monitoring.NewFakeMonitor(), 4)
+	count := counter.ParallelCount(context.Background(), monitoring.NewFakeMonitor(), 8)
 
-	assert.Equal(t, countSeq, countPar, "Sequential and parallel counts should match")
+	assert.Equal(t, uint64(1728), count, "Expected %d count for 5x5 board, got %d", 1728, count)
+}
+
+func TestParallelCountWithDepth(t *testing.T) {
+	size := 5
+	g := graph.New(size)
+	counter := NewCounter(g)
+
+	for depth := range size * size {
+		count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 8, depth)
+		assert.Equal(t, uint64(1728), count, "Expected %d count for 5x5 board, got %d", 1728, count)
+	}
 }
 
 func TestCounterFromPosition(t *testing.T) {

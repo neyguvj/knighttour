@@ -101,6 +101,9 @@ func (s State) IsHalfway(cellsCount int) bool
 
 func (s State) HalfwayPoint(cellsCount int) int
 // Возвращает индекс половины или -1 если не достигнута
+
+func (s State) String() string
+// Возвращает строковое представление в двоичном виде
 ```
 
 ## Использование в поиске

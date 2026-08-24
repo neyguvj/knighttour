@@ -5,35 +5,37 @@ import (
 	"fmt"
 	"sync/atomic"
 	"time"
-
-	"knighttour/types"
 )
 
 type Monitor interface {
-	AddTasks(tasks ...types.Subtask)
 	Start(ctx context.Context)
 	Finish()
-	RecordTaskCompletion(task types.Subtask, result types.Result)
+	AddTasks(count int)
+	ReportTaskCompleted()
+	ReportPathsFound(count int)
+	ReportPathsCached(count int)
 }
 
 type RealMonitor struct {
-	startTime          time.Time
-	totalTasks         atomic.Uint64
-	completed          atomic.Uint64
-	totalPaths         atomic.Uint64
-	connectivityPruned atomic.Uint64
+	started     atomic.Bool
+	startTime   time.Time
+	totalTasks  atomic.Uint64
+	completed   atomic.Uint64
+	totalPaths  atomic.Uint64
+	cachedPaths atomic.Uint64
 }
 
 func NewMonitor() *RealMonitor {
 	return &RealMonitor{}
 }
 
-func (m *RealMonitor) AddTasks(tasks ...types.Subtask) {
-	m.totalTasks.Add(uint64(len(tasks)))
+func (m *RealMonitor) AddTasks(count int) {
+	m.totalTasks.Add(uint64(count))
 }
 
 func (m *RealMonitor) Start(ctx context.Context) {
 	m.startTime = time.Now()
+	m.started.Store(true)
 	go func() {
 		ticker := time.NewTicker(time.Second)
 		defer ticker.Stop()
@@ -41,6 +43,9 @@ func (m *RealMonitor) Start(ctx context.Context) {
 		for {
 			select {
 			case <-ticker.C:
+				if !m.started.Load() {
+					return
+				}
 				m.report()
 			case <-ctx.Done():
 				m.report()
@@ -55,35 +60,41 @@ func (m *RealMonitor) report() {
 	completed := m.completed.Load()
 	totalTasks := m.totalTasks.Load()
 
-	if totalTasks == 0 {
-		totalTasks = 1
-	}
-
 	pct := float64(completed) / float64(totalTasks) * 100
 
 	fmt.Printf(
-		"\r[%s] Tasks: %d/%d (%.1f%%) | Total paths %d | Pruned: %d",
+		"\r[%s] Tasks: %d/%d (%.1f%%) | Total paths %d | Cached paths: %d",
 		elapsed.String(),
 		completed, totalTasks,
 		pct,
 		m.totalPaths.Load(),
-		m.connectivityPruned.Load(),
+		m.cachedPaths.Load(),
 	)
 }
 
 func (m *RealMonitor) Finish() {
+	if !m.started.Load() {
+		return
+	}
 	m.report()
+	m.started.Store(false)
 	fmt.Printf("\n=== Final ===\n")
 	fmt.Printf("Time: %s\n", time.Since(m.startTime))
 	fmt.Printf("Tasks completed: %d/%d\n", m.completed.Load(), m.totalTasks.Load())
 	fmt.Printf("Total paths: %d\n", m.totalPaths.Load())
-	fmt.Printf("Connectivity pruned: %d\n", m.connectivityPruned.Load())
+	fmt.Printf("Cached paths: %d\n", m.cachedPaths.Load())
 }
 
-func (m *RealMonitor) RecordTaskCompletion(task types.Subtask, result types.Result) {
+func (m *RealMonitor) ReportTaskCompleted() {
 	m.completed.Add(1)
-	m.totalPaths.Add(uint64(result.TotalPathsFound) * uint64(task.SymmetriesCount))
-	m.connectivityPruned.Add(uint64(result.Pruned))
+}
+
+func (m *RealMonitor) ReportPathsFound(count int) {
+	m.totalPaths.Add(uint64(count))
+}
+
+func (m *RealMonitor) ReportPathsCached(count int) {
+	m.cachedPaths.Add(uint64(count))
 }
 
 type FakeMonitor struct{}
@@ -92,8 +103,9 @@ func NewFakeMonitor() *FakeMonitor {
 	return &FakeMonitor{}
 }
 
-func (f *FakeMonitor) AddTasks(tasks ...types.Subtask)                              {}
-func (f *FakeMonitor) Start(ctx context.Context)                                    {}
-func (f *FakeMonitor) Finish()                                                      {}
-func (f *FakeMonitor) AddResult(result types.Result)                                {}
-func (f *FakeMonitor) RecordTaskCompletion(task types.Subtask, result types.Result) {}
+func (*FakeMonitor) Start(ctx context.Context)   {}
+func (*FakeMonitor) Finish()                     {}
+func (*FakeMonitor) AddTasks(count int)          {}
+func (*FakeMonitor) ReportTaskCompleted()        {}
+func (*FakeMonitor) ReportPathsFound(count int)  {}
+func (*FakeMonitor) ReportPathsCached(count int) {}

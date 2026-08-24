@@ -21,8 +21,12 @@ func main() {
 		log.Fatal("Size must be between 5 and 8")
 	}
 
+	if *precomputeDepth < 1 || *precomputeDepth > ((*size)*(*size))/2 {
+		log.Fatalf("-precompute-depth should be between 1 and %d", *size**size/2)
+	}
+
 	if *workers < 1 {
-		log.Fatal("--workers must be at least 1")
+		log.Fatal("-workers must be at least 1")
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
@@ -34,5 +38,6 @@ func main() {
 
 	g := graph.New(*size)
 	c := counter.NewCounter(g)
-	_ = c.ParallelCountWithDepth(ctx, realMonitor, *workers, *precomputeDepth)
+
+	c.ParallelCountWithDepth(ctx, realMonitor, *workers, *precomputeDepth)
 }

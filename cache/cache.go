@@ -1,6 +1,7 @@
 package cache
 
 import (
+	"context"
 	"encoding/binary"
 	"hash/fnv"
 	"sync"
@@ -98,19 +99,21 @@ func (c *Cache) ItemsCount() int {
 	return total
 }
 
-func (c *Cache) Each(f func(p path.Path, count int)) {
-	g := errgroup.Group{}
-	g.SetLimit(1)
+func (c *Cache) Each(ctx context.Context, workers int, f func(ctx context.Context, p path.Path, count int)) {
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(workers)
 	for i := range c.shards {
 		g.Go(func() error {
-			for path, count := range c.shards[i].data {
-				c.shards[i].RLock()
-				f(path, count)
-				c.shards[i].RUnlock()
+			if ctx.Err() != nil {
+				return nil
 			}
-
+			c.shards[i].RLock()
+			for path, count := range c.shards[i].data {
+				f(ctx, path, count)
+			}
+			c.shards[i].RUnlock()
 			return nil
 		})
 	}
-	g.Wait()
+	_ = g.Wait()
 }

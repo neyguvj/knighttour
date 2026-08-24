@@ -73,15 +73,11 @@ func (c *Cache) Has(path path.Path) bool
 
 func (c *Cache) Delete(path path.Path)
 // Удаление записи из кэша
-```
 
-### Дополнительные методы
-
-```go
 func (c *Cache) ItemsCount() int
 // Возвращает общее количество записей во всех шардах
 
-func (c *Cache) Each(f func(p path.Path, count int))
+func (c *Cache) Each(ctx context.Context, workers int, f func(ctx context.Context, p path.Path, count int))
 // Итерация по всем записям во всех шардах (параллельно через errgroup)
 ```
 
@@ -104,19 +100,17 @@ shardIdx := c.getShardKey(canonicalPath)
 ## Использование в Searcher/Counter
 
 ```go
-// При подсчете путей:
-canonicalPath := symmetry.CanonicalizePath(path)
+// При генерации подзадач:
+cache := cache.NewCache(symmetry)
+result := searcher.GenerateSubtasks(ctx, cache, start, orbitSize, depth)
 
-// Кэш: если уже считали это каноническое состояние — возвращаем результат
-if count, ok := cache.Get(canonicalPath); ok {
-    return Result{TotalPathsFound: count}
-}
-
-// Вычисление...
-result := dfs(...)
-
-// Сохраняем результат в кэш (суммируем при совпадении)
-cache.Set(canonicalPath, result.TotalPathsFound)
+// При параллельном подсчете:
+taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, count int) {
+    result := c.searcher.CountPathsDFS(ctx, p)
+    group := c.symmetry.GetCanonicalGroupByPosition(p.Start())
+    
+    total.Add(uint64(result.TotalPathsFound * count * group.OrbitSize))
+})
 ```
 
 ## Эффективность кэширования
@@ -237,7 +231,7 @@ func TestCacheEach(t *testing.T) {
     cache.Set(path1, 100)
     
     count := 0
-    cache.Each(func(p Path, v int) {
+    cache.Each(ctx, workers, func(p Path, v int) {
         count++
         require.Equal(t, 100, v)
     })

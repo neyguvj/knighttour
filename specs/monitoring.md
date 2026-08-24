@@ -91,36 +91,60 @@ func (m *RealMonitor) report() {
     completed := m.completed.Load()
     totalTasks := m.totalTasks.Load()
 
-    if totalTasks == 0 {
-        totalTasks = 1
-    }
-
     pct := float64(completed) / float64(totalTasks) * 100
 
     fmt.Printf(
-        "\r[%s] Tasks: %d/%d (%.1f%%) | Total paths %d | Pruned: %d",
+        "\r[%s] Tasks: %d/%d (%.1f%%) | Total paths %d | Cached paths: %d",
         elapsed.String(),
         completed, totalTasks,
         pct,
         m.totalPaths.Load(),
-        m.connectivityPruned.Load(),
+        m.cachedPaths.Load(),
     )
 }
 ```
 
-#### 4. RecordTaskCompletion(task types.Subtask, result types.Result)
+#### 4. AddTasks(count int)
 
-Регистрация завершения одной задачи (вызывается после обработки каждой канонической позиции).
+Добавить задачи в мониторинг (увеличивает totalTasks на count).
 
 ```go
-func (m *RealMonitor) RecordTaskCompletion(task types.Subtask, result types.Result) {
-    m.completed.Add(1)
-    m.totalPaths.Add(uint64(result.TotalPathsFound) * uint64(task.SymmetriesCount))
-    m.connectivityPruned.Add(uint64(result.Pruned))
+func (m *RealMonitor) AddTasks(count int) {
+    m.totalTasks.Add(uint64(count))
 }
 ```
 
-#### 5. Finish()
+#### 5. ReportTaskCompleted()
+
+Регистрация завершения одной задачи.
+
+```go
+func (m *RealMonitor) ReportTaskCompleted() {
+    m.completed.Add(1)
+}
+```
+
+#### 6. ReportPathsFound(count int)
+
+Зарегистрировать найденные пути (с учетом орбит).
+
+```go
+func (m *RealMonitor) ReportPathsFound(count int) {
+    m.totalPaths.Add(uint64(count))
+}
+```
+
+#### 7. ReportPathsCached(count int)
+
+Зарегистрировать закэшированные пути.
+
+```go
+func (m *RealMonitor) ReportPathsCached(count int) {
+    m.cachedPaths.Add(uint64(count))
+}
+```
+
+#### 8. Finish()
 
 Финальный отчёт с переводом строки:
 
@@ -131,7 +155,7 @@ func (m *RealMonitor) Finish() {
     fmt.Printf("Time: %s\n", time.Since(m.startTime))
     fmt.Printf("Tasks completed: %d/%d\n", m.completed.Load(), m.totalTasks.Load())
     fmt.Printf("Total paths: %d\n", m.totalPaths.Load())
-    fmt.Printf("Connectivity pruned: %d\n", m.connectivityPruned.Load())
+    fmt.Printf("Cached paths: %d\n", m.cachedPaths.Load())
 }
 ```
 
@@ -149,21 +173,41 @@ func (r *Result) Add(other Result)
 // Суммирует поля result и other
 ```
 
-### Subtask
+## Использование в Counter
+
+### Генерация подзадач через кэш
+
+### Генерация подзадач через кэш
 
 ```go
-type Subtask struct {
-    State           state.State  // битовая маска состояния
-    Start           int          // начальная позиция
-    End             int          // конечная позиция
-    Depth           int          // глубина предварительного разбиения (0 по умолчанию)
-    SymmetriesCount int          // количество симметричных вариантов
+func (c *Counter) generateSubTasks(
+    ctx context.Context,
+    monitor monitoring.Monitor,
+    workers int,
+    precomputeDepth int,
+) *cache.Cache {
+    cache := cache.NewCache(c.symmetry)
+    groups := c.symmetry.GetCanonicalGroups()
+    monitor.AddTasks(len(groups))
+
+    g, ctx := errgroup.WithContext(ctx)
+    g.SetLimit(workers)
+    g.Go(func() error {
+        for _, group := range groups {
+            p := group.Canonical
+            result := c.searcher.GenerateSubtasks(ctx, cache, p, group.OrbitSize, precomputeDepth)
+            monitor.ReportPathsCached(result.CachedPaths)
+            monitor.ReportTaskCompleted()
+        }
+        return nil
+    })
+    _ = g.Wait()
+
+    return cache
 }
 ```
 
-## Использование в Counter
-
-### Параллельный режим подсчёта
+### Параллельный подсчет с кэшем
 
 ```go
 func (c *Counter) ParallelCountWithDepth(
@@ -172,37 +216,19 @@ func (c *Counter) ParallelCountWithDepth(
     workers int,
     precomputeDepth int,
 ) uint64 {
-    groups := c.symmetry.GetCanonicalGroups()
-
-    var allSubtasks []types.Subtask
-    for _, group := range groups {
-        subtasks := c.searcher.GenerateSubtasksWithMetadata(
-            ctx, 
-            group.Canonical, 
-            group.OrbitSize, 
-            precomputeDepth,
-        )
-        allSubtasks = append(allSubtasks, subtasks...)
-    }
-
-    monitor.AddTasks(allSubtasks...)
+    taskCache := c.generateSubTasks(ctx, monitor, workers, precomputeDepth)
+    monitor.AddTasks(taskCache.ItemsCount())
 
     total := atomic.Uint64{}
-    g, _ := errgroup.WithContext(ctx)
-    g.SetLimit(workers)
+    taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, count int) {
+        result := c.searcher.CountPathsDFS(ctx, p)
+        group := c.symmetry.GetCanonicalGroupByPosition(p.Start())
 
-    for _, task := range allSubtasks {
-        g.Go(func() error {
-            p := path.New(task.State, task.Start, task.End)
-            result := c.searcher.CountPathsDFS(ctx, p)
+        total.Add(uint64(result.TotalPathsFound * count * group.OrbitSize))
+        monitor.ReportPathsFound(result.TotalPathsFound * count * group.OrbitSize)
+        monitor.ReportTaskCompleted()
+    })
 
-            total.Add(uint64(result.TotalPathsFound * task.SymmetriesCount))
-            monitor.RecordTaskCompletion(task, result)
-            return nil
-        })
-    }
-
-    _ = g.Wait()
     return total.Load()
 }
 ```
@@ -238,10 +264,12 @@ func NewFakeMonitor() *FakeMonitor {
     return &FakeMonitor{}
 }
 
-func (f *FakeMonitor) AddTasks(tasks ...types.Subtask)                              {}
-func (f *FakeMonitor) Start(ctx context.Context)                                    {}
-func (f *FakeMonitor) Finish()                                                      {}
-func (f *FakeMonitor) RecordTaskCompletion(task types.Subtask, result types.Result) {}
+func (*FakeMonitor) Start(ctx context.Context)      {}
+func (*FakeMonitor) Finish()                        {}
+func (*FakeMonitor) AddTasks(count int)             {}
+func (*FakeMonitor) ReportTaskCompleted()           {}
+func (*FakeMonitor) ReportPathsFound(count int)     {}
+func (*FakeMonitor) ReportPathsCached(count int)    {}
 ```
 
 Пустая реализация всех методов интерфейса для тестов.
@@ -265,20 +293,3 @@ func (f *FakeMonitor) RecordTaskCompletion(task types.Subtask, result types.Resu
 - Мьютексы не нужны для обновления счётчиков
 - Таймер с таймаутом не накапливает задержки
 - Финальный отчёт выводится один раз при завершении
-
-## Пример вывода
-
-```
-[00:15:23] Tasks: 6/6 (100.0%) | Total paths 1728 | Pruned: 116606
-=== Final ===
-Time: 15s
-Tasks completed: 6/6
-Total paths: 1728
-Connectivity pruned: 116606
-```
-
-## Возможные улучшения
-
-- Добавить кэш hit/miss статистику (требует изменения Cache API)
-- Добавить память и CPU usage мониторинг
-- Поддержка прогресс-бара в формате [=====  ] 50%

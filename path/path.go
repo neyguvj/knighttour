@@ -28,5 +28,5 @@ func (p Path) End() int {
 }
 
 func (p Path) String() string {
-	return fmt.Sprintf("%d -> %d (%s)", p.start, p.end, p.state.String())
+	return fmt.Sprintf("[%d -> %d (%s)]", p.start, p.end, p.state.String())
 }

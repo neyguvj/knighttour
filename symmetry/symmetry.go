@@ -55,7 +55,6 @@ func NewSymmetry(size int) *Symmetry {
 	}
 
 	s.groups = s.buildCanonicalGroups()
-
 	return s
 }
 
@@ -83,6 +82,16 @@ type CanonicalGroup struct {
 
 func (s *Symmetry) GetCanonicalGroups() []CanonicalGroup {
 	return s.groups
+}
+
+func (s *Symmetry) GetCanonicalGroupByPosition(pos int) CanonicalGroup {
+	canonicalPos := s.GetCanonicalPosition(pos)
+	for _, g := range s.groups {
+		if g.Canonical == canonicalPos {
+			return g
+		}
+	}
+	return s.groups[0]
 }
 
 func (s *Symmetry) CanonicalizePath(p path.Path) path.Path {
@@ -143,7 +152,9 @@ func (s *Symmetry) buildCanonicalGroups() []CanonicalGroup {
 		sort.Ints(g.Positions)
 		groups = append(groups, *g)
 	}
-
+	sort.Slice(groups, func(i, j int) bool {
+		return groups[i].Canonical < groups[j].Canonical
+	})
 	return groups
 }
 

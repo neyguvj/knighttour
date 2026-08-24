@@ -93,19 +93,12 @@ func (s *Symmetry) CanonicalizePath(p path.Path) path.Path
 ```go
 groups := symmetry.GetCanonicalGroups()
 for _, group := range groups {
-    // group.Canonical — стартовая позиция для поиска
-    // group.OrbitSize — множитель для результатов
+    // Группа канонических позиций с размером орбиты group.OrbitSize
     
-    subtasks := searcher.GenerateSubtasksWithMetadata(
-        ctx,
-        group.Canonical,
-        group.OrbitSize,  // передается как orbitSize
-        depth,
-    )
+    cache := cache.NewCache(symmetry)
+    result := searcher.GenerateSubtasks(ctx, cache, group.Canonical, group.OrbitSize, depth)
     
-    for _, task := range subtasks {
-        // task.SymmetriesCount = orbitSize * countOfCanonicalForms
-    }
+    // Кэш содержит подзадачи с количеством решений
 }
 ```
 
@@ -121,20 +114,29 @@ if count, found := c.shards[shardIdx].data[canonicalPath]; found {
 }
 ```
 
-## Использование в Searcher
+## Использование в Counter
 
 ```go
-// В GenerateSubtasksWithMetadata:
-for _, task := range rawSubtasks {
-    canonicalState := s.sym.CanonicalizePath(task)
-    canonizedTasks[canonicalState]++
+groups := symmetry.GetCanonicalGroups()
+for _, group := range groups {
+    // Группа канонических позиций с размером орбиты group.OrbitSize
+    
+    cache := cache.NewCache(symmetry)
+    result := searcher.GenerateSubtasks(ctx, cache, group.Canonical, group.OrbitSize, depth)
+    
+    // Кэш содержит подзадачи с количеством решений
 }
+```
 
-for task, count := range canonizedTasks {
-    subtasks = append(subtasks, types.Subtask{
-        SymmetriesCount: orbitSize * count,
-        // ...
-    })
+## Использование в Cache
+
+```go
+// Кэш использует CanonicalizePath для объединения симметричных путей:
+canonicalPath := c.symmetry.CanonicalizePath(path)
+shardIdx := c.getShardKey(canonicalPath)
+
+if count, found := c.shards[shardIdx].data[canonicalPath]; found {
+    // кэш-попадание
 }
 ```
 
