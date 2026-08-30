@@ -15,8 +15,8 @@
 
 ```bash
 go run main.go        # Build & run
-make check            # fmt + vet + test -race + автофиксы + линтер
-make bench            # Бенчмарки (counter/)
+make check            # fmt + vet + test -race + auto-fixes + linter
+make bench            # Benchmarks (counter/)
 ```
 
 ## Chat settings
@@ -93,7 +93,7 @@ Run benchmarks with:
 
 ```bash
 make bench
-# или напрямую:
+# or directly:
 go test -v -bench=. -run=^$ -benchmem ./counter/
 ```
 

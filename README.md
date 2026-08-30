@@ -114,8 +114,11 @@ go run main.go -size 6 -workers 14 -precompute-depth 4
 ## Бенчмарки
 
 ```bash
-# Запуск бенчмарков
-go test -bench=. -run=^$ -benchmem ./counter/
+# Запуск бенчмарков (counter/, -benchtime=10x)
+make bench
+
+# или напрямую
+go test -v -run=^$ -bench=. -benchmem ./counter/
 
 # Пример вывода (Apple M4 Max, darwin/arm64)
 BenchmarkCountAllToursParallel-14    381   3066260 ns/op   12328 B/op   221 allocs/op
@@ -128,9 +131,22 @@ BenchmarkCountAllToursParallel-14    381   3066260 ns/op   12328 B/op   221 allo
 
 ## Проверка кода
 
+Полная проверка одной командой:
+
 ```bash
-# Локальный запуск
-go test -race ./...    # Тесты с проверкой гонок данных
-go vet ./...           # Статический анализ
-go fmt ./...           # Форматирование кода
+make check    # fmt → vet → test -race → fix (автофиксы) → lint
 ```
+
+Отдельные цели Makefile:
+
+| Команда | Что выполняет |
+|---------|---------------|
+| `make build` | `go build ./...` |
+| `make fmt` | `go fmt ./...` |
+| `make vet` | `go vet ./...` |
+| `make test` | `go test -race ./...` — тесты с проверкой гонок данных |
+| `make fix` | `go fix ./...` + `golangci-lint run --fix ./...` — автофиксы современных идиом |
+| `make lint` | `golangci-lint run ./...` — статический анализ |
+| `make bench` | Бенчмарки пакета `counter/` |
+| `make clean` | `go clean -testcache` |
+
