@@ -80,6 +80,15 @@ func (s State) TrailingZeroBits() uint
 // Возвращает номер первого установленного бита (LSB)
 // Использует bits.TrailingZeros64 для оптимальной производительности
 
+func (s State) AllVisited() iter.Seq[int]
+// Итератор по позициям всех посещенных клеток (по возрастанию)
+// Позволяет обходить множество без прямых битовых операций в коде вызывающих:
+//   for pos := range st.AllVisited() { ... }
+
+func Bit(pos int) State
+// Пакетная функция: маска с одним установленным битом pos (1 << pos)
+// Единственное разрешенное место создания побитовых масок извне пакета state
+
 func (s State) ShiftLeft(n int) State
 // Сдвиг влево на n битов
 
@@ -108,32 +117,23 @@ func (s State) String() string
 
 ## Использование в поиске
 
+State — основной тип горячего цикла DFS (см. `searcher.dfs`), упрощённо (без depth/кэша):
+
 ```go
-func dfs(state State, currentPos int) Result {
-    totalCells := graph.GetTotalCells()
-    
-    // Проверка завершения
-    if state.IsFull(totalCells) {
-        return Result{TotalPathsFound: 1}
-    }
-    
-    // Кэш: проверяем наличие канонической формы
-    canonicalPath := symmetry.CanonicalizePath(Path{state: state, start: start, end: currentPos})
-    if count, ok := cache.Get(canonicalPath); ok {
-        return Result{TotalPathsFound: count}
-    }
-    
-    var result Result
-    for _, neighbor := range graph.GetNeighbors(currentPos) {
-        if !state.IsVisited(neighbor) && !deadend.ShouldPrune(Path{state: state.Visit(neighbor), start: start, end: neighbor}) {
-            newState := state.Visit(neighbor)
-            childResult := dfs(newState, neighbor)
-            result.Add(childResult)
+func dfs(st state.State, end int) int {
+    // маска непосещенных клеток и кандидаты хода
+    unvisited := st.Invert(graph.GetTotalCells())
+    cand := graph.GetNeighborMask(end).Intersect(unvisited)
+
+    found := 0
+    for n := range cand.AllVisited() { // итератор без прямых битовых операций
+        newUnvisited := unvisited.Unvisit(n)
+        if !newUnvisited.IsEmpty() && deadend.ShouldPruneAfterVisit(n, newUnvisited) {
+            continue
         }
+        found += dfs(st.Visit(n), n)
     }
-    
-    cache.Set(canonicalPath, result.TotalPathsFound)
-    return result
+    return found
 }
 ```
 

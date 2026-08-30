@@ -22,17 +22,25 @@
 ## Структура данных
 
 ```go
-type Transform func(x, y, size int) (int, int)
+type Transform func(x, y, size int) (int, int) // сохранён для API/GetSymmetries
 
 type Symmetry struct {
-    size                int
-    transforms          []Transform        // 8 преобразований
-    canonical           []int              // каноническая позиция для каждой клетки
-    canonicalTransforms []Transform        // лучшее преобразование для каждой клетки
-    orbitSize           []int              // размер орбиты для каждой клетки
-    bestTransforms      [][]Transform      // оптимальное преобразование для пар (start, end)
+    size          int
+    perms         [8][64]uint8 // LUT: perms[t][pos] — образ клетки при t-м преобразовании (строится один раз из замыканий)
+    canonical     []int        // каноническая позиция для каждой клетки
+    canonicalIdx  []uint8      // индекс лучшего преобразования для каждой клетки
+    orbitSize     []int        // размер орбиты для каждой клетки
+    bestIdx       [][]uint8    // индекс оптимального преобразования для пар (start, end)
+    groups        []CanonicalGroup // предвычисленные канонические группы
 }
 ```
+
+**Оптимизация:** горячий путь (`CanonicalizePath`, `transformState`) не использует
+замыкания `Transform` и деление/остаток — только подстановку в LUT. `transformState`
+перебирает установленные биты маски (O(посещённых)), а не все клетки доски. Замыкания
+вызываются ровно один раз при построении `perms`. Выбор преобразования для пары
+(start, end) побитово повторял прежнюю логику (argmin по newEnd среди t, переводящих
+start в канонический).
 
 ## Основные методы
 
@@ -74,7 +82,10 @@ type CanonicalGroup struct {
 }
 
 func (s *Symmetry) GetCanonicalGroups() []CanonicalGroup
-// Возвращает все группы канонических позиций
+// Возвращает все группы канонических позиций (предвычислены при создании)
+
+func (s *Symmetry) GetCanonicalGroupByPosition(pos int) CanonicalGroup
+// Возвращает группу, содержащую данную позицию
 ```
 
 ### 5. Канонизация пути
@@ -86,32 +97,6 @@ func (s *Symmetry) CanonicalizePath(p path.Path) path.Path
 // 1. Находит оптимальное преобразование для пары (start, end)
 // 2. Применяет это преобразование к start, end и state
 // 3. Возвращает канонический путь
-```
-
-## Использование в Counter
-
-```go
-groups := symmetry.GetCanonicalGroups()
-for _, group := range groups {
-    // Группа канонических позиций с размером орбиты group.OrbitSize
-    
-    cache := cache.NewCache(symmetry)
-    result := searcher.GenerateSubtasks(ctx, cache, group.Canonical, group.OrbitSize, depth)
-    
-    // Кэш содержит подзадачи с количеством решений
-}
-```
-
-## Использование в Cache
-
-```go
-// Кэш использует CanonicalizePath для объединения симметричных путей:
-canonicalPath := c.symmetry.CanonicalizePath(path)
-shardIdx := c.getShardKey(canonicalPath)
-
-if count, found := c.shards[shardIdx].data[canonicalPath]; found {
-    // кэш-попадание
-}
 ```
 
 ## Использование в Counter

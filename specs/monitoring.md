@@ -6,7 +6,7 @@
 - Время выполнения
 - Количество обработанных/оставшихся задач (канонических позиций)
 - Количество найденных путей
-- Эффективность pruning (отсечение по Dead-end)
+- Количество закэшированных путей
 
 ## Требования
 
@@ -17,12 +17,12 @@
 ### Информация в отчете
 Каждый отчёт должен содержать:
 ```
-[время] Tasks: [выполнено]/[всего] (%) | Total paths [всего] | Pruned: [отсечений]
+[время] Tasks: [выполнено]/[всего] (%) | Total paths [всего] | Cached paths: [закэшировано]
 ```
 
 **Пример:**
 ```
-[00:05:23] Tasks: 12/24 (50.0%) | Total paths 1564839 | Pruned: 23
+[00:05:23] Tasks: 12/24 (50.0%) | Total paths 1564839 | Cached paths: 4210
 ```
 
 ## Интерфейс Monitor
@@ -31,17 +31,16 @@
 
 ```go
 type RealMonitor struct {
-    startTime          time.Time
-    totalTasks         atomic.Uint64  // общее количество задач (subtasks)
-    completed          atomic.Uint64  // завершенные задачи
-    totalPaths         atomic.Uint64  // найденные пути (с учетом SymmetriesCount)
-    connectivityPruned atomic.Uint64  // отсечено по Dead-end pruner
+    started     atomic.Bool    // флаг запущенного мониторинга
+    startTime   time.Time
+    totalTasks  atomic.Uint64  // общее количество задач (subtasks)
+    completed   atomic.Uint64  // завершенные задачи
+    totalPaths  atomic.Uint64  // найденные пути (с учетом орбит)
+    cachedPaths atomic.Uint64  // закэшированные пути
 }
 ```
 
 Все счётчики используют `atomic.Uint64` для потокобезопасного доступа без мьютексов.
-
-**Примечание:** В текущей реализации `connectivityPruned` на самом деле содержит счетчик `DeadEndPruner` отсечений.
 
 ### Методы
 
@@ -64,6 +63,7 @@ func NewMonitor() *RealMonitor {
 ```go
 func (m *RealMonitor) Start(ctx context.Context) {
     m.startTime = time.Now()
+    m.started.Store(true)
     go func() {
         ticker := time.NewTicker(time.Second)
         defer ticker.Stop()
@@ -71,6 +71,9 @@ func (m *RealMonitor) Start(ctx context.Context) {
         for {
             select {
             case <-ticker.C:
+                if !m.started.Load() {
+                    return
+                }
                 m.report()
             case <-ctx.Done():
                 m.report()
@@ -150,7 +153,11 @@ func (m *RealMonitor) ReportPathsCached(count int) {
 
 ```go
 func (m *RealMonitor) Finish() {
+    if !m.started.Load() {
+        return
+    }
     m.report()  // выводит последнее состояние
+    m.started.Store(false)
     fmt.Printf("\n=== Final ===\n")
     fmt.Printf("Time: %s\n", time.Since(m.startTime))
     fmt.Printf("Tasks completed: %d/%d\n", m.completed.Load(), m.totalTasks.Load())
@@ -166,7 +173,7 @@ func (m *RealMonitor) Finish() {
 ```go
 type Result struct {
     TotalPathsFound int  // найденные пути в поддереве
-    Pruned          int  // отсечено по Dead-end pruner
+    CachedPaths     int  // количество закэшированных путей (в GenerateSubtasks)
 }
 
 func (r *Result) Add(other Result)
@@ -174,8 +181,6 @@ func (r *Result) Add(other Result)
 ```
 
 ## Использование в Counter
-
-### Генерация подзадач через кэш
 
 ### Генерация подзадач через кэш
 
@@ -192,15 +197,15 @@ func (c *Counter) generateSubTasks(
 
     g, ctx := errgroup.WithContext(ctx)
     g.SetLimit(workers)
-    g.Go(func() error {
-        for _, group := range groups {
-            p := group.Canonical
+    for _, group := range groups {
+        p := group.Canonical
+        g.Go(func() error {
             result := c.searcher.GenerateSubtasks(ctx, cache, p, group.OrbitSize, precomputeDepth)
             monitor.ReportPathsCached(result.CachedPaths)
             monitor.ReportTaskCompleted()
-        }
-        return nil
-    })
+            return nil
+        })
+    }
     _ = g.Wait()
 
     return cache
@@ -222,10 +227,10 @@ func (c *Counter) ParallelCountWithDepth(
     total := atomic.Uint64{}
     taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, count int) {
         result := c.searcher.CountPathsDFS(ctx, p)
-        group := c.symmetry.GetCanonicalGroupByPosition(p.Start())
+        orbits := uint64(c.symmetry.GetOrbitSize(p.Start()))
 
-        total.Add(uint64(result.TotalPathsFound * count * group.OrbitSize))
-        monitor.ReportPathsFound(result.TotalPathsFound * count * group.OrbitSize)
+        total.Add(uint64(result.TotalPathsFound*count) * orbits)
+        monitor.ReportPathsFound(result.TotalPathsFound * count * int(orbits))
         monitor.ReportTaskCompleted()
     })
 
@@ -238,8 +243,9 @@ func (c *Counter) ParallelCountWithDepth(
 ### Флаги командной строки (main.go)
 
 ```go
+size := flag.Int("size", 5, "Board size (5-8)")
 workers := flag.Int("workers", 1, "Number of workers for parallel search")
-precomputeDepth := flag.Int("precompute-depth", counter.DefaultPrecomputeDepth, "Precompute depth")
+precomputeDepth := flag.Int("precompute-depth", counter.DefaultPrecomputeDepth, "Precompute depth for subtasks")
 ```
 
 ### Примеры

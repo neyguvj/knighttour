@@ -2,10 +2,15 @@ package state
 
 import (
 	"fmt"
+	"iter"
 	"math/bits"
 )
 
 type State uint64
+
+func Bit(pos int) State {
+	return 1 << uint64(pos)
+}
 
 func NewState(visited ...int) State {
 	state := State(0)
@@ -75,6 +80,16 @@ func (s State) IsEmpty() bool {
 
 func (s State) TrailingZeroBits() uint {
 	return uint(bits.TrailingZeros64(uint64(s)))
+}
+
+func (s State) AllVisited() iter.Seq[int] {
+	return func(yield func(int) bool) {
+		for m := uint64(s); m != 0; m &= m - 1 {
+			if !yield(bits.TrailingZeros64(m)) {
+				return
+			}
+		}
+	}
 }
 
 func (s State) AndNot(mask State) State {

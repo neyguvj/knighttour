@@ -2,8 +2,6 @@ package cache
 
 import (
 	"context"
-	"encoding/binary"
-	"hash/fnv"
 	"sync"
 
 	"knighttour/path"
@@ -35,11 +33,9 @@ func NewCache(sym *symmetry.Symmetry) *Cache {
 }
 
 func (c *Cache) getShardKey(p path.Path) int {
-	h := fnv.New64a()
-	buf := make([]byte, 8)
-	binary.BigEndian.PutUint64(buf, uint64(p.State()))
-	h.Write(buf)
-	return int(h.Sum64() % numShards)
+	// Бесаллокационный хэш: умножение на золотое сечение, старшие биты.
+	h := uint64(p.State())*0x9E3779B97F4A7C15 + uint64(p.End())*0xC2B2AE3D27D4EB4F
+	return int(h >> (64 - 6)) // numShards = 64
 }
 
 func (c *Cache) Get(path path.Path) (int, bool) {

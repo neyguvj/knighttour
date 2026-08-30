@@ -11,7 +11,6 @@
 
 ```go
 type Counter struct {
-    cache    *Cache           // для мемоизации результатов
     graph    *Graph           // граф смежности
     symmetry *Symmetry        // для канонических групп и размеров орбит
     searcher *Searcher        // для выполнения поиска
@@ -21,8 +20,8 @@ type Counter struct {
 ## Константы
 
 ```go
-const DefaultPrecomputeDepth = 0
-// Глубина предварительного разбиения задач (по умолчанию без разбиения)
+const DefaultPrecomputeDepth = 1
+// Глубина предварительного разбиения задач по умолчанию
 ```
 
 ## Инициализация
@@ -73,14 +72,14 @@ func (c *Counter) ParallelCountWithDepth(
 **Алгоритм:**
 1. Создать кэш с помощью `cache.NewCache(symmetry)`
 2. Получить группы канонических позиций: `symmetry.GetCanonicalGroups()`
-3. Для каждой группы вызвать `searcher.GenerateSubtasks(ctx, cache, canonicalPos, orbitSize, depth)` для предварительного разбиения
+3. Для каждой группы вызвать `searcher.GenerateSubtasks(ctx, cache, canonicalPos, orbitSize, depth)` для предварительного разбиения; генерация групп **параллельна** через тот же `errgroup` с `SetLimit(workers)` (раньше вся генерация шла в одной горутине)
 4. Добавить количество групп в мониторинг через `monitor.AddTasks(len(groups))`
 5. После генерации подзадач добавить их количество (`taskCache.ItemsCount()`)
 6. Запустить worker pool с лимитом workers через `errgroup.Group`
 7. Для каждой записи в кэше:
    - Получить канонический путь и количество решений
    - Вызвать `CountPathsDFS` для подсчета путей из этого состояния
-   - Найти группу с помощью `GetCanonicalGroupByPosition(p.Start())`
+   - Размер орбиты брать из предвычисленного `symmetry.GetOrbitSize(p.Start())` (O(1) таблица вместо линейного скана групп)
    - Умножить результат на `count * group.OrbitSize` и добавить к общему счетчику
    - Зарегистрировать завершение через `monitor.ReportPathsFound()` и `monitor.ReportTaskCompleted()`
 8. Вернуть суммарное количество путей
@@ -130,7 +129,7 @@ type Monitor interface {
 func main() {
     size := flag.Int("size", 5, "Board size (5-8)")
     workers := flag.Int("workers", 1, "Number of workers for parallel search")
-    precomputeDepth := flag.Int("precompute-depth", counter.DefaultPrecomputeDepth, "Precompute depth")
+    precomputeDepth := flag.Int("precompute-depth", counter.DefaultPrecomputeDepth, "Precompute depth for subtasks")
 
     flag.Parse()
 
@@ -143,7 +142,7 @@ func main() {
 
     g := graph.New(*size)
     c := counter.NewCounter(g)
-    _ = c.ParallelCountWithDepth(ctx, realMonitor, *workers, *precomputeDepth)
+    c.ParallelCountWithDepth(ctx, realMonitor, *workers, *precomputeDepth)
 }
 ```
 
@@ -240,7 +239,7 @@ func TestCounterFromPosition(t *testing.T) {
 // НЕПРАВИЛЬНО:
 total := uint64(0)
 for start := 0; start < graph.GetTotalCells(); start++ {
-    total += searcher.CountPaths(ctx, start) // каждый старт обрабатывается повторно
+    total += searcher.CountPaths(ctx, start).TotalPathsFound // каждый старт обрабатывается повторно
 }
 
 // ПРАВИЛЬНО:
@@ -267,7 +266,8 @@ for _, task := range tasks {
 total := atomic.Uint64{}
 g.Go(func() error {
     result := searcher.CountPaths(ctx, p)
-    total.Add(uint64(result.TotalPathsFound * task.SymmetriesCount))
+    orbits := uint64(symmetry.GetOrbitSize(p.Start()))
+    total.Add(uint64(result.TotalPathsFound) * orbits)
     return nil
 })
 ```
@@ -277,7 +277,6 @@ g.Go(func() error {
 1. **Dynamic load balancing**: Перераспределение работы между workers на основе времени выполнения
 2. **Checkpointing**: Промежуточное сохранение результатов (для долгих расчетов)
 3. **Adaptive parallelism**: Количество workers зависит от размера доски и доступных ядер
-4. **Detailed statistics**: Более детальная статистика по каждому классу эквивалентности
 
 ## Заключение
 

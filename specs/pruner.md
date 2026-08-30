@@ -8,136 +8,107 @@ Dead-end pruning — отсечение ветвей дерева поиска, 
 
 ```go
 type DeadEndPruner struct {
-    graph *Graph  // граф смежности для получения соседей
+    graph *graph.Graph  // граф смежности (хранится ссылка, без копирования)
 }
 ```
 
 ### Методы
 
-#### NewDeadEndPruner(graph *Graph) *DeadEndPruner
+#### NewDeadEndPruner(graph *graph.Graph) *DeadEndPruner
 
-Создает новый pruner с заданным графом.
+Создает новый pruner: сохраняет ссылку на граф (O(1), без предвычисления масок).
 
-#### ShouldPrune(path path.Path) bool
+#### ShouldPruneAfterVisit(last int, unvisited state.State) bool
 
-Проверяет, нужно ли отсечь путь. Возвращает `true` если:
-- Есть изолированная непосещенная клетка (без непосещенных соседей)
-- Осталась одна клетка и её нельзя достичь из текущей позиции
+Горячий метод для DFS-прунинга за O(deg(last)) вместо O(N²). Вызывается сразу после
+посещения клетки `last` родителем, который сам прошёл проверку (инвариант: среди
+непосещённых нет изолированных, кроме случая одной оставшейся клетки).
+
+**Инвариант/корректность:** посещение `last` может изолировать только непосещённых
+соседей самой клетки `last`, поэтому полный скан всех клеток не требуется.
 
 **Алгоритм:**
-1. Если все клетки посещены → не отсекать
-2. Если осталась одна клетка:
-   - Проверить достижимость через `GetNeighborMask` и пересечение с текущей позицией
-   - Если текущая позиция и последняя клетка не соединены → отсечь
-3. Для каждой непосещенной клетки проверить, есть ли у нее непосещенные соседи (через `Intersect(unvisitedMask)`)
-4. Если найдена изолированная клетка → отсечь
+1. Если непосещённых нет → не отсекать
+2. Если осталась одна клетка: отсечь, если она не соседняя к `last` (текущему концу пути)
+3. Иначе: для каждого непосещённого соседа `u` клетки `last` проверить
+   `neighborMask(u) & unvisited == 0`; если нашёлся → отсечь
+
+Маски соседей прунер не копирует — каждый вызов `GetNeighborMask` читает предвычисленную
+маску графа за O(1).
 
 ## Использование в Searcher
 
-```go
-type Searcher struct {
-    graph   *Graph
-    deadend *DeadEndPruner
-}
+`Searcher` хранит прунер в поле `deadend *pruner.DeadEndPruner` (создаётся один раз в
+`NewSearcher`). В горячем DFS (`dfs`) проверка выполняется сразу после попытки посещения
+клетки `n`, до рекурсии — если остались непосещённые клетки и ветвь тупиковая, она
+отсекается:
 
-func (s *Searcher) countPathsDFS(ctx context.Context, p path.Path, onResult func(path.Path) (stop bool)) {
-    if onResult(p) {
-        return
+```go
+func (s *Searcher) dfs(ctx context.Context, st state.State, start, end, depth int, c *cache.Cache, cached *int) int {
+    if ctx.Err() != nil {
+        return 0
     }
-    
-    neighbors := s.graph.GetNeighbors(p.End())
-    for _, neighbor := range neighbors {
-        if p.State().IsVisited(neighbor) {
-            continue
+
+    if st.CountBits() >= depth { // достигнута глубина префикса — пишем в кэш
+        if c != nil {
+            c.Set(path.New(st, start, end), 1)
+            *cached++
         }
-        
-        newState := p.State().Visit(neighbor)
-        newPos := path.New(newState, p.Start(), neighbor)
-        
-        if s.deadend.ShouldPrune(newPos) {
-            continue  // пропускаем отсеченную ветвь
-        }
-        
-        s.countPathsDFS(ctx, newPos, onResult)
+        return 1
     }
+
+    unvisited := st.Invert(s.graph.GetTotalCells())
+    cand := s.graph.GetNeighborMask(end).Intersect(unvisited)
+
+    found := 0
+    for n := range cand.AllVisited() {
+        newUnvisited := unvisited.Unvisit(n)
+        if !newUnvisited.IsEmpty() && s.deadend.ShouldPruneAfterVisit(n, newUnvisited) {
+            continue // пропускаем отсеченную ветвь
+        }
+        found += s.dfs(ctx, st.Visit(n), start, n, depth, c, cached)
+    }
+    return found
 }
 ```
+
+Проверка `!newUnvisited.IsEmpty()` вынесена в условие: если после посещения `n`
+непосещённых не осталось — это завершённый маршрут, а не тупик.
 
 ## Примеры
 
 ### Изолированная клетка
 
 ```go
-// Доска 5×5
+// Доска 5×5, только что посетили клетку 7
 graph := graph.New(5)
-
-// Посещены: 0, 1, 2. Остались непосещенные.
-s := state.NewState(0, 1, 2)
-p := path.New(s, 0, 2)
-
 deadend := pruner.NewDeadEndPruner(graph)
-shouldPrune := deadend.ShouldPrune(p)  // true если есть изолированные клетки
+
+// Непосещённые: 0, 2, 4, 6. Клетка 0 изолирована и является соседом 7.
+unvisited := state.NewState(0, 2, 4, 6)
+shouldPrune := deadend.ShouldPruneAfterVisit(7, unvisited) // true
 ```
 
 ### Одна оставшаяся клетка
 
 ```go
-// Доска 5×5, почти полная
-s := state.State((1 << 25) - 2)  // все кроме клетки 0
-p := path.New(s, 6, 6)           // в позиции 6, осталось посетить только 0
-
-deadend.ShouldPrune(p)  // true если нет пути из 6 в 0 через непосещенные
+// Доска 5×5, осталась только клетка 12 (центр), последняя позиция 24
+unvisited := state.Bit(12)
+deadend.ShouldPruneAfterVisit(24, unvisited) // true — 12 не соседняя к 24
 ```
 
-## Тесты
+## Тесты (`pruner/deadend_test.go`)
 
-```go
-func TestDeadEndPruner_EmptyState(t *testing.T) {
-    graph := graph.New(5)
-    pruner := pruner.NewDeadEndPruner(graph)
-    
-    s := state.State(0)  // пустое состояние
-    p := path.New(s, 0, 0)
-    
-    require.False(t, pruner.ShouldPrune(p))
-}
+Отдельные тесты на каждый случай:
 
-func TestDeadEndPruner_FullState(t *testing.T) {
-    graph := graph.New(5)
-    pruner := pruner.NewDeadEndPruner(graph)
-    
-    s := state.State((1 << 25) - 1)  // все клетки посещены
-    p := path.New(s, 0, 0)
-    
-    require.False(t, pruner.ShouldPrune(p))
-}
+- `TestShouldPruneAfterVisit_NoUnvisited` — нет непосещённых клеток → не отсекать
+- `TestShouldPruneAfterVisit_SingleUnvisitedReachable` / `..._Unreachable` — одна оставшаяся клетка (соседняя / недоступная)
+- `TestShouldPruneAfterVisit_IsolatedVertexCorner` / `..._Center` / `..._TwoIsolatedVertices` — изолированные клетки
+- `TestShouldPruneAfterVisit_ValidPathNotPruned` — валидные продолжения не отсекаются
 
-func TestDeadEndPruner_IsolatedCell(t *testing.T) {
-    graph := graph.New(5)
-    pruner := pruner.NewDeadEndPruner(graph)
-    
-    // Посещены: все кроме клетки 3 и её соседей. Клетка 3 изолирована.
-    s := state.State((1 << 25) - (1 << 3))  // все посещены кроме 3
-    p := path.New(s, 0, 0)
-    
-    shouldPrune := pruner.ShouldPrune(p)  // true если 3 изолирована
-    
-    require.True(t, shouldPrune)
-}
-
-func TestDeadEndPruner_LastCellUnreachable(t *testing.T) {
-    graph := graph.New(5)
-    pruner := pruner.NewDeadEndPruner(graph)
-    
-    // Осталась одна клетка 10, но она не соединена с текущей позицией
-    s := state.State((1 << 25) - (1 << 10))
-    p := path.New(s, 0, 0)  // текущая позиция 0
-    
-    shouldPrune := pruner.ShouldPrune(p)
-    
-    require.True(t, shouldPrune)
-}
-```
+Эквивалентность локальной проверки полному скану всех непосещённых клеток
+(`fullScanShouldPrune`) проверяется вероятностным тестом
+`TestShouldPruneAfterVisit_MatchesFullScan` (2000 случайных путей, seed 42).
 
 ## Эффективность
 

@@ -59,7 +59,7 @@ func (g *Graph) buildNeighbors() {
 			if nx >= 0 && nx < g.size && ny >= 0 && ny < g.size {
 				n := nx*g.size + ny
 				g.neighbors[pos] = append(g.neighbors[pos], n)
-				g.neighborMasks[pos] = g.neighborMasks[pos].Union(state.State(1 << uint64(n)))
+				g.neighborMasks[pos] = g.neighborMasks[pos].Visit(n)
 			}
 		}
 	}

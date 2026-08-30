@@ -2,7 +2,6 @@ package pruner
 
 import (
 	"knighttour/graph"
-	"knighttour/path"
 	"knighttour/state"
 )
 
@@ -11,32 +10,24 @@ type DeadEndPruner struct {
 }
 
 func NewDeadEndPruner(graph *graph.Graph) *DeadEndPruner {
-	return &DeadEndPruner{graph: graph}
+	return &DeadEndPruner{
+		graph: graph,
+	}
 }
 
-func (p *DeadEndPruner) ShouldPrune(path path.Path) bool {
-	totalCells := p.graph.GetTotalCells()
-	s := path.State()
-	unvisitedMask := s.UnvisitedMask(totalCells)
-	if unvisitedMask.IsEmpty() {
+func (p *DeadEndPruner) ShouldPruneAfterVisit(last int, unvisited state.State) bool {
+	if unvisited.IsEmpty() {
 		return false
 	}
 
-	if unvisitedMask.CountBits() == 1 {
-		lastPos := int(unvisitedMask.TrailingZeroBits())
-		currentMask := state.NewState().Visit(path.End())
-		if p.graph.GetNeighborMask(lastPos).Intersect(currentMask).IsEmpty() {
+	if unvisited.CountBits() == 1 {
+		lone := int(unvisited.TrailingZeroBits())
+		return p.graph.GetNeighborMask(lone).Intersect(state.Bit(last)).IsEmpty()
+	}
+
+	for u := range p.graph.GetNeighborMask(last).Intersect(unvisited).AllVisited() {
+		if p.graph.GetNeighborMask(u).Intersect(unvisited).IsEmpty() {
 			return true
-		}
-		return false
-	}
-
-	for i := 0; i < totalCells; i++ {
-		if s.IsUnvisited(i) {
-			neighborMask := p.graph.GetNeighborMask(i)
-			if neighborMask.Intersect(unvisitedMask).IsEmpty() {
-				return true
-			}
 		}
 	}
 

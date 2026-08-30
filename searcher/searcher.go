@@ -29,67 +29,46 @@ func NewSearcher(graph *graph.Graph, sym *symmetry.Symmetry) *Searcher {
 func (s *Searcher) CountPaths(ctx context.Context, start int) types.Result {
 	st := state.State(0).Visit(start)
 	p := path.New(st, start, start)
-	result := s.CountPathsDFS(ctx, p)
-	return result
+	return s.CountPathsDFS(ctx, p)
 }
 
-func (s *Searcher) GenerateSubtasks(ctx context.Context, cache *cache.Cache, start int, orbetSize int, depth int) (result types.Result) {
-	startPath := path.New(state.NewState(start), start, start)
-	s.countPathsDFS(ctx, startPath, func(p path.Path) bool {
-		if s.graph.SholdSkip(p.Start()) {
-			return true
-		}
-		if depth == 0 {
-			cache.Set(p, 1)
-			result.CachedPaths++
-			return true
-		}
-		if p.State().CountBits() >= depth {
-			cache.Set(p, 1)
-			result.CachedPaths++
-			return true
-		}
-		return false
-	})
+func (s *Searcher) GenerateSubtasks(ctx context.Context, c *cache.Cache, start int, orbetSize int, depth int) (result types.Result) {
+	if s.graph.SholdSkip(start) {
+		return result
+	}
+	st := state.NewState(start)
+	s.dfs(ctx, st, start, start, depth, c, &result.CachedPaths)
 	return result
 }
 
 func (s *Searcher) CountPathsDFS(ctx context.Context, p path.Path) (result types.Result) {
-	totalCells := s.graph.GetTotalCells()
-
-	s.countPathsDFS(ctx, p, func(p path.Path) bool {
-		if p.State().IsFull(totalCells) {
-			result.TotalPathsFound++
-			return true
-		}
-
-		return false
-	})
+	result.TotalPathsFound = s.dfs(ctx, p.State(), p.Start(), p.End(), s.graph.GetTotalCells(), nil, nil)
 	return result
 }
 
-func (s *Searcher) countPathsDFS(ctx context.Context, p path.Path, onResult func(path.Path) (stop bool)) {
+func (s *Searcher) dfs(ctx context.Context, st state.State, start, end, depth int, c *cache.Cache, cached *int) int {
 	if ctx.Err() != nil {
-		return
+		return 0
 	}
 
-	if onResult(p) {
-		return
+	if st.CountBits() >= depth {
+		if c != nil {
+			c.Set(path.New(st, start, end), 1)
+			*cached++
+		}
+		return 1
 	}
 
-	neighbors := s.graph.GetNeighbors(p.End())
-	for _, neighbor := range neighbors {
-		if p.State().IsVisited(neighbor) {
+	unvisited := st.Invert(s.graph.GetTotalCells())
+	cand := s.graph.GetNeighborMask(end).Intersect(unvisited)
+
+	found := 0
+	for n := range cand.AllVisited() {
+		newUnvisited := unvisited.Unvisit(n)
+		if !newUnvisited.IsEmpty() && s.deadend.ShouldPruneAfterVisit(n, newUnvisited) {
 			continue
 		}
-
-		newState := p.State().Visit(neighbor)
-		newPos := path.New(newState, p.Start(), neighbor)
-
-		if s.deadend.ShouldPrune(newPos) {
-			continue
-		}
-
-		s.countPathsDFS(ctx, newPos, onResult)
+		found += s.dfs(ctx, st.Visit(n), start, n, depth, c, cached)
 	}
+	return found
 }

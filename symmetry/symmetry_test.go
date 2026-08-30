@@ -29,18 +29,18 @@ func TestNewSymmetry(t *testing.T) {
 				t.Fatal("NewSymmetry returned nil")
 			}
 			assert.Equal(t, tt.size, s.size, "size")
-			assert.Equal(t, 8, len(s.transforms), "number of transforms")
+			assert.Equal(t, numTransforms, len(GetSymmetries(tt.size)), "number of transforms")
 			totalCells := tt.size * tt.size
-			assert.Equal(t, totalCells, len(s.bestTransforms), "lookupTable length")
-			for i, transforms := range s.bestTransforms {
-				assert.Equal(t, totalCells, len(transforms), "bestTransforms[%d] length", i)
-				for j, end := range transforms {
-					assert.NotNil(t, end, "bestTransforms[%d][%d] should not be nil", i, j)
+			assert.Equal(t, totalCells, len(s.bestIdx), "bestIdx length")
+			for i, idxs := range s.bestIdx {
+				assert.Equal(t, totalCells, len(idxs), "bestIdx[%d] length", i)
+				for j, idx := range idxs {
+					assert.Less(t, int(idx), numTransforms, "bestIdx[%d][%d] valid transform", i, j)
 				}
 			}
 			assert.Equal(t, totalCells, len(s.canonical), "canonical length")
 			assert.Equal(t, totalCells, len(s.orbitSize), "orbitSize length")
-			assert.Equal(t, totalCells, len(s.canonicalTransforms), "canonicalTransforms length")
+			assert.Equal(t, totalCells, len(s.canonicalIdx), "canonicalIdx length")
 			groups := s.GetCanonicalGroups()
 			totalInGroups := 0
 			for _, g := range groups {
@@ -84,7 +84,7 @@ func TestApplyTransform(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := s.applyTransform(s.transforms[0], tt.pos)
+			result := s.applyIdx(0, tt.pos)
 			if result != tt.pos && !tt.wantSame {
 				assert.Equal(t, tt.pos, result, "ApplyTransform(0, %d)", tt.pos)
 			}
@@ -95,7 +95,7 @@ func TestApplyTransform(t *testing.T) {
 		pos := 0
 		results := make(map[int]bool)
 		for i := 0; i < 8; i++ {
-			result := s.applyTransform(s.transforms[i], pos)
+			result := s.applyIdx(uint8(i), pos)
 			results[result] = true
 		}
 		assert.Equal(t, 4, len(results), "corner position unique transforms")
@@ -105,7 +105,7 @@ func TestApplyTransform(t *testing.T) {
 		pos := 1
 		results := make(map[int]bool)
 		for i := 0; i < 8; i++ {
-			result := s.applyTransform(s.transforms[i], pos)
+			result := s.applyIdx(uint8(i), pos)
 			results[result] = true
 		}
 		assert.Equal(t, 8, len(results), "edge position unique transforms")
@@ -115,7 +115,7 @@ func TestApplyTransform(t *testing.T) {
 		pos := 6 // (1,1)
 		results := make(map[int]bool)
 		for i := 0; i < 8; i++ {
-			result := s.applyTransform(s.transforms[i], pos)
+			result := s.applyIdx(uint8(i), pos)
 			results[result] = true
 		}
 		assert.Equal(t, 4, len(results), "diagonal position %d unique transforms", pos)
@@ -333,9 +333,9 @@ func TestCanonicalizePath(t *testing.T) {
 		canonicalPath := s.CanonicalizePath(originalPath)
 
 		for i := 0; i < 8; i++ {
-			transformedStart := s.applyTransform(s.transforms[i], originalPath.Start())
-			transformedEnd := s.applyTransform(s.transforms[i], originalPath.End())
-			transformedState := s.transformState(s.transforms[i], originalPath.State())
+			transformedStart := s.applyIdx(uint8(i), originalPath.Start())
+			transformedEnd := s.applyIdx(uint8(i), originalPath.End())
+			transformedState := s.transformState(uint8(i), originalPath.State())
 
 			poly := path.New(transformedState, transformedStart, transformedEnd)
 			best := s.CanonicalizePath(poly)
@@ -393,15 +393,15 @@ func TestPropertyTransformInvolutions(t *testing.T) {
 
 	t.Run("identity is involution", func(t *testing.T) {
 		for i := 0; i < 25; i++ {
-			r1 := s.applyTransform(s.transforms[0], i)
+			r1 := s.applyIdx(0, i)
 			assert.Equal(t, i, r1, "identity transform")
 		}
 	})
 
 	t.Run("180 rotation twice = identity", func(t *testing.T) {
 		for i := 0; i < 25; i++ {
-			r1 := s.applyTransform(s.transforms[2], i)
-			r2 := s.applyTransform(s.transforms[2], r1)
+			r1 := s.applyIdx(2, i)
+			r2 := s.applyIdx(2, r1)
 			assert.Equal(t, i, r2, "180° twice = identity")
 		}
 	})
@@ -409,8 +409,8 @@ func TestPropertyTransformInvolutions(t *testing.T) {
 	t.Run("reflection twice = identity", func(t *testing.T) {
 		for refIdx := 4; refIdx < 8; refIdx++ {
 			for i := 0; i < 25; i++ {
-				r1 := s.applyTransform(s.transforms[refIdx], i)
-				r2 := s.applyTransform(s.transforms[refIdx], r1)
+				r1 := s.applyIdx(uint8(refIdx), i)
+				r2 := s.applyIdx(uint8(refIdx), r1)
 				assert.Equal(t, i, r2, "reflection %d twice = identity", refIdx)
 			}
 		}
@@ -422,17 +422,17 @@ func TestApplyTransformToStateWithLookup(t *testing.T) {
 
 	t.Run("identity transform preserves state", func(t *testing.T) {
 		st := state.NewState().Visit(0).Visit(7).Visit(12)
-		result := s.transformState(s.transforms[0], st)
+		result := s.transformState(0, st)
 		assert.Equal(t, uint64(st), uint64(result), "identity transform preserves state")
 	})
 
 	t.Run("transform moves all visited cells", func(t *testing.T) {
 		st := state.NewState().Visit(7)
-		result := s.transformState(s.transforms[1], st)
+		result := s.transformState(1, st)
 
 		assert.Equal(t, 1, result.CountBits(), "transformed state bit count")
 
-		pos7Transformed := s.applyTransform(s.transforms[1], 7)
+		pos7Transformed := s.applyIdx(1, 7)
 		assert.True(t, result.IsVisited(pos7Transformed), "transformed position visited")
 	})
 }
@@ -456,7 +456,7 @@ func TestMultipleSizes(t *testing.T) {
 		t.Run(fmt.Sprintf("%dx%d", size, size), func(t *testing.T) {
 			s := NewSymmetry(size)
 
-			assert.Equal(t, size*size, len(s.bestTransforms), "lookupTable length")
+			assert.Equal(t, size*size, len(s.bestIdx), "bestIdx length")
 
 			groups := s.GetCanonicalGroups()
 			count := 0

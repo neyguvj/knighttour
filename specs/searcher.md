@@ -50,39 +50,63 @@ func (s *Searcher) GenerateSubtasks(
 ```
 
 **Алгоритм:**
-1. Создает начальный путь из стартовой клетки
-2. Запускает DFS с пользовательской функцией остановки:
-   - Если `SholdSkip(start)` — пропустить эту позицию
-   - Если глубина достигнута (`depth == 0` или CountBits >= depth) — сохранить в кэш и вернуться
+1. Если `SholdSkip(start)` — вернуть пустой результат (проверка вынесена наверх, т.к. start неизменен)
+2. DFS по префиксам (`dfs`): как только `CountBits(state) >= depth`,
+   сохранить путь в кэш (`cache.Set(p, 1)`) и прекратить спуск; ветви режет
+   `ShouldPruneAfterVisit` (тот же инвариант, что и в основном DFS)
 3. Возвращает `types.Result.CachedPaths` — количество закэшированных путей
 
 ### 3. CountPathsDFS(ctx context.Context, p path.Path) types.Result
 
 ```go
 func (s *Searcher) CountPathsDFS(ctx context.Context, p path.Path) types.Result
-// Рекурсивный DFS с проверкой Dead-end pruner и возвратом результата
+// Считает полные маршруты из состояния p; если состояние уже полное — возвращает 1
 ```
 
-**Алгоритм:**
-1. Если достигнута целевая клетка (все посещено), увеличить `TotalPathsFound`
-2. Для каждого непосещенного соседа:
-   - Проверить Dead-end pruner на новом состоянии
-   - Если не отсечен, рекурсивно вызвать DFS
-3. Возвращает результат с найденными путями
+**Единый горячий DFS (`dfs`) — по маскам, без колбэков:**
 
-### 4. countPathsDFS(ctx context.Context, p path.Path, onResult func(path.Path) (stop bool))
+Полный подсчёт и генерация префиксов выполняются одним рекурсивным методом; различие
+сводится к базовому случаю:
 
 ```go
-func (s *Searcher) countPathsDFS(
-    ctx context.Context,
-    p path.Path,
-    onResult func(path.Path) (stop bool),
-)
-// Внутренняя рекурсивная функция с пользовательской обратной связью
+func (s *Searcher) dfs(ctx context.Context, st State, start, end, depth int, c *Cache, cached *int) int
 ```
 
-**Параметры:**
-- `onResult`: функция, возвращающая true когда нужно прекратить спуск и вернуться
+1. Базовый случай: `CountBits(st) >= depth` → если `c != nil`, сохранить
+   `path.New(st, start, end)` в кэш и инкрементировать `*cached`; вернуть 1
+2. `unvisited := fullMask &^ state`; кандидаты: `neighborMasks[end] & unvisited`
+3. Перебор кандидатов через итератор `for n := range cand.AllVisited()` (без прямых битовых операций)
+4. Если после хода остались непосещённые и `deadend.ShouldPruneAfterVisit(n, newUnvisited)` → continue
+5. Рекурсия, сумма результатов — возвращаемое значение
+
+Вызовы:
+- полный подсчёт (`CountPathsDFS`): `depth = totalCells`, `c = nil` — лист (полная
+  доска) даёт 1 через базовый случай;
+- префиксы (`GenerateSubtasks`): `depth = precomputeDepth`, `c != nil` — возврат
+  из базового случая игнорируется, спуск ниже `depth` не происходит.
+
+Проверка отмены контекста — на входе в каждый рекурсивный вызов (`ctx.Err() != nil`).
+
+**Без аллокаций в горячем цикле:** `unvisited` строится через `st.Invert(totalCells)`, кандидаты —
+через `graph.GetNeighborMask(end).Intersect(unvisited)`; перебор — итератором `AllVisited()`.
+Ни колбэков, ни сканов доски внутри рекурсии нет. Цена унификации — один лишний
+параметр (`depth`) и nil-check кэша на узел.
+
+## Экспериментальные прунинги (результат замеров на 5×5/6×6, НЕ реализованы)
+
+### Цветовой (бипартитный) prune — бесполезен
+
+Идея: граф коня двудольный, проверять баланс цветов оставшихся клеток. Замер
+(отладочная версия со счётчиками): **0 срабатываний**. Инвариант выполняется
+автоматически в любом DFS-узле, доходимом легальными ходами (путь чередует цвета),
+а для нечётных досок стартовые клетки нужного чёта уже отсекает `SholdSkip`.
+
+### Warnsdorff-порядок кандидатов — не реализован
+
+Идея: перебор кандидатов по возрастанию свободных выходов. Замер: **число узлов дерева
+не меняется вообще** (dead-end prune локален и не зависит от порядка), а время растёт
+на ~10–20% из-за сортировки на каждом узле. Реализация удалена как бесполезная.
+
 
 ## Типы данных
 
@@ -126,51 +150,17 @@ result := c.searcher.GenerateSubtasks(ctx, cache, start, orbitSize, depth)
 total := atomic.Uint64{}
 taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, count int) {
     result := c.searcher.CountPathsDFS(ctx, p)
-    group := c.symmetry.GetCanonicalGroupByPosition(p.Start())
-    
-    total.Add(uint64(result.TotalPathsFound * count * group.OrbitSize))
+    orbits := uint64(c.symmetry.GetOrbitSize(p.Start()))
+
+    total.Add(uint64(result.TotalPathsFound*count) * orbits)
 })
 ```
 
 ## Dead-end Pruning
 
-Dead-end pruning проверяет изолированные непосещенные клетки:
-
-```go
-type DeadEndPruner struct {
-    graph *Graph
-}
-
-func (p *DeadEndPruner) ShouldPrune(path path.Path) bool {
-    totalCells := p.graph.GetTotalCells()
-    s := path.State()
-    unvisitedMask := s.UnvisitedMask(totalCells)
-    
-    if unvisitedMask.IsEmpty() {
-        return false  // все посещено
-    }
-    
-    if unvisitedMask.CountBits() == 1 {
-        lastPos := int(unvisitedMask.TrailingZeroBits())
-        currentMask := state.NewState().Visit(path.End())
-        if p.graph.GetNeighborMask(lastPos).Intersect(currentMask).IsEmpty() {
-            return true  // нельзя дойти до последней клетки
-        }
-        return false
-    }
-    
-    for i := 0; i < totalCells; i++ {
-        if s.IsUnvisited(i) {
-            neighborMask := p.graph.GetNeighborMask(i)
-            if neighborMask.Intersect(unvisitedMask).IsEmpty() {
-                return true  // изолированная клетка
-            }
-        }
-    }
-    
-    return false
-}
-```
+В горячем DFS используется `ShouldPruneAfterVisit(last, unvisited)` — локальная проверка
+за O(deg(last)): изолированной после посещения `last` могла стать только клетка из её
+непосещённых соседей (родительский узел уже прошёл проверку). Подробности — в `pruner.md`.
 
 ## Тесты
 
@@ -200,12 +190,11 @@ func TestSearcherDeadEndPrune(t *testing.T) {
     graph := graph.New(5)
     deadend := pruner.NewDeadEndPruner(graph)
     
-    // Путь где одна клетка изолирована
-    s := state.NewState(0, 1, 2)
-    p := path.New(s, 0, 2)
+    // После посещения 2 клетка 0 изолирована среди непосещённых
+    unvisited := state.NewState(0, 2, 4, 6)
     
-    shouldPrune := deadend.ShouldPrune(p)
-    require.False(t, shouldPrune)  // не должно быть prune пока есть пути
+    shouldPrune := deadend.ShouldPruneAfterVisit(7, unvisited)
+    require.True(t, shouldPrune)  // есть изолированная клетка
 }
 ```
 

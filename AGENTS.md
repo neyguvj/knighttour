@@ -4,7 +4,7 @@
 
 ```bash
 go run main.go        # Build & run
-go test ./...         # Run tests (none currently)
+go test ./...         # Run tests
 go vet ./...          # Static analysis
 go fmt ./...          # Format code
 ```
@@ -54,25 +54,27 @@ go fmt ./...          # Format code
 
 ## Project Structure
 
-- **main.go** – Entry point, creates a knight tour graph (5×5 to 8×8), supports parallel search
+- **main.go** – Entry point, CLI flags: `-size` (5–8), `-workers`, `-precompute-depth`
 - **graph/** – `Graph` struct with precomputed knight moves on an N×N board
-  - Edges sorted by degree (highest first) for efficient traversal
-  - Methods: `CountNeighbors()`, `IsConnected()` for connectivity checks
+  - Neighbors in fixed possibleMoves order (no special sorting)
+  - Methods: `GetNeighbors()`, `GetDegree()`, `GetNeighborMask()`, `SholdSkip()` (color parity skip for odd boards)
 - **state/** – `State` type (uint64 bitboard) tracking visited positions
-  - Bit manipulation operations: Visit, Unvisit, IsVisited, CountBits, Intersect, Union
-- **searcher/** – DFS path counter with Warnsdorff ordering and pruning
-  - Methods: `CountPaths()`, `CountFromState()` for recursive traversal
-    - `startPos` parameter added to `countDFS` chain for cache canonicalization
+  - Bit manipulation operations: Visit, Unvisit, IsVisited, CountBits, Intersect, Union, Invert, AllVisited
+- **path/** – `Path` value type (state + start + end) used as cache key
+- **types/** – Shared `Result` struct (TotalPathsFound, CachedPaths)
+- **searcher/** – DFS path counter over bitmasks with dead-end pruning
+  - Methods: `CountPaths()`, `CountPathsDFS()`, `GenerateSubtasks()` (prefix generation into cache)
 - **counter/** – High-level counting orchestrator with symmetry reduction
-  - Methods: `CountAllTours()` (sequential), `ParallelCount()` (multi-worker)
+  - Methods: `ParallelCount()`, `ParallelCountWithDepth()` (multi-worker), `CountFromPosition()`
   - Uses canonical positions to avoid duplicate computation
 - **pruner/** – Pruning strategies:
-  - `DeadEndPruner` – Detects unreachable squares, prunes when unvisited isolated nodes exist
+  - `DeadEndPruner` – `ShouldPruneAfterVisit()` (hot O(deg) check)
 - **cache/** – Thread-safe memoization with sharded lock implementation (64 shards)
-  - Methods: `Get()`, `Set()`, `Clear()` for caching subtree counts
+  - Methods: `Get()`, `Set()`, `Clear()`, `ItemsCount()`, `Each()` for caching subtree counts
 - **symmetry/** – Exploits board symmetries to reduce search space
   - 8 symmetries: rotations and reflections
-  - Methods: `GetCanonicalPosition()`, `GetOrbitSize()`, `GetCanonicalGroups()`
+  - Methods: `GetCanonicalPosition()`, `GetOrbitSize()`, `GetCanonicalGroups()`, `CanonicalizePath()`
+- **monitoring/** – Progress reporting (`Monitor` interface, `RealMonitor`, `FakeMonitor`)
 
 
 
@@ -85,5 +87,4 @@ go test -v -bench=. -run=^$ -benchmem ./counter/
 ```
 
 Available benchmarks in `counter/benchmark_test.go`:
-- `BenchmarkCountAllToursSequential` – Measures serial tour counting performance
-- `BenchmarkCountAllToursParallel` – Measures parallel tour counting (8 workers)
+- `BenchmarkCountAllToursParallel` – Measures parallel tour counting performance

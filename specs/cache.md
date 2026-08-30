@@ -32,15 +32,13 @@ type Cache struct {
 
 ## Хэширование и шардинг
 
-Ключ кэша преобразуется в индекс шарда через FNV-1a хэш:
+Ключ кэша преобразуется в индекс шарда мультипликативным хэшем без аллокаций:
 
 ```go
 func (c *Cache) getShardKey(p path.Path) int {
-    h := fnv.New64a()
-    buf := make([]byte, 8)
-    binary.BigEndian.PutUint64(buf, uint64(p.State()))
-    h.Write(buf)
-    return int(h.Sum64() % numShards)
+    // Бесаллокационный хэш: умножение на золотое сечение, старшие биты.
+    h := uint64(p.State())*0x9E3779B97F4A7C15 + uint64(p.End())*0xC2B2AE3D27D4EB4F
+    return int(h >> (64 - 6)) // numShards = 64
 }
 ```
 
@@ -107,9 +105,9 @@ result := searcher.GenerateSubtasks(ctx, cache, start, orbitSize, depth)
 // При параллельном подсчете:
 taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, count int) {
     result := c.searcher.CountPathsDFS(ctx, p)
-    group := c.symmetry.GetCanonicalGroupByPosition(p.Start())
-    
-    total.Add(uint64(result.TotalPathsFound * count * group.OrbitSize))
+    orbits := uint64(c.symmetry.GetOrbitSize(p.Start()))
+
+    total.Add(uint64(result.TotalPathsFound*count) * orbits)
 })
 ```
 
@@ -161,20 +159,19 @@ func (c *Cache) Set(path path.Path, val int) {
 func TestCacheBasic(t *testing.T) {
     sym := symmetry.NewSymmetry(5)
     cache := cache.NewCache(sym)
-    
-    state := NewState().Visit(0).Visit(1)
-    path := Path{state: state, start: 0, end: 1}
-    
+
+    p := path.New(state.NewState(0, 1), 0, 1)
+
     // Пустой кэш не содержит ничего
-    count, ok := cache.Get(path)
+    count, ok := cache.Get(p)
     require.False(t, ok)
     require.Equal(t, 0, count)
-    
+
     // Записываем значение
-    cache.Set(path, 42)
-    
+    cache.Set(p, 42)
+
     // Считываем обратно
-    count, ok = cache.Get(path)
+    count, ok = cache.Get(p)
     require.True(t, ok)
     require.Equal(t, 42, count)
 }
@@ -182,28 +179,29 @@ func TestCacheBasic(t *testing.T) {
 func TestCacheConcurrent(t *testing.T) {
     sym := symmetry.NewSymmetry(5)
     cache := cache.NewCache(sym)
-    
+
     var wg sync.WaitGroup
-    
-    for i := 0; i < 10; i++ {
+
+    for i := range 10 {
         wg.Add(1)
         go func(i int) {
             defer wg.Done()
-            
-            state := NewState().Visit(i % 25)
-            path := Path{state: state, start: i%25, end: i%25}
-            cache.Set(path, i*100)
+
+            p := path.New(state.NewState(i%25), i%25, i%25)
+            cache.Set(p, i*100)
         }(i)
     }
-    
+
     wg.Wait()
-    
-    // Проверяем что записано
-    for i := 0; i < 10; i++ {
-        state := NewState().Visit(i % 25)
-        path := Path{state: state, start: i%25, end: i%25}
-        count, ok := cache.Get(path)
+
+    // Проверяем что записано (симметричные ключи канонизируются и могут сливаться)
+    for i := range 10 {
+        p := path.New(state.NewState(i%25), i%25, i%25)
+        count, ok := cache.Get(p)
         require.True(t, ok)
+        if !sym.IsCanonicalPosition(i % 25) {
+            continue // значение могло слиться с каноническим ключом
+        }
         require.Equal(t, i*100, count)
     }
 }
@@ -211,13 +209,12 @@ func TestCacheConcurrent(t *testing.T) {
 func TestCacheItemsCount(t *testing.T) {
     sym := symmetry.NewSymmetry(5)
     cache := cache.NewCache(sym)
-    
-    state := NewState().Visit(0).Visit(1)
-    path := Path{state: state, start: 0, end: 1}
-    cache.Set(path, 42)
-    
+
+    p := path.New(state.NewState(0, 1), 0, 1)
+    cache.Set(p, 42)
+
     require.Equal(t, 1, cache.ItemsCount())
-    
+
     cache.Clear()
     require.Equal(t, 0, cache.ItemsCount())
 }
@@ -225,17 +222,16 @@ func TestCacheItemsCount(t *testing.T) {
 func TestCacheEach(t *testing.T) {
     sym := symmetry.NewSymmetry(5)
     cache := cache.NewCache(sym)
-    
-    state1 := NewState().Visit(0).Visit(1)
-    path1 := Path{state: state1, start: 0, end: 1}
-    cache.Set(path1, 100)
-    
+
+    p := path.New(state.NewState(0, 1), 0, 1)
+    cache.Set(p, 100)
+
     count := 0
-    cache.Each(ctx, workers, func(p Path, v int) {
+    cache.Each(context.Background(), 1, func(ctx context.Context, p path.Path, v int) {
         count++
         require.Equal(t, 100, v)
     })
-    
+
     require.Equal(t, 1, count)
 }
 ```

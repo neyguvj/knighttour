@@ -1,96 +1,128 @@
 package pruner
 
 import (
+	"math/bits"
+	"math/rand"
 	"testing"
 
 	"knighttour/graph"
-	"knighttour/path"
 	"knighttour/state"
 
 	"github.com/stretchr/testify/assert"
 )
 
-func TestDeadEndPrune_EmptyState(t *testing.T) {
+func TestShouldPruneAfterVisit_NoUnvisited(t *testing.T) {
 	g := graph.New(5)
-	st := state.State(0)
-	pruner := NewDeadEndPruner(g)
+	p := NewDeadEndPruner(g)
 
-	result := pruner.ShouldPrune(path.New(st, 0, 0))
-	assert.False(t, result, "Empty path should not be pruned")
+	result := p.ShouldPruneAfterVisit(0, state.State(0))
+	assert.False(t, result, "No unvisited cells should not be pruned")
 }
 
-func TestDeadEndPrune_FullState(t *testing.T) {
+func TestShouldPruneAfterVisit_SingleUnvisitedReachable(t *testing.T) {
 	g := graph.New(5)
-	st := state.State((1 << 25) - 1)
-	pruner := NewDeadEndPruner(g)
+	p := NewDeadEndPruner(g)
 
-	result := pruner.ShouldPrune(path.New(st, 0, 24))
-	assert.False(t, result, "Full path should not be pruned")
+	result := p.ShouldPruneAfterVisit(24, state.Bit(13))
+	assert.False(t, result, "Single reachable unvisited cell should not be pruned")
 }
 
-func TestDeadEndPrune_SingleUnvisited(t *testing.T) {
+func TestShouldPruneAfterVisit_SingleUnvisitedUnreachable(t *testing.T) {
 	g := graph.New(5)
-	st := state.State(0)
-	for i := 0; i < 24; i++ {
-		st = st.Visit(i)
-	}
-	pruner := NewDeadEndPruner(g)
+	p := NewDeadEndPruner(g)
 
-	result := pruner.ShouldPrune(path.New(st, 0, 23))
-	assert.True(t, result, "Single unvisited vertex should be pruned (no path to it)")
+	result := p.ShouldPruneAfterVisit(23, state.Bit(24))
+	assert.True(t, result, "Single unreachable unvisited cell should be pruned")
 }
 
-func TestDeadEndPrune_IsolatedVertexCorner(t *testing.T) {
+func TestShouldPruneAfterVisit_IsolatedVertexCorner(t *testing.T) {
 	g := graph.New(5)
-	st := state.State(0).Visit(1).Visit(3).Visit(5).Visit(7).Visit(8).Visit(9).Visit(10).Visit(11).Visit(12).Visit(13).Visit(14).Visit(15).Visit(16).Visit(17).Visit(18).Visit(19).Visit(20).Visit(21).Visit(22).Visit(23).Visit(24)
-	pruner := NewDeadEndPruner(g)
+	p := NewDeadEndPruner(g)
 
-	result := pruner.ShouldPrune(path.New(st, 0, 24))
+	// Непосещённые 0, 2, 4, 6; клетка 0 (угол) изолирована и соседняя к last=7
+	result := p.ShouldPruneAfterVisit(7, state.NewState(0, 2, 4, 6))
 	assert.True(t, result, "Isolated vertex at corner should be pruned")
 }
 
-func TestDeadEndPrune_IsolatedVertexCenter(t *testing.T) {
+func TestShouldPruneAfterVisit_IsolatedVertexCenter(t *testing.T) {
 	g := graph.New(5)
-	st := state.State(0)
-	for i := 0; i < 25; i++ {
-		if i != 12 {
-			st = st.Visit(i)
-		}
-	}
-	pruner := NewDeadEndPruner(g)
+	p := NewDeadEndPruner(g)
 
-	result := pruner.ShouldPrune(path.New(st, 0, 24))
+	// Осталась только клетка 12 (центр), она не соседняя к last=24
+	result := p.ShouldPruneAfterVisit(24, state.Bit(12))
 	assert.True(t, result, "Isolated vertex at center should be pruned")
 }
 
-func TestDeadEndPrune_TwoIsolatedVertices(t *testing.T) {
+func TestShouldPruneAfterVisit_TwoIsolatedVertices(t *testing.T) {
 	g := graph.New(5)
-	st := state.State(0).Visit(0).Visit(1).Visit(2).Visit(3).Visit(4).Visit(5).Visit(6).Visit(7).Visit(8).Visit(9).Visit(10).Visit(11).Visit(13).Visit(14).Visit(15).Visit(16).Visit(17).Visit(18).Visit(19).Visit(20).Visit(21).Visit(22).Visit(23).Visit(24)
-	pruner := NewDeadEndPruner(g)
+	p := NewDeadEndPruner(g)
 
-	result := pruner.ShouldPrune(path.New(st, 0, 24))
+	// Клетки 0 и 24 изолированы друг от друга; 0 соседняя к last=7
+	result := p.ShouldPruneAfterVisit(7, state.NewState(0, 24))
 	assert.True(t, result, "Two isolated vertices should be pruned")
 }
 
-func TestDeadEndPrune_PathOnLine(t *testing.T) {
+func TestShouldPruneAfterVisit_ValidPathNotPruned(t *testing.T) {
 	g := graph.New(5)
-	st := state.State(0).Visit(0).Visit(1)
-	pruner := NewDeadEndPruner(g)
+	p := NewDeadEndPruner(g)
+	totalCells := g.GetTotalCells()
+	fullMask := state.State(uint64(1)<<uint(totalCells) - 1)
 
-	result := pruner.ShouldPrune(path.New(st, 0, 1))
+	result := p.ShouldPruneAfterVisit(1, fullMask.AndNot(state.NewState(0, 1)))
 	assert.False(t, result, "Valid path should not be pruned")
 }
 
-func TestDeadEndPrune_LargeBoard(t *testing.T) {
-	g := graph.New(5)
-	st := state.State(0).Visit(0)
-	for i := 1; i < 25; i++ {
-		if i != 12 {
-			st = st.Visit(i)
+// fullScanShouldPrune — справочная реализация полного скана всех непосещённых клеток.
+func fullScanShouldPrune(g *graph.Graph, last int, unvisited state.State) bool {
+	if unvisited.IsEmpty() {
+		return false
+	}
+
+	if unvisited.CountBits() == 1 {
+		lone := int(unvisited.TrailingZeroBits())
+		return g.GetNeighborMask(lone).Intersect(state.Bit(last)).IsEmpty()
+	}
+
+	for u := range unvisited.AllVisited() {
+		if g.GetNeighborMask(u).Intersect(unvisited).IsEmpty() {
+			return true
 		}
 	}
-	pruner := NewDeadEndPruner(g)
 
-	result := pruner.ShouldPrune(path.New(st, 0, 24))
-	assert.True(t, result, "Isolated vertex should be pruned on 5x5")
+	return false
+}
+
+func TestShouldPruneAfterVisit_MatchesFullScan(t *testing.T) {
+	g := graph.New(5)
+	p := NewDeadEndPruner(g)
+	totalCells := g.GetTotalCells()
+	fullMask := state.State(uint64(1)<<uint(totalCells) - 1)
+
+	rng := rand.New(rand.NewSource(42))
+
+	for trial := 0; trial < 2000; trial++ {
+		st := state.State(0).Visit(rng.Intn(totalCells))
+		end := bits.TrailingZeros64(uint64(st))
+		for step := 0; step < totalCells-1; step++ {
+			unvisited := fullMask.AndNot(st)
+			nbrs := g.GetNeighborMask(end).Intersect(unvisited)
+			if nbrs.IsEmpty() {
+				break
+			}
+			n := bits.TrailingZeros64(uint64(nbrs))
+			bit := state.State(uint64(1) << uint(n))
+			newSt := st | bit
+			childUnvisited := unvisited.AndNot(bit)
+
+			if fullScanShouldPrune(g, end, unvisited) {
+				break // инвариант нарушен ниже не гарантируем эквивалентность
+			}
+			want := fullScanShouldPrune(g, int(n), childUnvisited)
+			got := p.ShouldPruneAfterVisit(int(n), childUnvisited)
+			assert.Equal(t, want, got, "trial %d step %d: local check != full scan", trial, step)
+
+			st = newSt
+			end = int(n)
+		}
+	}
 }
