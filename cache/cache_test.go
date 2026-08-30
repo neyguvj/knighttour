@@ -15,9 +15,8 @@ func TestCacheBasic(t *testing.T) {
 	cache := NewCache(sym)
 
 	s := state.State(0b101)
-	startPos := 0
 
-	pos := path.New(s, startPos, 0)
+	pos := path.New(s, 0)
 
 	count, ok := cache.Get(pos)
 	assert.False(t, ok, "Empty cache should not return value")
@@ -35,7 +34,7 @@ func TestCacheClear(t *testing.T) {
 	cache := NewCache(sym)
 
 	s := state.State(0b101)
-	pos := path.New(s, 0, 0)
+	pos := path.New(s, 0)
 	cache.Set(pos, 42)
 
 	count, ok := cache.Get(pos)
@@ -55,7 +54,7 @@ func TestCacheHighBitState(t *testing.T) {
 
 	s := state.State((1 << 40) | (1 << 32))
 	posIdx := sym.GetCanonicalPosition(63)
-	pos := path.New(s, 0, posIdx)
+	pos := path.New(s, posIdx)
 
 	cache.Set(pos, 123)
 
@@ -65,9 +64,32 @@ func TestCacheHighBitState(t *testing.T) {
 
 	s2 := state.State(1 << 40)
 	pos2Idx := sym.GetCanonicalPosition(63)
-	pos2 := path.New(s2, 0, pos2Idx)
+	pos2 := path.New(s2, pos2Idx)
 
 	count2, ok2 := cache.Get(pos2)
 	assert.False(t, ok2, "Different state with high bit should not return value")
 	assert.Equal(t, 0, count2, "Expected 0 for different state")
+}
+
+func TestCacheWeightMergeAcrossOrbits(t *testing.T) {
+	sym := symmetry.NewSymmetry(5)
+	c := NewCache(sym)
+
+	// On a 5x5 board cells 0 and 4 are in the same orbit (rotate 90),
+	// so both single-cell tasks must merge into one key with summed weight.
+	p1 := path.New(state.State(1<<0), 0)
+	p2 := path.New(state.State(1<<4), 4)
+
+	c.Set(p1, 3)
+	c.Set(p2, 5)
+
+	assert.Equal(t, 1, c.ItemsCount(), "Symmetric tasks should merge into a single entry")
+
+	weight, ok := c.Get(p1)
+	assert.True(t, ok)
+	assert.Equal(t, 8, weight, "Weights of merged prefixes must sum up")
+
+	weight, ok = c.Get(p2)
+	assert.True(t, ok)
+	assert.Equal(t, 8, weight, "Lookup by any symmetric key returns the same weight")
 }

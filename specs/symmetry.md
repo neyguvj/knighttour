@@ -26,21 +26,20 @@ type Transform func(x, y, size int) (int, int) // сохранён для API/Ge
 
 type Symmetry struct {
     canonical     []int        // каноническая позиция для каждой клетки (слайсы первыми — pointer-префикс, fieldalignment)
-    canonicalIdx  []uint8      // индекс лучшего преобразования для каждой клетки
     orbitSize     []int        // размер орбиты для каждой клетки
-    bestIdx       [][]uint8    // индекс оптимального преобразования для пар (start, end)
     groups        []CanonicalGroup // предвычисленные канонические группы
     size          int
     perms         [8][64]uint8 // LUT: perms[t][pos] — образ клетки при t-м преобразовании (строится один раз из замыканий)
 }
 ```
 
-**Оптимизация:** горячий путь (`CanonicalizePath`, `transformState`) не использует
+**Оптимизация:** горячий путь (`Canonicalize`, `transformState`) не использует
 замыкания `Transform` и деление/остаток — только подстановку в LUT. `transformState`
 перебирает установленные биты маски (O(посещённых)), а не все клетки доски. Замыкания
-вызываются ровно один раз при построении `perms`. Выбор преобразования для пары
-(start, end) побитово повторял прежнюю логику (argmin по newEnd среди t, переводящих
-start в канонический).
+вызываются ровно один раз при построении `perms`.
+
+LUT `bestIdx` для пар `(start, end)` удалена: ключ кэша больше не содержит start,
+канонизация пары `(state, end)` выполняется перебором всех 8 преобразований.
 
 ## Основные методы
 
@@ -52,7 +51,6 @@ func NewSymmetry(size int) *Symmetry
 // Выполняет:
 // - Вычисление канонической позиции и трансформации для каждой клетки
 // - Расчет размера орбиты для каждой клетки
-// - Построение bestTransforms для всех пар (start, end)
 ```
 
 ### 2. Доступ к каноническим позициям
@@ -88,16 +86,20 @@ func (s *Symmetry) GetCanonicalGroupByPosition(pos int) CanonicalGroup
 // Возвращает группу, содержащую данную позицию
 ```
 
-### 5. Канонизация пути
+### 5. Канонизация состояния поиска
 
 ```go
-func (s *Symmetry) CanonicalizePath(p path.Path) path.Path
-// Преобразует путь в лексикографически минимальную форму среди всех симметрий
-// Алгоритм:
-// 1. Находит оптимальное преобразование для пары (start, end)
-// 2. Применяет это преобразование к start, end и state
-// 3. Возвращает канонический путь
+func (s *Symmetry) Canonicalize(st state.State, end int) path.Path
+// Возвращает канонического представителя орбиты D4 для пары (state, end).
+// Алгоритм: среди всех 8 преобразований выбирается лексикографический минимум
+// кортежа (t(state), t(end)). start в канонизации не участвует: число
+// продолжений маршрута зависит только от посещённой маски и текущей клетки,
+// поэтому симметричные пары эквивалентны полностью.
 ```
+
+Каноническая форма корректна как инвариант орбиты: для любой симметрии g
+выполняется `Canonicalize(g(st), g(end)) == Canonicalize(st, end)`, т.к. умножение
+на g — биекция множества 8 преобразований на себе (D4 — группа).
 
 ## Использование в Counter
 
@@ -116,11 +118,11 @@ for _, group := range groups {
 ## Использование в Cache
 
 ```go
-// Кэш использует CanonicalizePath для объединения симметричных путей:
-canonicalPath := c.symmetry.CanonicalizePath(path)
-shardIdx := c.getShardKey(canonicalPath)
+// Кэш использует Canonicalize для объединения симметричных состояний:
+canonical := c.symmetry.Canonicalize(p.State(), p.End())
+shardIdx := c.getShardKey(canonical)
 
-if count, found := c.shards[shardIdx].data[canonicalPath]; found {
+if weight, found := c.shards[shardIdx].data[canonical]; found {
     // кэш-попадание
 }
 ```
@@ -195,14 +197,18 @@ func TestSymmetryGetOrbitSize(t *testing.T) {
     require.Equal(t, 8, orbit21)
 }
 
-func TestSymmetryCanonicalizePath(t *testing.T) {
+func TestSymmetryCanonicalize(t *testing.T) {
     sym := symmetry.NewSymmetry(5)
-    
-    p := path.New(state.State(0).Visit(6), 0, 6)
-    canonical := sym.CanonicalizePath(p)
-    
-    // Проверяем что каноническая позиция start минимальна
-    require.True(t, sym.IsCanonicalPosition(canonical.Start()))
+
+    st := state.State(0).Visit(6)
+    canonical := sym.Canonicalize(st, 6)
+
+    // Канонизация идемпотентна
+    require.Equal(t, canonical, sym.Canonicalize(canonical.State(), canonical.End()))
+
+    // Симметричные пары дают одного представителя
+    mirrored := sym.Canonicalize(applyFlipDiag(st), mirrorPos(6))
+    require.Equal(t, canonical, mirrored)
 }
 ```
 
@@ -210,8 +216,10 @@ func TestSymmetryCanonicalizePath(t *testing.T) {
 
 - Для досок нечетного размера центральная клетка симметрична самой себе (orbitSize=1)
 - При использовании кэша нужно учитывать, что состояния из симметричных позиций объединяются
+- `Canonicalize` перебирает все 8 преобразований (до 8× `transformState` на вызов);
+  при необходимости ускоряется побайтовой LUT-перестановкой бит `[8][8][256]uint64`
 - Предварительное вычисление канонических позиций занимает O(N²) времени и памяти
 
 ## Заключение
 
-Symmetry — компонент для работы с геометрическими свойствами доски. Канонизация путей через sym.CanonicalizePath позволяет эффективно объединять симметричные состояния в кэше и уменьшать объем поиска.
+Symmetry — компонент для работы с геометрическими свойствами доски. Канонизация пар `(state, end)` через `sym.Canonicalize` позволяет объединять симметричные состояния в кэше (в том числе префиксы из разных стартовых орбит) и уменьшать число подзадач.

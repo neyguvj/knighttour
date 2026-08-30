@@ -6,29 +6,43 @@
 
 Ключевые особенности текущей реализации:
 - **Шардинг**: Разделение кэша на 64 шарда для параллельного доступа
-- **Симметрия**: Использование канонических представлений путей для уменьшения дублирующихся вычислений
+- **Симметрия**: Ключом является каноническая пара `(state, end)` — без `start`.
+  Число продолжений маршрута зависит только от посещённой маски и текущей клетки,
+  поэтому префиксы из разных стартовых орбит с симметричными `(state, end)`
+  сливаются в одну подзадачу
+- **Вес**: value хранит агрегированный вес `Σ count·orbitSize` (см. ниже)
 - **Потокобезопасность**: RWMutex для каждого шарда
 
 ## Структура данных
 
 ```go
 type shard struct {
-    data map[path.Path]int  // canonical path → countOfSolutions (первым — минимум pointer-префикса, fieldalignment)
+    data map[path.Path]int  // canonical (state, end) → weight (первым — минимум pointer-префикса, fieldalignment)
     sync.RWMutex
 }
 
 type Cache struct {
     shards   [numShards]shard  // numShards = 64
-    symmetry *Symmetry         // для канонизации путей
+    symmetry *Symmetry         // для канонизации состояний
 }
 ```
 
-- **key**: `path.Path` — объект пути, содержащий:
+- **key**: `path.Path` — задача поиска, содержащая:
   - `State()` (uint64) — битовая маска посещенных клеток
-  - `Start()` — начальная позиция
   - `End()` — текущая позиция
-- **value**: `int` — количество решений из этого канонического состояния
+  - (`Start()` из ключа удалён: продолжения от `(state, end)` не зависят от старта)
+- **value**: `int` — агрегированный вес подзадачи: сумма по всем слившимся
+  префиксам `count_g · orbitSize_g`, где `g` — стартовая орбита префикса.
+  Итоговый вклад подзадачи в ответ: `completions(key) * weight`
 - **shards**: Массив из 64 шардов, каждый со своим мьютексом
+
+### Почему вес зашивается при записи, а не при чтении
+
+Раньше multiplier орбиты применялся на потреблении через `GetOrbitSize(p.Start())`.
+Поскольку ключ больше не содержит `start` и может объединять префиксы из разных
+орбит, единственный корректный момент умножения — генерация: каждая группа
+пишет свои префиксы с весом `group.OrbitSize`, а шард просто суммирует вклады
+под одним каноническим ключом.
 
 ## Хэширование и шардинг
 
@@ -59,12 +73,12 @@ func (c *Cache) Clear()
 
 ```go
 func (c *Cache) Get(path path.Path) (int, bool)
-// Получить результат для канонического пути
-// Возвращает: (count, found)
+// Получить агрегированный вес для канонической пары (state, end)
+// Возвращает: (weight, found)
 
-func (c *Cache) Set(path path.Path, val int)
-// Сохранить результат для канонического пути
-// При совпадении ключей значения суммируются
+func (c *Cache) Set(path path.Path, weight int)
+// Добавить вес к записи для канонической пары (state, end)
+// При совпадении ключей веса суммируются: data[key] += weight
 
 func (c *Cache) Has(path path.Path) bool
 // Проверка наличия записи
@@ -81,33 +95,33 @@ func (c *Cache) Each(ctx context.Context, workers int, f func(ctx context.Contex
 
 ## Симметрия и канонизация
 
-Все операции с кэшем используют `symmetry.CanonicalizePath()` для преобразования пути в каноническое представление:
+Все операции с кэшем используют `symmetry.Canonicalize(state, end)` для сведения пары к лексикографическому минимуму орбиты D4:
 
 ```go
-canonicalPath := c.symmetry.CanonicalizePath(path)
-shardIdx := c.getShardKey(canonicalPath)
+canonical := c.symmetry.Canonicalize(p.State(), p.End())
+shardIdx := c.getShardKey(canonical)
 
-// Далее работа с canonicalPath в конкретном шарде
+// Далее работа с canonical в конкретном шарде
 ```
 
 Это позволяет:
 - Объединять эквивалентные состояния, полученные через повороты и отражения доски
+- Сливаться подзадачам из **разных** стартовых орбит (ключ не содержит start),
+  если их `(state, end)` симметричны — число продолжений у них одинаково
 - Снижать количество уникальных записей в кэше
-- Повышать hit ratio
 
 ## Использование в Searcher/Counter
 
 ```go
-// При генерации подзадач:
+// При генерации подзадач (вес = орбита стартовой группы):
 cache := cache.NewCache(symmetry)
 result := searcher.GenerateSubtasks(ctx, cache, start, orbitSize, depth)
 
 // При параллельном подсчете:
-taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, count int) {
+taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, weight int) {
     result := c.searcher.CountPathsDFS(ctx, p)
-    orbits := uint64(c.symmetry.GetOrbitSize(p.Start()))
-
-    total.Add(uint64(result.TotalPathsFound*count) * orbits)
+    // вес уже включает orbitSize каждой внесшей вклад группы
+    total.Add(uint64(result.TotalPathsFound) * uint64(weight))
 })
 ```
 
@@ -139,17 +153,18 @@ taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, count int) {
 
 Рекомендация: использовать кэш только когда осталось <30 клеток (можно добавить флаг или проверку в Searcher).
 
-### 3. Суммирование при совпадении
+### 3. Суммирование весов при совпадении
 
-При `Set()` значения суммируются, а не заменяются:
+При `Set()` веса суммируются, а не заменяются — это и есть механизм слияния
+префиксов разных групп под одним ключом:
 
 ```go
-func (c *Cache) Set(path path.Path, val int) {
-    canonicalPath := c.symmetry.CanonicalizePath(path)
-    shardIdx := c.getShardKey(canonicalPath)
+func (c *Cache) Set(p path.Path, weight int) {
+    canonical := c.symmetry.Canonicalize(p.State(), p.End())
+    shardIdx := c.getShardKey(canonical)
     c.shards[shardIdx].Lock()
     defer c.shards[shardIdx].Unlock()
-    c.shards[shardIdx].data[canonicalPath] += val  // суммирование!
+    c.shards[shardIdx].data[canonical] += weight  // суммирование весов!
 }
 ```
 
@@ -160,7 +175,7 @@ func TestCacheBasic(t *testing.T) {
     sym := symmetry.NewSymmetry(5)
     cache := cache.NewCache(sym)
 
-    p := path.New(state.NewState(0, 1), 0, 1)
+    p := path.New(state.NewState(0, 1), 1)
 
     // Пустой кэш не содержит ничего
     count, ok := cache.Get(p)
@@ -187,7 +202,7 @@ func TestCacheConcurrent(t *testing.T) {
         go func(i int) {
             defer wg.Done()
 
-            p := path.New(state.NewState(i%25), i%25, i%25)
+            p := path.New(state.NewState(i%25), i%25)
             cache.Set(p, i*100)
         }(i)
     }
@@ -196,7 +211,7 @@ func TestCacheConcurrent(t *testing.T) {
 
     // Проверяем что записано (симметричные ключи канонизируются и могут сливаться)
     for i := range 10 {
-        p := path.New(state.NewState(i%25), i%25, i%25)
+        p := path.New(state.NewState(i%25), i%25)
         count, ok := cache.Get(p)
         require.True(t, ok)
         if !sym.IsCanonicalPosition(i % 25) {
@@ -210,7 +225,7 @@ func TestCacheItemsCount(t *testing.T) {
     sym := symmetry.NewSymmetry(5)
     cache := cache.NewCache(sym)
 
-    p := path.New(state.NewState(0, 1), 0, 1)
+    p := path.New(state.NewState(0, 1), 1)
     cache.Set(p, 42)
 
     require.Equal(t, 1, cache.ItemsCount())
@@ -223,7 +238,7 @@ func TestCacheEach(t *testing.T) {
     sym := symmetry.NewSymmetry(5)
     cache := cache.NewCache(sym)
 
-    p := path.New(state.NewState(0, 1), 0, 1)
+    p := path.New(state.NewState(0, 1), 1)
     cache.Set(p, 100)
 
     count := 0

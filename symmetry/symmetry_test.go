@@ -6,7 +6,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"knighttour/path"
 	"knighttour/state"
 )
 
@@ -39,16 +38,8 @@ func TestNewSymmetry(t *testing.T) {
 			assert.Equal(t, tt.size, s.size, "size")
 			assert.Len(t, GetSymmetries(tt.size), numTransforms, "number of transforms")
 			totalCells := tt.size * tt.size
-			assert.Len(t, s.bestIdx, totalCells, "bestIdx length")
-			for i, idxs := range s.bestIdx {
-				assert.Len(t, idxs, totalCells, "bestIdx[%d] length", i)
-				for j, idx := range idxs {
-					assert.Less(t, int(idx), numTransforms, "bestIdx[%d][%d] valid transform", i, j)
-				}
-			}
 			assert.Len(t, s.canonical, totalCells, "canonical length")
 			assert.Len(t, s.orbitSize, totalCells, "orbitSize length")
-			assert.Len(t, s.canonicalIdx, totalCells, "canonicalIdx length")
 			groups := s.GetCanonicalGroups()
 			totalInGroups := 0
 			for _, g := range groups {
@@ -307,75 +298,77 @@ func TestGetCanonicalGroups(t *testing.T) {
 	})
 }
 
-func TestCanonicalizePath(t *testing.T) {
+func TestCanonicalize(t *testing.T) {
 	s := NewSymmetry(5)
 
 	tests := []struct {
 		name  string
 		state state.State
-		start int
 		end   int
 	}{
-		{"single cell path", 1 << uint64(7), 7, 7},
-		{"two cell path", (1 << 7) | (1 << 8), 7, 8},
-		{"path from corner", (1 << 0) | (1 << 4), 0, 4},
+		{"single cell", 1 << uint64(7), 7},
+		{"two cells", (1 << 7) | (1 << 8), 8},
+		{"corner pair", (1 << 0) | (1 << 4), 4},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			p := path.New(tt.state, tt.start, tt.end)
-			canonical := s.CanonicalizePath(p)
+			canonical := s.Canonicalize(tt.state, tt.end)
 
-			assert.Equal(t, s.GetCanonicalPosition(tt.start), canonical.Start(), "canonical start")
 			assert.True(t, canonical.End() >= 0 && canonical.End() < 25, "canonical end in range")
+			assert.Equal(t, tt.state.CountBits(), canonical.State().CountBits(), "bit count preserved")
 
-			canonicalState := canonical.State()
-
-			assert.Equal(t, tt.state.CountBits(), canonicalState.CountBits(), "canonical state bit count")
+			twice := s.Canonicalize(canonical.State(), canonical.End())
+			assert.Equal(t, canonical, twice, "canonicalization is idempotent")
 		})
 	}
 
-	t.Run("path from all symmetries gives same canonical", func(t *testing.T) {
-		originalPath := path.New(state.NewState(23, 12), 23, 12)
-		canonicalPath := s.CanonicalizePath(originalPath)
+	t.Run("all symmetries give same canonical", func(t *testing.T) {
+		st, end := state.NewState(23, 12), 12
+		canonical := s.Canonicalize(st, end)
 
-		for i := range 8 {
-			transformedStart := s.applyIdx(uint8(i), originalPath.Start())
-			transformedEnd := s.applyIdx(uint8(i), originalPath.End())
-			transformedState := s.transformState(uint8(i), originalPath.State())
-
-			poly := path.New(transformedState, transformedStart, transformedEnd)
-			best := s.CanonicalizePath(poly)
-			assert.Equal(t, canonicalPath, best, "all transforms give same canonical path")
+		for i := range numTransforms {
+			symSt := s.transformState(uint8(i), st)
+			symEnd := s.applyIdx(uint8(i), end)
+			assert.Equal(t, canonical, s.Canonicalize(symSt, symEnd), "transform %d", i)
 		}
 	})
 
-	t.Run("full board path preserves full state", func(t *testing.T) {
+	t.Run("full board state preserved", func(t *testing.T) {
 		fullState := state.State((1 << 25) - 1)
-		p := path.New(fullState, 0, 24)
+		canonical := s.Canonicalize(fullState, 24)
+		assert.Equal(t, 25, canonical.State().CountBits(), "canonical visited cells")
+	})
 
-		canonical := s.CanonicalizePath(p)
+	t.Run("states from different orbits stay separate", func(t *testing.T) {
+		// Center cell orbit is a singleton; corner orbit never contains center.
+		center := s.Canonicalize(state.NewState(12), 12)
+		corner := s.Canonicalize(state.NewState(0), 0)
+		assert.NotEqual(t, center.State(), corner.State(), "different orbits")
+	})
 
-		assert.Equal(t, 25, canonical.State().CountBits(), "canonical path visited cells")
+	t.Run("symmetric cells merge", func(t *testing.T) {
+		// Cells 0 and 4 share an orbit on 5x5.
+		a := s.Canonicalize(state.NewState(0), 0)
+		b := s.Canonicalize(state.NewState(4), 4)
+		assert.Equal(t, a, b, "same-orbit single-cell tasks merge")
 	})
 }
 
-func TestCanonicalizePathMinimalStart(t *testing.T) {
+func TestCanonicalizeLexicographicMinimum(t *testing.T) {
 	s := NewSymmetry(5)
 
-	t.Run("start is minimum in orbit", func(t *testing.T) {
-		p := path.New((1<<4)|(1<<0), 4, 0)
-		canonical := s.CanonicalizePath(p)
+	st := state.NewState(20, 21)
+	end := 21
+	canonical := s.Canonicalize(st, end)
 
-		assert.Equal(t, 0, canonical.Start(), "canonical start minimum in orbit")
-	})
-
-	t.Run("end is minimum among equal starts", func(t *testing.T) {
-		p := path.New((1<<4)|(1<<20), 4, 20)
-		canonical := s.CanonicalizePath(p)
-
-		assert.Equal(t, 0, canonical.Start(), "canonical start minimum")
-	})
+	for i := range numTransforms {
+		cand := s.Canonicalize(s.transformState(uint8(i), st), s.applyIdx(uint8(i), end))
+		assert.LessOrEqual(t, canonical.State(), cand.State(), "canonical state is minimal in orbit")
+		if canonical.State() == cand.State() {
+			assert.LessOrEqual(t, canonical.End(), cand.End(), "canonical end is minimal for equal states")
+		}
+	}
 }
 
 func TestPropertyOrbitSizePlus(t *testing.T) {
@@ -444,26 +437,20 @@ func TestApplyTransformToStateWithLookup(t *testing.T) {
 	})
 }
 
-func TestCanonicalizePathStateConsistency(t *testing.T) {
+func TestCanonicalizeStateConsistency(t *testing.T) {
 	s := NewSymmetry(5)
 
-	p := path.New((1<<0)|(1<<4)|(1<<8), 0, 8)
-	canonical := s.CanonicalizePath(p)
-
+	canonical := s.Canonicalize((1<<0)|(1<<4)|(1<<8), 8)
 	assert.Equal(t, 3, canonical.State().CountBits(), "canonical state bit count")
 
-	p2 := path.New((1 << 12), 12, 12)
-	canonical2 := s.CanonicalizePath(p2)
-
-	assert.Equal(t, 12, canonical2.Start(), "center start canonicalized")
+	canonical2 := s.Canonicalize(state.NewState(12), 12)
+	assert.True(t, canonical2.State().IsVisited(canonical2.End()), "center task keeps its cell")
 }
 
 func TestMultipleSizes(t *testing.T) {
 	for _, size := range []int{5, 6, 7, 8} {
 		t.Run(fmt.Sprintf("%dx%d", size, size), func(t *testing.T) {
 			s := NewSymmetry(size)
-
-			assert.Len(t, s.bestIdx, size*size, "bestIdx length")
 
 			groups := s.GetCanonicalGroups()
 			count := 0

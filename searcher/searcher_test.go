@@ -33,7 +33,7 @@ func TestSearcherCountFromState(t *testing.T) {
 	searcher := NewSearcher(g, sym)
 
 	s := state.State(0).Visit(0)
-	pos := path.New(s, 0, 0)
+	pos := path.New(s, 0)
 
 	result := searcher.CountPathsDFS(context.Background(), pos)
 
@@ -68,7 +68,7 @@ func TestSearcherCountPathsDFSFromPartialPath(t *testing.T) {
 	searcher := NewSearcher(g, sym)
 
 	s := state.State(0).Visit(0).Visit(8)
-	pos := path.New(s, 0, 8)
+	pos := path.New(s, 8)
 
 	result := searcher.CountPathsDFS(context.Background(), pos)
 

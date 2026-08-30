@@ -68,12 +68,12 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 	monitor.AddTasks(taskCache.ItemsCount())
 
 	total := atomic.Uint64{}
-	taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, count int) {
+	taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, weight int) {
 		result := c.searcher.CountPathsDFS(ctx, p)
-		orbits := uint64(c.symmetry.GetOrbitSize(p.Start()))
 
-		total.Add(uint64(result.TotalPathsFound*count) * orbits)
-		monitor.ReportPathsFound(result.TotalPathsFound * count * int(orbits))
+		paths := uint64(result.TotalPathsFound) * uint64(weight)
+		total.Add(paths)
+		monitor.ReportPathsFound(int(paths))
 		monitor.ReportTaskCompleted()
 	})
 

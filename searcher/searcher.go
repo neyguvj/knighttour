@@ -28,32 +28,35 @@ func NewSearcher(g *graph.Graph, sym *symmetry.Symmetry) *Searcher {
 
 func (s *Searcher) CountPaths(ctx context.Context, start int) types.Result {
 	st := state.State(0).Visit(start)
-	p := path.New(st, start, start)
+	p := path.New(st, start)
 	return s.CountPathsDFS(ctx, p)
 }
 
-func (s *Searcher) GenerateSubtasks(ctx context.Context, c *cache.Cache, start, orbetSize, depth int) (result types.Result) {
+func (s *Searcher) GenerateSubtasks(ctx context.Context, c *cache.Cache, start, orbitSize, depth int) (result types.Result) {
 	if s.graph.SholdSkip(start) {
 		return result
 	}
 	st := state.NewState(start)
-	s.dfs(ctx, st, start, start, depth, c, &result.CachedPaths)
+	s.dfs(ctx, st, start, depth, c, orbitSize, &result.CachedPaths)
 	return result
 }
 
 func (s *Searcher) CountPathsDFS(ctx context.Context, p path.Path) (result types.Result) {
-	result.TotalPathsFound = s.dfs(ctx, p.State(), p.Start(), p.End(), s.graph.GetTotalCells(), nil, nil)
+	result.TotalPathsFound = s.dfs(ctx, p.State(), p.End(), s.graph.GetTotalCells(), nil, 0, nil)
 	return result
 }
 
-func (s *Searcher) dfs(ctx context.Context, st state.State, start, end, depth int, c *cache.Cache, cached *int) int {
+// dfs is the unified hot DFS. When c != nil it stops at depth and stores each
+// prefix as (state, end) with the given orbit weight; otherwise it counts full
+// completions down to a full board.
+func (s *Searcher) dfs(ctx context.Context, st state.State, end, depth int, c *cache.Cache, weight int, cached *int) int {
 	if ctx.Err() != nil {
 		return 0
 	}
 
 	if st.CountBits() >= depth {
 		if c != nil {
-			c.Set(path.New(st, start, end), 1)
+			c.Set(path.New(st, end), weight)
 			*cached++
 		}
 		return 1
@@ -68,7 +71,7 @@ func (s *Searcher) dfs(ctx context.Context, st state.State, start, end, depth in
 		if !newUnvisited.IsEmpty() && s.pruner.ShouldPruneAfterVisit(n, newUnvisited) {
 			continue
 		}
-		found += s.dfs(ctx, st.Visit(n), start, n, depth, c, cached)
+		found += s.dfs(ctx, st.Visit(n), n, depth, c, weight, cached)
 	}
 	return found
 }

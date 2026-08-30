@@ -17,6 +17,10 @@ type shard struct {
 	sync.RWMutex
 }
 
+// Cache stores search subtasks keyed by the canonical (state, end) pair.
+// Values are aggregated weights: sum of count*orbitSize over all prefixes
+// that merge into the same key. Total contribution of an entry is
+// completions(key) * weight.
 type Cache struct {
 	symmetry *symmetry.Symmetry
 	shards   [numShards]shard
@@ -39,42 +43,42 @@ func (c *Cache) getShardKey(p path.Path) int {
 }
 
 func (c *Cache) Get(p path.Path) (int, bool) {
-	canonicalPath := c.symmetry.CanonicalizePath(p)
-	shardIdx := c.getShardKey(canonicalPath)
+	canonical := c.symmetry.Canonicalize(p.State(), p.End())
+	shardIdx := c.getShardKey(canonical)
 	c.shards[shardIdx].RLock()
 	defer c.shards[shardIdx].RUnlock()
-	if count, found := c.shards[shardIdx].data[canonicalPath]; found {
-		return count, true
+	if weight, found := c.shards[shardIdx].data[canonical]; found {
+		return weight, true
 	}
 	return 0, false
 }
 
-func (c *Cache) Set(p path.Path, val int) {
-	if val == 0 {
+func (c *Cache) Set(p path.Path, weight int) {
+	if weight == 0 {
 		return
 	}
-	canonicalPath := c.symmetry.CanonicalizePath(p)
-	shardIdx := c.getShardKey(canonicalPath)
+	canonical := c.symmetry.Canonicalize(p.State(), p.End())
+	shardIdx := c.getShardKey(canonical)
 	c.shards[shardIdx].Lock()
 	defer c.shards[shardIdx].Unlock()
-	c.shards[shardIdx].data[canonicalPath] += val
+	c.shards[shardIdx].data[canonical] += weight
 }
 
 func (c *Cache) Has(p path.Path) bool {
-	canonicalPath := c.symmetry.CanonicalizePath(p)
-	shardIdx := c.getShardKey(canonicalPath)
+	canonical := c.symmetry.Canonicalize(p.State(), p.End())
+	shardIdx := c.getShardKey(canonical)
 	c.shards[shardIdx].RLock()
 	defer c.shards[shardIdx].RUnlock()
-	_, found := c.shards[shardIdx].data[canonicalPath]
+	_, found := c.shards[shardIdx].data[canonical]
 	return found
 }
 
 func (c *Cache) Delete(p path.Path) {
-	canonicalPath := c.symmetry.CanonicalizePath(p)
-	shardIdx := c.getShardKey(canonicalPath)
+	canonical := c.symmetry.Canonicalize(p.State(), p.End())
+	shardIdx := c.getShardKey(canonical)
 	c.shards[shardIdx].Lock()
 	defer c.shards[shardIdx].Unlock()
-	delete(c.shards[shardIdx].data, canonicalPath)
+	delete(c.shards[shardIdx].data, canonical)
 }
 
 func (c *Cache) Clear() {

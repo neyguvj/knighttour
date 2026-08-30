@@ -2,25 +2,24 @@ package path
 
 import (
 	"fmt"
+
 	"knighttour/state"
 )
 
+// Path is a search task: visited cells mask plus current cell.
+// It intentionally has no start field: the number of completions depends
+// only on (state, end), and orbit contributions are carried as cache weight.
 type Path struct {
 	state state.State
-	start uint8
 	end   uint8
 }
 
-func New(st state.State, start, end int) Path {
-	return Path{state: st, start: uint8(start), end: uint8(end)}
+func New(st state.State, end int) Path {
+	return Path{state: st, end: uint8(end)}
 }
 
 func (p Path) State() state.State {
 	return p.state
-}
-
-func (p Path) Start() int {
-	return int(p.start)
 }
 
 func (p Path) End() int {
@@ -28,5 +27,5 @@ func (p Path) End() int {
 }
 
 func (p Path) String() string {
-	return fmt.Sprintf("[%d -> %d (%s)]", p.start, p.end, p.state.String())
+	return fmt.Sprintf("[-> %d (%s)]", p.end, p.state.String())
 }

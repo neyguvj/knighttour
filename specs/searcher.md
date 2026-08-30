@@ -53,9 +53,10 @@ func (s *Searcher) GenerateSubtasks(
 **Алгоритм:**
 1. Если `SholdSkip(start)` — вернуть пустой результат (проверка вынесена наверх, т.к. start неизменен)
 2. DFS по префиксам (`dfs`): как только `CountBits(state) >= depth`,
-   сохранить путь в кэш (`cache.Set(p, 1)`) и прекратить спуск; ветви режет
-   `ShouldPruneAfterVisit` (тот же инвариант, что и в основном DFS)
-3. Возвращает `types.Result.CachedPaths` — количество закэшированных путей
+    сохранить задачу в кэш с весом орбиты (`cache.Set(path.New(st, end), orbitSize)`)
+    и прекратить спуск; ветви режет `ShouldPruneAfterVisit` (тот же инвариант, что и в основном DFS).
+    `start` в ключ не попадает — вместо него вклад группы кодируется весом `orbitSize`
+3. Возвращает `types.Result.CachedPaths` — количество записей, отправленных в кэш
 
 ### 3. CountPathsDFS(ctx context.Context, p path.Path) types.Result
 
@@ -70,11 +71,11 @@ func (s *Searcher) CountPathsDFS(ctx context.Context, p path.Path) types.Result
 сводится к базовому случаю:
 
 ```go
-func (s *Searcher) dfs(ctx context.Context, st State, start, end, depth int, c *Cache, cached *int) int
+func (s *Searcher) dfs(ctx context.Context, st State, end, depth int, c *Cache, weight int, cached *int) int
 ```
 
 1. Базовый случай: `CountBits(st) >= depth` → если `c != nil`, сохранить
-   `path.New(st, start, end)` в кэш и инкрементировать `*cached`; вернуть 1
+   `path.New(st, end)` в кэш с весом `weight` и инкрементировать `*cached`; вернуть 1
 2. `unvisited := fullMask &^ state`; кандидаты: `neighborMasks[end] & unvisited`
 3. Перебор кандидатов через итератор `for n := range cand.AllVisited()` (без прямых битовых операций)
 4. Если после хода остались непосещённые и `pruner.ShouldPruneAfterVisit(n, newUnvisited)` → continue
@@ -90,8 +91,8 @@ func (s *Searcher) dfs(ctx context.Context, st State, start, end, depth int, c *
 
 **Без аллокаций в горячем цикле:** `unvisited` строится через `st.Invert(totalCells)`, кандидаты —
 через `graph.GetNeighborMask(end).Intersect(unvisited)`; перебор — итератором `AllVisited()`.
-Ни колбэков, ни сканов доски внутри рекурсии нет. Цена унификации — один лишний
-параметр (`depth`) и nil-check кэша на узел.
+Ни колбэков, ни сканов доски внутри рекурсии нет. Цена унификации — два лишних
+параметра (`depth`, `weight`) и nil-check кэша на узел.
 
 ## Экспериментальные прунинги (результат замеров на 5×5/6×6, НЕ реализованы)
 
@@ -111,22 +112,23 @@ func (s *Searcher) dfs(ctx context.Context, st State, start, end, depth int, c *
 
 ## Типы данных
 
-### Path
+### Path (задача поиска)
 
 ```go
 type Path struct {
     state State  // битовая маска посещенных клеток
-    start uint8  // начальная позиция (неизменяемая, uint8)
     end   uint8  // текущая позиция (uint8)
 }
 
-func New(state State, start int, end int) Path
+func New(state State, end int) Path
 
 func (p Path) State() State
-func (p Path) Start() int
 func (p Path) End() int
 func (p Path) String() string
 ```
+
+Поле `start` удалено: число продолжений из состояния зависит только от
+`(state, end)`, а вклад стартовой орбиты перенесён в вес записи кэша.
 
 ### Result
 
@@ -149,11 +151,10 @@ result := c.searcher.GenerateSubtasks(ctx, cache, start, orbitSize, depth)
 
 // Параллельный подсчет из кэша:
 total := atomic.Uint64{}
-taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, count int) {
+taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, weight int) {
     result := c.searcher.CountPathsDFS(ctx, p)
-    orbits := uint64(c.symmetry.GetOrbitSize(p.Start()))
-
-    total.Add(uint64(result.TotalPathsFound*count) * orbits)
+    // weight уже содержит Σ count·orbitSize по всем внесшим вклад группам
+    total.Add(uint64(result.TotalPathsFound) * uint64(weight))
 })
 ```
 

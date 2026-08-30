@@ -77,10 +77,11 @@ func (c *Counter) ParallelCountWithDepth(
 5. После генерации подзадач добавить их количество (`taskCache.ItemsCount()`)
 6. Запустить worker pool с лимитом workers через `errgroup.Group`
 7. Для каждой записи в кэше:
-   - Получить канонический путь и количество решений
-   - Вызвать `CountPathsDFS` для подсчета путей из этого состояния
-   - Размер орбиты брать из предвычисленного `symmetry.GetOrbitSize(p.Start())` (O(1) таблица вместо линейного скана групп)
-   - Умножить результат на `count * group.OrbitSize` и добавить к общему счетчику
+   - Получить каноническую пару `(state, end)` и агрегированный вес `Σ count·orbitSize`
+   - Вызвать `CountPathsDFS` для подсчета продолжений из этого состояния
+   - Умножить результат на вес и добавить к общему счетчику
+     (`total += completions * weight`; умножение на размер орбиты уже зашито
+     в вес при генерации, `start`/`GetOrbitSize` на этом этапе не нужны)
    - Зарегистрировать завершение через `monitor.ReportPathsFound()` и `monitor.ReportTaskCompleted()`
 8. Вернуть суммарное количество путей
 
@@ -92,6 +93,13 @@ c := counter.NewCounter(g)
 count := c.ParallelCountWithDepth(ctx, monitor, 8, 0) // с 8 воркерами
 fmt.Printf("Total tours: %d\n", count)
 ```
+
+## Бенчмарки
+
+`counter/benchmark_test.go`:
+- `BenchmarkCountAllToursParallel` — замеряет `ParallelCountWithDepth` на досках 5×5 и 6×6,
+  перебирая глубины предподсчёта `depth = 1..size*size/2` (вложенные подбенчмарки `sizeN/depthD`),
+  число воркеров равно `runtime.NumCPU()`.
 
 ## Мониторинг
 
@@ -180,7 +188,7 @@ for _, group := range groups {
     cache := cache.NewCache(symmetry)
     result := searcher.GenerateSubtasks(ctx, cache, group.Canonical, group.OrbitSize, depth)
     
-    // Кэш содержит подзадачи с количеством решений
+    // Кэш содержит подзадачи с агрегированным весом Σ count·orbitSize
 }
 ```
 
@@ -265,9 +273,9 @@ for _, task := range tasks {
 // ПРАВИЛЬНО:
 total := atomic.Uint64{}
 g.Go(func() error {
-    result := searcher.CountPaths(ctx, p)
-    orbits := uint64(symmetry.GetOrbitSize(p.Start()))
-    total.Add(uint64(result.TotalPathsFound) * orbits)
+    result := searcher.CountPathsDFS(ctx, p)
+    // weight = Σ count·orbitSize уже лежит в значении кэша
+    total.Add(uint64(result.TotalPathsFound) * uint64(weight))
     return nil
 })
 ```

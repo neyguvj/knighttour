@@ -13,13 +13,11 @@ const numTransforms = 8
 const maxCells = 64
 
 type Symmetry struct {
-	canonical    []int
-	canonicalIdx []uint8
-	orbitSize    []int
-	bestIdx      [][]uint8
-	groups       []CanonicalGroup
-	size         int
-	perms        [numTransforms][maxCells]uint8
+	canonical []int
+	orbitSize []int
+	groups    []CanonicalGroup
+	size      int
+	perms     [numTransforms][maxCells]uint8
 }
 
 func NewSymmetry(size int) *Symmetry {
@@ -37,33 +35,11 @@ func NewSymmetry(size int) *Symmetry {
 	}
 
 	s.canonical = make([]int, totalCells)
-	s.canonicalIdx = make([]uint8, totalCells)
 	s.orbitSize = make([]int, totalCells)
 
 	for pos := range totalCells {
-		s.canonical[pos], s.canonicalIdx[pos] = s.getCanonicalPositionAndTransform(pos)
+		s.canonical[pos] = s.getCanonicalPosition(pos)
 		s.orbitSize[pos] = s.computeOrbitSize(pos)
-	}
-
-	s.bestIdx = make([][]uint8, totalCells)
-	for start := range totalCells {
-		s.bestIdx[start] = make([]uint8, totalCells)
-		bestStart := s.canonical[start]
-		for end := range totalCells {
-			bestT := s.canonicalIdx[start]
-			bestEnd := end
-			for t := range numTransforms {
-				if int(s.perms[t][start]) != bestStart {
-					continue
-				}
-				newEnd := int(s.perms[t][end])
-				if newEnd < bestEnd {
-					bestEnd = newEnd
-					bestT = uint8(t)
-				}
-			}
-			s.bestIdx[start][end] = bestT
-		}
 	}
 
 	s.groups = s.buildCanonicalGroups()
@@ -106,14 +82,23 @@ func (s *Symmetry) GetCanonicalGroupByPosition(pos int) CanonicalGroup {
 	return s.groups[0]
 }
 
-func (s *Symmetry) CanonicalizePath(p path.Path) path.Path {
-	t := s.bestIdx[p.Start()][p.End()]
+// Canonicalize returns the canonical representative of the D4 orbit of the
+// pair (state, end): lexicographic minimum of (t(state), t(end)) over all 8
+// board symmetries. Start is not involved: completions depend only on the
+// visited mask and the current cell.
+func (s *Symmetry) Canonicalize(st state.State, end int) path.Path {
+	bestState := s.transformState(0, st)
+	bestEnd := int(s.perms[0][end])
 
-	return path.New(
-		s.transformState(t, p.State()),
-		int(s.perms[t][p.Start()]),
-		int(s.perms[t][p.End()]),
-	)
+	for t := 1; t < numTransforms; t++ {
+		ts := s.transformState(uint8(t), st)
+		te := int(s.perms[t][end])
+		if ts < bestState || (ts == bestState && te < bestEnd) {
+			bestState, bestEnd = ts, te
+		}
+	}
+
+	return path.New(bestState, bestEnd)
 }
 
 func (s *Symmetry) transformState(t uint8, st state.State) state.State {
@@ -125,16 +110,14 @@ func (s *Symmetry) transformState(t uint8, st state.State) state.State {
 	return result
 }
 
-func (s *Symmetry) getCanonicalPositionAndTransform(pos int) (bestPos int, bestT uint8) {
-	bestPos = pos
-	bestT = uint8(0)
+func (s *Symmetry) getCanonicalPosition(pos int) int {
+	bestPos := pos
 	for t := range numTransforms {
 		if p := s.perms[t][pos]; int(p) < bestPos {
 			bestPos = int(p)
-			bestT = uint8(t)
 		}
 	}
-	return bestPos, bestT
+	return bestPos
 }
 
 func (s *Symmetry) computeOrbitSize(pos int) int {
