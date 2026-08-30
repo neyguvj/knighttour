@@ -118,7 +118,7 @@ func TestGetNeighborMask(t *testing.T) {
 func TestNeighborsWithinBounds(t *testing.T) {
 	g := New(5)
 
-	for pos := 0; pos < 25; pos++ {
+	for pos := range 25 {
 		neighbors := g.GetNeighbors(pos)
 		for _, n := range neighbors {
 			assert.True(t, n >= 0 && n < 25, "GetNeighbors(%d) in bounds", pos)
@@ -135,7 +135,7 @@ func TestNeighborsWithinBounds(t *testing.T) {
 func TestNeighborSymmetry(t *testing.T) {
 	g := New(5)
 
-	for pos := 0; pos < 25; pos++ {
+	for pos := range 25 {
 		mask := g.GetNeighborMask(pos)
 		neighbors := g.GetNeighbors(pos)
 		expectedMask := state.State(0)

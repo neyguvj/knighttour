@@ -94,7 +94,7 @@ func TestApplyTransform(t *testing.T) {
 	t.Run("all transforms on corner", func(t *testing.T) {
 		pos := 0
 		results := make(map[int]bool)
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			result := s.applyIdx(uint8(i), pos)
 			results[result] = true
 		}
@@ -104,7 +104,7 @@ func TestApplyTransform(t *testing.T) {
 	t.Run("all transforms on edge (non-corner)", func(t *testing.T) {
 		pos := 1
 		results := make(map[int]bool)
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			result := s.applyIdx(uint8(i), pos)
 			results[result] = true
 		}
@@ -114,7 +114,7 @@ func TestApplyTransform(t *testing.T) {
 	t.Run("all transforms on diagonal (not center)", func(t *testing.T) {
 		pos := 6 // (1,1)
 		results := make(map[int]bool)
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			result := s.applyIdx(uint8(i), pos)
 			results[result] = true
 		}
@@ -244,7 +244,7 @@ func TestGetOrbitSize(t *testing.T) {
 
 	t.Run("orbit size is at least 1 and at most 8", func(t *testing.T) {
 		totalCells := s.size * s.size
-		for i := 0; i < totalCells; i++ {
+		for i := range totalCells {
 			size := s.GetOrbitSize(i)
 			assert.True(t, size >= 1 && size <= 8, "orbit size for pos %d = %d in range [1,8]", i, size)
 		}
@@ -332,7 +332,7 @@ func TestCanonicalizePath(t *testing.T) {
 		originalPath := path.New(state.NewState(23, 12), 23, 12)
 		canonicalPath := s.CanonicalizePath(originalPath)
 
-		for i := 0; i < 8; i++ {
+		for i := range 8 {
 			transformedStart := s.applyIdx(uint8(i), originalPath.Start())
 			transformedEnd := s.applyIdx(uint8(i), originalPath.End())
 			transformedState := s.transformState(uint8(i), originalPath.State())
@@ -392,14 +392,14 @@ func TestPropertyTransformInvolutions(t *testing.T) {
 	s := NewSymmetry(5)
 
 	t.Run("identity is involution", func(t *testing.T) {
-		for i := 0; i < 25; i++ {
+		for i := range 25 {
 			r1 := s.applyIdx(0, i)
 			assert.Equal(t, i, r1, "identity transform")
 		}
 	})
 
 	t.Run("180 rotation twice = identity", func(t *testing.T) {
-		for i := 0; i < 25; i++ {
+		for i := range 25 {
 			r1 := s.applyIdx(2, i)
 			r2 := s.applyIdx(2, r1)
 			assert.Equal(t, i, r2, "180° twice = identity")
@@ -408,7 +408,7 @@ func TestPropertyTransformInvolutions(t *testing.T) {
 
 	t.Run("reflection twice = identity", func(t *testing.T) {
 		for refIdx := 4; refIdx < 8; refIdx++ {
-			for i := 0; i < 25; i++ {
+			for i := range 25 {
 				r1 := s.applyIdx(uint8(refIdx), i)
 				r2 := s.applyIdx(uint8(refIdx), r1)
 				assert.Equal(t, i, r2, "reflection %d twice = identity", refIdx)

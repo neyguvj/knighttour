@@ -22,12 +22,12 @@ type Counter struct {
 	searcher *searcher.Searcher
 }
 
-func NewCounter(graph *graph.Graph) *Counter {
-	size := graph.Size()
+func NewCounter(g *graph.Graph) *Counter {
+	size := g.Size()
 	sym := symmetry.NewSymmetry(size)
-	searcherObj := searcher.NewSearcher(graph, sym)
+	searcherObj := searcher.NewSearcher(g, sym)
 	return &Counter{
-		graph:    graph,
+		graph:    g,
 		symmetry: sym,
 		searcher: searcherObj,
 	}
@@ -42,8 +42,8 @@ func (c *Counter) ParallelCount(ctx context.Context, monitor monitoring.Monitor,
 	return c.ParallelCountWithDepth(ctx, monitor, workers, DefaultPrecomputeDepth)
 }
 
-func (c *Counter) generateSubTasks(ctx context.Context, monitor monitoring.Monitor, workers int, precomputeDepth int) *cache.Cache {
-	cache := cache.NewCache(c.symmetry)
+func (c *Counter) generateSubTasks(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) *cache.Cache {
+	taskCache := cache.NewCache(c.symmetry)
 	groups := c.symmetry.GetCanonicalGroups()
 	monitor.AddTasks(len(groups))
 
@@ -52,7 +52,7 @@ func (c *Counter) generateSubTasks(ctx context.Context, monitor monitoring.Monit
 	for _, group := range groups {
 		p := group.Canonical
 		g.Go(func() error {
-			result := c.searcher.GenerateSubtasks(ctx, cache, p, group.OrbitSize, precomputeDepth)
+			result := c.searcher.GenerateSubtasks(ctx, taskCache, p, group.OrbitSize, precomputeDepth)
 			monitor.ReportPathsCached(result.CachedPaths)
 			monitor.ReportTaskCompleted()
 			return nil
@@ -60,10 +60,10 @@ func (c *Counter) generateSubTasks(ctx context.Context, monitor monitoring.Monit
 	}
 	_ = g.Wait()
 
-	return cache
+	return taskCache
 }
 
-func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers int, precomputeDepth int) uint64 {
+func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) uint64 {
 	taskCache := c.generateSubTasks(ctx, monitor, workers, precomputeDepth)
 	monitor.AddTasks(taskCache.ItemsCount())
 

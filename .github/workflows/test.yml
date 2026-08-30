@@ -5,27 +5,47 @@ on:
     branches: [main]
   pull_request:
 
+permissions:
+  contents: read
+
 jobs:
   test:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
-    
+    timeout-minutes: 15
+
     steps:
       - uses: actions/checkout@v4
-      
-      - name: Setup Go
-        uses: actions/setup-go@v5
+
+      # make is preinstalled on ubuntu-latest, but keep a fallback just in case.
+      - name: Ensure make is available
+        run: |
+          if ! command -v make >/dev/null 2>&1; then
+            sudo apt-get update && sudo apt-get install -y make
+          fi
+
+      - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      
-      - name: go vet
-        run: go vet ./...
-      
+
+      # golangci-lint is not preinstalled on GitHub-hosted runners.
+      - name: Ensure golangci-lint is available
+        run: |
+          if ! command -v golangci-lint >/dev/null 2>&1; then
+            curl -sSfL https://raw.githubusercontent.com/golangci/golangci-lint/HEAD/install.sh \
+              | sh -s -- -b /usr/local/bin latest
+          fi
+
+      - name: Build
+        run: make build
+
       - name: go fmt
-        run: go fmt ./...
-      
-      - name: go build
-        run: go build ./...
-      
-      - name: go test
-        run: go test -v -race ./...
+        run: make fmt
+
+      - name: go vet
+        run: make vet
+
+      - name: Test
+        run: make test
+
+      - name: Lint
+        run: make lint

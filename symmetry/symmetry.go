@@ -132,9 +132,9 @@ func applyTransform(t Transform, pos, size int) int {
 	return nx*size + ny
 }
 
-func (s *Symmetry) getCanonicalPositionAndTransform(pos int) (int, uint8) {
-	bestPos := pos
-	bestT := uint8(0)
+func (s *Symmetry) getCanonicalPositionAndTransform(pos int) (bestPos int, bestT uint8) {
+	bestPos = pos
+	bestT = uint8(0)
 	for t := range numTransforms {
 		if p := s.perms[t][pos]; int(p) < bestPos {
 			bestPos = int(p)
@@ -156,7 +156,7 @@ func (s *Symmetry) buildCanonicalGroups() []CanonicalGroup {
 	totalCells := s.size * s.size
 	groupsMap := make(map[int]*CanonicalGroup)
 
-	for pos := 0; pos < totalCells; pos++ {
+	for pos := range totalCells {
 		canonical := s.canonical[pos]
 
 		if groupsMap[canonical] == nil {

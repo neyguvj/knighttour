@@ -1,0 +1,29 @@
+version: "2"
+
+linters:
+  default: standard
+  enable:
+    - modernize
+    - gocritic
+    - makezero
+    - copyloopvar
+  settings:
+    gocritic:
+      enabled-tags:
+        - performance
+        - style
+
+  exclusions:
+    presets:
+      - comments
+    rules:      
+      - path: .*_test\.go
+        linters:
+          - gocritic
+
+formatters:
+  enable:
+    - gofmt
+
+run:
+  timeout: 5m

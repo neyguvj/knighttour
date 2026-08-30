@@ -100,7 +100,7 @@ func TestShouldPruneAfterVisit_MatchesFullScan(t *testing.T) {
 
 	rng := rand.New(rand.NewSource(42))
 
-	for trial := 0; trial < 2000; trial++ {
+	for trial := range 2000 {
 		st := state.State(0).Visit(rng.Intn(totalCells))
 		end := bits.TrailingZeros64(uint64(st))
 		for step := 0; step < totalCells-1; step++ {

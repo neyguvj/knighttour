@@ -38,8 +38,8 @@ func (c *Cache) getShardKey(p path.Path) int {
 	return int(h >> (64 - 6)) // numShards = 64
 }
 
-func (c *Cache) Get(path path.Path) (int, bool) {
-	canonicalPath := c.symmetry.CanonicalizePath(path)
+func (c *Cache) Get(p path.Path) (int, bool) {
+	canonicalPath := c.symmetry.CanonicalizePath(p)
 	shardIdx := c.getShardKey(canonicalPath)
 	c.shards[shardIdx].RLock()
 	defer c.shards[shardIdx].RUnlock()
@@ -49,19 +49,19 @@ func (c *Cache) Get(path path.Path) (int, bool) {
 	return 0, false
 }
 
-func (c *Cache) Set(path path.Path, val int) {
+func (c *Cache) Set(p path.Path, val int) {
 	if val == 0 {
 		return
 	}
-	canonicalPath := c.symmetry.CanonicalizePath(path)
+	canonicalPath := c.symmetry.CanonicalizePath(p)
 	shardIdx := c.getShardKey(canonicalPath)
 	c.shards[shardIdx].Lock()
 	defer c.shards[shardIdx].Unlock()
 	c.shards[shardIdx].data[canonicalPath] += val
 }
 
-func (c *Cache) Has(path path.Path) bool {
-	canonicalPath := c.symmetry.CanonicalizePath(path)
+func (c *Cache) Has(p path.Path) bool {
+	canonicalPath := c.symmetry.CanonicalizePath(p)
 	shardIdx := c.getShardKey(canonicalPath)
 	c.shards[shardIdx].RLock()
 	defer c.shards[shardIdx].RUnlock()
@@ -69,8 +69,8 @@ func (c *Cache) Has(path path.Path) bool {
 	return found
 }
 
-func (c *Cache) Delete(path path.Path) {
-	canonicalPath := c.symmetry.CanonicalizePath(path)
+func (c *Cache) Delete(p path.Path) {
+	canonicalPath := c.symmetry.CanonicalizePath(p)
 	shardIdx := c.getShardKey(canonicalPath)
 	c.shards[shardIdx].Lock()
 	defer c.shards[shardIdx].Unlock()

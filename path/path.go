@@ -11,8 +11,8 @@ type Path struct {
 	end   uint8
 }
 
-func New(state state.State, start int, end int) Path {
-	return Path{state: state, start: uint8(start), end: uint8(end)}
+func New(st state.State, start, end int) Path {
+	return Path{state: st, start: uint8(start), end: uint8(end)}
 }
 
 func (p Path) State() state.State {

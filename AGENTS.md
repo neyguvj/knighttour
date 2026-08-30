@@ -1,16 +1,27 @@
 # AGENTS.md
 
+## Mandatory workflow (read first)
+
+- Before code modification
+  1. read specs for certain module `specs/` folder
+  2. create it if it does not exist
+  3. update specs before code modification
+  4. Use updated specs to make changes and tests for new code
+- Post-Change Verification: After every code modification, you MUST run `make check`
+  (it runs: go fmt → go vet → go test -race → auto-fix modern idioms → golangci-lint).
+  Do not report completion if it fails. Individual targets: `make fmt vet test lint fix bench`.
+
 ## Quick Start
 
 ```bash
 go run main.go        # Build & run
-go test ./...         # Run tests
-go vet ./...          # Static analysis
-go fmt ./...          # Format code
+make check            # fmt + vet + test -race + автофиксы + линтер
+make bench            # Бенчмарки (counter/)
 ```
 
 ## Chat settings
 - Answer in Russian language.
+- Write code and comments in English
 
 ## Environment & Version Awareness
 - Detect Version: Read go.mod before writing code. 
@@ -22,11 +33,9 @@ go fmt ./...          # Format code
   2. create it if it does not exist
   3. update specs before code modification
   4. Use updated specs to make changes and tests for new code
-- Post-Change Verification: After every code modification, you MUST run:
-  1. `go fmt ./...`
-  2. `go vet ./...`
-  3. `go test -race ./...` (strictly require race detector)
-  4. `go fix ./...` (to modernize idioms automatically)  
+- Post-Change Verification: After every code modification, you MUST run `make check`.
+  If any optimization or hot-path change is made, ALSO run `make bench` and attach
+  before/after numbers — never claim a performance win without measurements.
 
 ## Modern Go Idioms (Go 1.21 - 1.26+)
 - Built-ins: Use `max(a, b)` and `min(a, b)` instead of manual if-else blocks.
@@ -83,6 +92,8 @@ go fmt ./...          # Format code
 Run benchmarks with:
 
 ```bash
+make bench
+# или напрямую:
 go test -v -bench=. -run=^$ -benchmem ./counter/
 ```
 

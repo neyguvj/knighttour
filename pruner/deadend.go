@@ -9,9 +9,9 @@ type DeadEndPruner struct {
 	graph *graph.Graph
 }
 
-func NewDeadEndPruner(graph *graph.Graph) *DeadEndPruner {
+func NewDeadEndPruner(g *graph.Graph) *DeadEndPruner {
 	return &DeadEndPruner{
-		graph: graph,
+		graph: g,
 	}
 }
 

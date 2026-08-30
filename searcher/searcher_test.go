@@ -19,7 +19,7 @@ func TestSearcherCountPaths(t *testing.T) {
 	searcher := NewSearcher(g, sym)
 
 	total := 0
-	for start := 0; start < 25; start++ {
+	for start := range 25 {
 		result := searcher.CountPaths(context.Background(), start)
 		total += result.TotalPathsFound
 	}

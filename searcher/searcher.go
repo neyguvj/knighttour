@@ -18,11 +18,11 @@ type Searcher struct {
 	deadend *pruner.DeadEndPruner
 }
 
-func NewSearcher(graph *graph.Graph, sym *symmetry.Symmetry) *Searcher {
+func NewSearcher(g *graph.Graph, sym *symmetry.Symmetry) *Searcher {
 	return &Searcher{
-		graph:   graph,
+		graph:   g,
 		sym:     sym,
-		deadend: pruner.NewDeadEndPruner(graph),
+		deadend: pruner.NewDeadEndPruner(g),
 	}
 }
 
@@ -32,7 +32,7 @@ func (s *Searcher) CountPaths(ctx context.Context, start int) types.Result {
 	return s.CountPathsDFS(ctx, p)
 }
 
-func (s *Searcher) GenerateSubtasks(ctx context.Context, c *cache.Cache, start int, orbetSize int, depth int) (result types.Result) {
+func (s *Searcher) GenerateSubtasks(ctx context.Context, c *cache.Cache, start, orbetSize, depth int) (result types.Result) {
 	if s.graph.SholdSkip(start) {
 		return result
 	}

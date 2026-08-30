@@ -112,11 +112,11 @@ func (s State) HalfwayPoint(cellsCount int) int {
 	if cellsCount%2 == 0 {
 		return cellsCount / 2
 	}
-	bits := s.CountBits()
-	if bits == (cellsCount-1)/2 {
+	count := s.CountBits()
+	if count == (cellsCount-1)/2 {
 		return (cellsCount - 1) / 2
 	}
-	if bits == (cellsCount+1)/2 {
+	if count == (cellsCount+1)/2 {
 		return (cellsCount + 1) / 2
 	}
 	return -1
