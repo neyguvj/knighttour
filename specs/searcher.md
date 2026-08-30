@@ -2,15 +2,16 @@
 
 ## Назначение
 
-Реализация DFS backtracking алгоритма для поиска всех открытых маршрутов коня с использованием Dead-end pruning.
+Реализация DFS backtracking алгоритма для поиска всех открытых маршрутов коня с
+использованием Advanced pruning (dead-end + связность + эвристика концов).
 
 ## Структура данных
 
 ```go
 type Searcher struct {
-    graph   *Graph           // граф смежности
-    sym     *Symmetry        // для канонизации путей в кэше
-    deadend *DeadEndPruner   // отсечение тупиковых ветвей
+    graph  *Graph           // граф смежности
+    sym    *Symmetry        // для канонизации путей в кэше
+    pruner *AdvancedPruner  // отсечение тупиков + связность + эвристика концов
 }
 ```
 
@@ -76,7 +77,7 @@ func (s *Searcher) dfs(ctx context.Context, st State, start, end, depth int, c *
    `path.New(st, start, end)` в кэш и инкрементировать `*cached`; вернуть 1
 2. `unvisited := fullMask &^ state`; кандидаты: `neighborMasks[end] & unvisited`
 3. Перебор кандидатов через итератор `for n := range cand.AllVisited()` (без прямых битовых операций)
-4. Если после хода остались непосещённые и `deadend.ShouldPruneAfterVisit(n, newUnvisited)` → continue
+4. Если после хода остались непосещённые и `pruner.ShouldPruneAfterVisit(n, newUnvisited)` → continue
 5. Рекурсия, сумма результатов — возвращаемое значение
 
 Вызовы:
@@ -156,11 +157,13 @@ taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, count int) {
 })
 ```
 
-## Dead-end Pruning
+## Прунинг
 
-В горячем DFS используется `ShouldPruneAfterVisit(last, unvisited)` — локальная проверка
-за O(deg(last)): изолированной после посещения `last` могла стать только клетка из её
-непосещённых соседей (родительский узел уже прошёл проверку). Подробности — в `pruner.md`.
+В горячем DFS используется `pruner.ShouldPruneAfterVisit(last, unvisited)`: сначала
+дешёвый локальный dead-end за O(deg(last)) (изолированной после посещения `last` могла
+стать только клетка из её непосещённых соседей), затем — глобальные проверки на битовых
+масках: связность `G[unvisited]`, обязательный сосед у `last` и эвристика концов
+(вершины степени ≤1). Подробности — в `pruner.md`.
 
 ## Тесты
 

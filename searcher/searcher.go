@@ -13,16 +13,16 @@ import (
 )
 
 type Searcher struct {
-	graph   *graph.Graph
-	sym     *symmetry.Symmetry
-	deadend *pruner.DeadEndPruner
+	graph  *graph.Graph
+	sym    *symmetry.Symmetry
+	pruner *pruner.AdvancedPruner
 }
 
 func NewSearcher(g *graph.Graph, sym *symmetry.Symmetry) *Searcher {
 	return &Searcher{
-		graph:   g,
-		sym:     sym,
-		deadend: pruner.NewDeadEndPruner(g),
+		graph:  g,
+		sym:    sym,
+		pruner: pruner.NewAdvancedPruner(g),
 	}
 }
 
@@ -65,7 +65,7 @@ func (s *Searcher) dfs(ctx context.Context, st state.State, start, end, depth in
 	found := 0
 	for n := range cand.AllVisited() {
 		newUnvisited := unvisited.Unvisit(n)
-		if !newUnvisited.IsEmpty() && s.deadend.ShouldPruneAfterVisit(n, newUnvisited) {
+		if !newUnvisited.IsEmpty() && s.pruner.ShouldPruneAfterVisit(n, newUnvisited) {
 			continue
 		}
 		found += s.dfs(ctx, st.Visit(n), start, n, depth, c, cached)
