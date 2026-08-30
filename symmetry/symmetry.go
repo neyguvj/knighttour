@@ -13,13 +13,13 @@ const numTransforms = 8
 const maxCells = 64
 
 type Symmetry struct {
-	size         int
-	perms        [numTransforms][maxCells]uint8
 	canonical    []int
 	canonicalIdx []uint8
 	orbitSize    []int
 	bestIdx      [][]uint8
 	groups       []CanonicalGroup
+	size         int
+	perms        [numTransforms][maxCells]uint8
 }
 
 func NewSymmetry(size int) *Symmetry {
@@ -87,9 +87,9 @@ func (s *Symmetry) GetOrbitSize(pos int) int {
 }
 
 type CanonicalGroup struct {
+	Positions []int
 	Canonical int
 	OrbitSize int
-	Positions []int
 }
 
 func (s *Symmetry) GetCanonicalGroups() []CanonicalGroup {
@@ -123,13 +123,6 @@ func (s *Symmetry) transformState(t uint8, st state.State) state.State {
 		result = result.Visit(int(perm[pos]))
 	}
 	return result
-}
-
-func applyTransform(t Transform, pos, size int) int {
-	x := pos / size
-	y := pos % size
-	nx, ny := t(x, y, size)
-	return nx*size + ny
 }
 
 func (s *Symmetry) getCanonicalPositionAndTransform(pos int) (bestPos int, bestT uint8) {

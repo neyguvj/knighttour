@@ -9,9 +9,9 @@
 
 ```go
 type Graph struct {
-    size          int     // Размер доски N
-    neighbors     [][]int // Списки соседей для каждой клетки (0..N²-1)
+    neighbors     [][]int // Списки соседей для каждой клетки (0..N²-1) — первыми, минимизация pointer-префикса (fieldalignment)
     neighborMasks []State // Битовые маски соседей для быстрой проверки
+    size          int     // Размер доски N
     totalCells    int     // Общее количество клеток (N²)
 }
 ```

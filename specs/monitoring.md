@@ -31,8 +31,8 @@
 
 ```go
 type RealMonitor struct {
+    startTime   time.Time      // первыми — pointer(loc) в префиксе структуры (fieldalignment)
     started     atomic.Bool    // флаг запущенного мониторинга
-    startTime   time.Time
     totalTasks  atomic.Uint64  // общее количество задач (subtasks)
     completed   atomic.Uint64  // завершенные задачи
     totalPaths  atomic.Uint64  // найденные пути (с учетом орбит)

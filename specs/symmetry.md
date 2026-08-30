@@ -25,13 +25,13 @@
 type Transform func(x, y, size int) (int, int) // сохранён для API/GetSymmetries
 
 type Symmetry struct {
-    size          int
-    perms         [8][64]uint8 // LUT: perms[t][pos] — образ клетки при t-м преобразовании (строится один раз из замыканий)
-    canonical     []int        // каноническая позиция для каждой клетки
+    canonical     []int        // каноническая позиция для каждой клетки (слайсы первыми — pointer-префикс, fieldalignment)
     canonicalIdx  []uint8      // индекс лучшего преобразования для каждой клетки
     orbitSize     []int        // размер орбиты для каждой клетки
     bestIdx       [][]uint8    // индекс оптимального преобразования для пар (start, end)
     groups        []CanonicalGroup // предвычисленные канонические группы
+    size          int
+    perms         [8][64]uint8 // LUT: perms[t][pos] — образ клетки при t-м преобразовании (строится один раз из замыканий)
 }
 ```
 
@@ -76,9 +76,9 @@ func (s *Symmetry) GetOrbitSize(pos int) int
 
 ```go
 type CanonicalGroup struct {
+    Positions []int   // все позиции в группе (первой — pointer-префикс, fieldalignment)
     Canonical int     // каноническая позиция
     OrbitSize int     // размер орбиты
-    Positions []int   // все позиции в группе
 }
 
 func (s *Symmetry) GetCanonicalGroups() []CanonicalGroup

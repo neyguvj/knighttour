@@ -10,6 +10,14 @@ import (
 	"knighttour/state"
 )
 
+func applyTransform(t Transform, pos int) int {
+	const boardSize = 5
+	x := pos / boardSize
+	y := pos % boardSize
+	nx, ny := t(x, y, boardSize)
+	return nx*boardSize + ny
+}
+
 func TestNewSymmetry(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -29,18 +37,18 @@ func TestNewSymmetry(t *testing.T) {
 				t.Fatal("NewSymmetry returned nil")
 			}
 			assert.Equal(t, tt.size, s.size, "size")
-			assert.Equal(t, numTransforms, len(GetSymmetries(tt.size)), "number of transforms")
+			assert.Len(t, GetSymmetries(tt.size), numTransforms, "number of transforms")
 			totalCells := tt.size * tt.size
-			assert.Equal(t, totalCells, len(s.bestIdx), "bestIdx length")
+			assert.Len(t, s.bestIdx, totalCells, "bestIdx length")
 			for i, idxs := range s.bestIdx {
-				assert.Equal(t, totalCells, len(idxs), "bestIdx[%d] length", i)
+				assert.Len(t, idxs, totalCells, "bestIdx[%d] length", i)
 				for j, idx := range idxs {
 					assert.Less(t, int(idx), numTransforms, "bestIdx[%d][%d] valid transform", i, j)
 				}
 			}
-			assert.Equal(t, totalCells, len(s.canonical), "canonical length")
-			assert.Equal(t, totalCells, len(s.orbitSize), "orbitSize length")
-			assert.Equal(t, totalCells, len(s.canonicalIdx), "canonicalIdx length")
+			assert.Len(t, s.canonical, totalCells, "canonical length")
+			assert.Len(t, s.orbitSize, totalCells, "orbitSize length")
+			assert.Len(t, s.canonicalIdx, totalCells, "canonicalIdx length")
 			groups := s.GetCanonicalGroups()
 			totalInGroups := 0
 			for _, g := range groups {
@@ -64,7 +72,7 @@ func TestGetSymmetries(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			syms := GetSymmetries(tt.size)
-			assert.Equal(t, tt.wantLen, len(syms), "number of symmetries")
+			assert.Len(t, syms, tt.wantLen, "number of symmetries")
 		})
 	}
 }
@@ -98,7 +106,7 @@ func TestApplyTransform(t *testing.T) {
 			result := s.applyIdx(uint8(i), pos)
 			results[result] = true
 		}
-		assert.Equal(t, 4, len(results), "corner position unique transforms")
+		assert.Len(t, results, 4, "corner position unique transforms")
 	})
 
 	t.Run("all transforms on edge (non-corner)", func(t *testing.T) {
@@ -108,7 +116,7 @@ func TestApplyTransform(t *testing.T) {
 			result := s.applyIdx(uint8(i), pos)
 			results[result] = true
 		}
-		assert.Equal(t, 8, len(results), "edge position unique transforms")
+		assert.Len(t, results, 8, "edge position unique transforms")
 	})
 
 	t.Run("all transforms on diagonal (not center)", func(t *testing.T) {
@@ -118,7 +126,7 @@ func TestApplyTransform(t *testing.T) {
 			result := s.applyIdx(uint8(i), pos)
 			results[result] = true
 		}
-		assert.Equal(t, 4, len(results), "diagonal position %d unique transforms", pos)
+		assert.Len(t, results, 4, "diagonal position %d unique transforms", pos)
 	})
 }
 
@@ -149,19 +157,18 @@ func TestApplyTransformStatic(t *testing.T) {
 			case "270 degree rotation of 0":
 				transform = syms[3]
 			}
-			result := applyTransform(transform, tt.pos, 5)
+			result := applyTransform(transform, tt.pos)
 			assert.Equal(t, tt.expected, result, "%s: pos %d", tt.name, tt.pos)
 		})
 	}
 
 	t.Run("transform composition - two 90 degree rotations = 180", func(t *testing.T) {
 		pos := 7
-		size := 5
 
-		result1 := applyTransform(syms[1], pos, size)
-		result2 := applyTransform(syms[1], result1, size)
+		result1 := applyTransform(syms[1], pos)
+		result2 := applyTransform(syms[1], result1)
 
-		expected := applyTransform(syms[2], pos, size)
+		expected := applyTransform(syms[2], pos)
 
 		assert.Equal(t, expected, result2, "two 90° rotations of %d", pos)
 	})
@@ -273,7 +280,7 @@ func TestGetCanonicalGroups(t *testing.T) {
 
 	t.Run("orbit size matches group length", func(t *testing.T) {
 		for _, g := range groups {
-			assert.Equal(t, g.OrbitSize, len(g.Positions), "group canonical=%d positions", g.Canonical)
+			assert.Len(t, g.Positions, g.OrbitSize, "group canonical=%d positions", g.Canonical)
 		}
 	})
 
@@ -456,7 +463,7 @@ func TestMultipleSizes(t *testing.T) {
 		t.Run(fmt.Sprintf("%dx%d", size, size), func(t *testing.T) {
 			s := NewSymmetry(size)
 
-			assert.Equal(t, size*size, len(s.bestIdx), "bestIdx length")
+			assert.Len(t, s.bestIdx, size*size, "bestIdx length")
 
 			groups := s.GetCanonicalGroups()
 			count := 0

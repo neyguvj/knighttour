@@ -13,13 +13,13 @@ import (
 const numShards = 64
 
 type shard struct {
-	sync.RWMutex
 	data map[path.Path]int
+	sync.RWMutex
 }
 
 type Cache struct {
-	shards   [numShards]shard
 	symmetry *symmetry.Symmetry
+	shards   [numShards]shard
 }
 
 func NewCache(sym *symmetry.Symmetry) *Cache {
@@ -100,8 +100,8 @@ func (c *Cache) Each(ctx context.Context, workers int, f func(ctx context.Contex
 	g.SetLimit(workers)
 	for i := range c.shards {
 		g.Go(func() error {
-			if ctx.Err() != nil {
-				return nil
+			if err := ctx.Err(); err != nil {
+				return err
 			}
 			c.shards[i].RLock()
 			for path, count := range c.shards[i].data {

@@ -7,11 +7,21 @@ linters:
     - gocritic
     - makezero
     - copyloopvar
+    - nilerr
+    - errorlint
+    - testifylint
+    - unparam
+    - prealloc
+    - nolintlint
+    - usestdlibvars
+    - misspell
   settings:
     gocritic:
       enabled-tags:
         - performance
         - style
+    govet:
+      enable-all: true
 
   exclusions:
     presets:

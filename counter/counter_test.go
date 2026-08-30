@@ -45,5 +45,5 @@ func TestCounterFromPosition(t *testing.T) {
 
 	count := counter.CountFromPosition(context.Background(), 0)
 
-	assert.Greater(t, count, 0, "Should find paths from valid starting position")
+	assert.Positive(t, count, "Should find paths from valid starting position")
 }

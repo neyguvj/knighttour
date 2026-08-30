@@ -13,8 +13,8 @@
 
 ```go
 type shard struct {
+    data map[path.Path]int  // canonical path → countOfSolutions (первым — минимум pointer-префикса, fieldalignment)
     sync.RWMutex
-    data map[path.Path]int  // canonical path → countOfSolutions
 }
 
 type Cache struct {

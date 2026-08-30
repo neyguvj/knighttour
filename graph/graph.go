@@ -3,9 +3,9 @@ package graph
 import "knighttour/state"
 
 type Graph struct {
-	size          int
 	neighbors     [][]int
 	neighborMasks []state.State
+	size          int
 	totalCells    int
 }
 

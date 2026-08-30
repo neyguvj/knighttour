@@ -17,8 +17,8 @@ type Monitor interface {
 }
 
 type RealMonitor struct {
-	started     atomic.Bool
 	startTime   time.Time
+	started     atomic.Bool
 	totalTasks  atomic.Uint64
 	completed   atomic.Uint64
 	totalPaths  atomic.Uint64

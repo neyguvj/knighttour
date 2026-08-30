@@ -390,13 +390,13 @@ func TestHalfwayPoint(t *testing.T) {
 func TestString(t *testing.T) {
 	tests := []struct {
 		name     string
-		state    State
 		expected string
+		state    State
 	}{
-		{"empty state", 0, "0"},
-		{"bit 0", 1, "1"},
-		{"bit 3", 8, "1000"},
-		{"multiple bits", 5, "101"},
+		{"empty state", "0", 0},
+		{"bit 0", "1", 1},
+		{"bit 3", "1000", 8},
+		{"multiple bits", "101", 5},
 	}
 
 	for _, tt := range tests {
