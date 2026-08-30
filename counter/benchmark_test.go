@@ -2,6 +2,8 @@ package counter
 
 import (
 	"context"
+	"runtime"
+	"strconv"
 	"testing"
 
 	"knighttour/graph"
@@ -9,10 +11,14 @@ import (
 )
 
 func BenchmarkCountAllToursParallel(b *testing.B) {
-	g := graph.New(5)
-	c := NewCounter(g)
+	for _, size := range []int{5, 6} {
+		b.Run("size"+strconv.Itoa(size), func(b *testing.B) {
+			g := graph.New(size)
+			c := NewCounter(g)
 
-	for b.Loop() {
-		c.ParallelCount(context.Background(), monitoring.NewFakeMonitor(), 2)
+			for b.Loop() {
+				c.ParallelCount(context.Background(), monitoring.NewFakeMonitor(), runtime.NumCPU())
+			}
+		})
 	}
 }
