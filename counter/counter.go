@@ -14,7 +14,7 @@ import (
 	"knighttour/symmetry"
 )
 
-const DefaultPrecomputeDepth = 1
+const DefaultPrecomputeDepth = 5
 
 // TwoPhaseBaseDepth is the intermediate cache depth for two-phase subtask
 // generation. When precomputeDepth exceeds it, generation runs in two phases:

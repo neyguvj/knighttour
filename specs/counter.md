@@ -20,8 +20,10 @@ type Counter struct {
 ## Константы
 
 ```go
-const DefaultPrecomputeDepth = 1
+const DefaultPrecomputeDepth = 5
 // Глубина предварительного разбиения задач по умолчанию
+// (совпадает с TwoPhaseBaseDepth, поэтому по умолчанию используется
+// однофазная генерация)
 
 const TwoPhaseBaseDepth = 5
 // Порог двухфазной генерации: при precomputeDepth > неё используется
@@ -198,13 +200,34 @@ type Monitor interface {
 
 ## Использование в main.go
 
-```go
-func main() {
-    size := flag.Int("size", 5, "Board size (5-8)")
-    workers := flag.Int("workers", 1, "Number of workers for parallel search")
-    precomputeDepth := flag.Int("precompute-depth", counter.DefaultPrecomputeDepth, "Precompute depth for subtasks")
+main.go разбит на тестируемые части: структура аргументов, их парсинг и запуск подсчёта.
 
-    flag.Parse()
+```go
+// appArgs – распарсенные и провалидированные параметры запуска.
+type appArgs struct {
+    size            int
+    workers         int
+    precomputeDepth int
+}
+
+// parseArgs разбирает аргументы командной строки (без имени программы) и
+// валидирует их: size 5–8, workers >= 1, precomputeDepth в [1, size^2/2].
+// Возвращает ошибку вместо log.Fatal — это делает парсинг тестируемым.
+func parseArgs(args []string) (*appArgs, error)
+
+// run строит граф и счётчик и выполняет параллельный подсчёт.
+// Монитор передаётся параметром, чтобы в тестах использовать FakeMonitor.
+func run(ctx context.Context, monitor monitoring.Monitor, args *appArgs) uint64 {
+    g := graph.New(args.size)
+    c := counter.NewCounter(g)
+    return c.ParallelCountWithDepth(ctx, monitor, args.workers, args.precomputeDepth)
+}
+
+func main() {
+    args, err := parseArgs(os.Args[1:])
+    if err != nil {
+        log.Fatal(err)
+    }
 
     ctx, cancel := context.WithCancel(context.Background())
     defer cancel()
@@ -213,11 +236,15 @@ func main() {
     realMonitor.Start(ctx)
     defer realMonitor.Finish()
 
-    g := graph.New(*size)
-    c := counter.NewCounter(g)
-    c.ParallelCountWithDepth(ctx, realMonitor, *workers, *precomputeDepth)
+    run(ctx, realMonitor, args)
 }
 ```
+
+**Тестуемость (main_test.go):**
+- `parseArgs` — табличные тесты: дефолты (`workers = runtime.NumCPU()`,
+  `precomputeDepth = counter.DefaultPrecomputeDepth`), валидные доски 5–8,
+  ошибки размера/глубины/workers.
+- `run` с `FakeMonitor` на доске 5×5 должен возвращать `1728`.
 
 **Примеры запуска:**
 ```bash

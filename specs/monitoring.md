@@ -302,28 +302,9 @@ func (c *Counter) ParallelCountWithDepth(...) uint64 {
 }
 ```
 
-## Использование
+## Связанные спеки
 
-### Флаги командной строки (main.go)
-
-```go
-size := flag.Int("size", 5, "Board size (5-8)")
-workers := flag.Int("workers", 1, "Number of workers for parallel search")
-precomputeDepth := flag.Int("precompute-depth", counter.DefaultPrecomputeDepth, "Precompute depth for subtasks")
-```
-
-### Примеры
-
-```bash
-# Запуск с 1 воркером (последовательный режим)
-go run main.go -size 5 -workers 1
-
-# Запуск с 4 воркерами в параллельном режиме
-go run main.go -size 6 -workers 4
-
-# Максимальная параллельность на доске 8×8
-go run main.go -size 8 -workers 16
-```
+Описание CLI и обработки Ctrl+C (graceful shutdown в `main.go`) — см. `specs/main.md`.
 
 ## FakeMonitor (для тестов)
 

@@ -34,6 +34,7 @@ $ go run main.go -size 8 -workers 8
 | Searcher | searcher/searcher.go | DFS backtracking алгоритм |
 | Counter | counter/counter.go | Агрегация и подсчет маршрутов с учетом симметрий |
 | Monitor | monitoring/monitor.go | Отображение прогресса поиска в реальном времени |
+| Main | main.go | CLI, сборка компонентов, graceful shutdown (см. `specs/main.md`) |
 
 ## Оптимизации
 
