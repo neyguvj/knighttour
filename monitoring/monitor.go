@@ -8,6 +8,10 @@ import (
 	"time"
 )
 
+// clearLine erases the whole current terminal line and returns the caret,
+// so each per-second report fully overwrites the previous one.
+const clearLine = "\x1b[2K\r"
+
 type Monitor interface {
 	Start(ctx context.Context)
 	Finish()
@@ -95,14 +99,29 @@ func (m *RealMonitor) Start(ctx context.Context) {
 	}()
 }
 
-// report prints the active phase progress on a single line (\r-overwritten).
+// estimateRemaining is a linear ETA for the active phase based on its average
+// task rate. ok == false means the estimate is unknown (no task completed yet
+// or total task count not known).
+func estimateRemaining(elapsed time.Duration, completed, total uint64) (time.Duration, bool) {
+	if completed == 0 || total == 0 {
+		return 0, false
+	}
+	if completed >= total {
+		return 0, true
+	}
+	return elapsed * time.Duration(total-completed) / time.Duration(completed), true
+}
+
+// fmtDur formats a duration with millisecond precision (e.g. "1.234s").
+func fmtDur(d time.Duration) string { return d.Round(time.Millisecond).String() }
+
+// report prints the active phase progress on a single line (\x1b[2K\r-overwritten).
 func (m *RealMonitor) report() {
 	ph := m.active.Load()
 	if ph == nil {
 		return
 	}
 
-	elapsed := time.Since(m.startTime)
 	completed := ph.completed.Load()
 	totalTasks := ph.tasks.Load()
 
@@ -111,13 +130,22 @@ func (m *RealMonitor) report() {
 		pct = float64(completed) / float64(totalTasks) * 100
 	}
 
+	// ETA is estimated from the active phase elapsed time; ph.startTime is
+	// published via active.Store, so reading it here happens-after and is race-free.
+	remaining, ok := estimateRemaining(time.Since(ph.startTime), completed, totalTasks)
+	eta := "--"
+	if ok {
+		eta = fmtDur(remaining)
+	}
+
 	fmt.Printf(
-		"\r[%s] Phase %s | Tasks: %d/%d (%.1f%%) | Paths %d | Writes %d | Pruned %d",
-		elapsed.String(), ph.name,
+		clearLine+"[%s] Phase %s | Tasks: %d/%d (%.1f%%) | Paths %d | Writes %d | Pruned %d | ETA %s",
+		fmtDur(time.Since(m.startTime)), ph.name,
 		completed, totalTasks, pct,
 		ph.pathsFound.Load(),
 		ph.cacheWrites.Load(),
 		ph.pruned.Load(),
+		eta,
 	)
 }
 

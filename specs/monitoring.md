@@ -5,6 +5,7 @@
 Отслеживание и отображение прогресса подсчета маршрутов в реальном времени
 **с разбивкой по фазам выполнения**:
 - Время выполнения (общее и каждой фазы)
+- **ETA** — оценка оставшегося времени до завершения **текущей фазы**
 - Количество обработанных/оставшихся задач текущей фазы
 - Количество найденных путей
 - Количество **записей в кэш** (cache writes, вызовов `Set`) — исторически поле
@@ -21,18 +22,26 @@
 
 ### Частота обновления
 - **Интервал:** 1 секунда
-- **Формат:** Строковый вывод в stdout (в формате ProgressBar с \r)
+- **Формат:** Строковый вывод в stdout; каждая строка начинается с ANSI-последовательности
+  `\x1b[2K\r` (стереть строку + каретка в начало) — живая строка затирается целиком, без «хвостов»
+- Длительности в живой строке округляются до миллисекунд (`1.234s`)
 - Живая строка показывает **только активную фазу**
 
 ### Информация в отчете
 Каждый отчёт должен содержать:
 ```
-[время] Phase [имя] | Tasks: [выполнено]/[всего] (%) | Paths [найдено] | Writes [записей в кэш] | Pruned [отсечено]
+[время] Phase [имя] | Tasks: [выполнено]/[всего] (%) | Paths [найдено] | Writes [записей в кэш] | Pruned [отсечено] | ETA [оценка]
 ```
+
+`ETA` — оставшееся время **текущей фазы**, линейная оценка по средней скорости фазы:
+`elapsed_phase * (total - completed) / completed`.
+
+- `completed == 0` или `total == 0` → `ETA --` (оценка неизвестна, «бесконечность»; ASCII вместо `∞`)
+- `completed >= total` → `ETA 0s`
 
 **Пример:**
 ```
-[1.234s] Phase gen B | Tasks: 1200/5041 (23.8%) | Paths 0 | Writes 447520 | Pruned 129334
+[1.234s] Phase gen B | Tasks: 1200/5041 (23.8%) | Paths 0 | Writes 447520 | Pruned 129334 | ETA 3.953s
 ```
 
 ### Финальный отчёт
@@ -153,32 +162,58 @@ func (m *RealMonitor) BeginPhase(name string) {
 
 #### 4. report()
 
-Строка активной фазы (без перевода строки — используется \r для перезаписи);
-при отсутствии активной фазы — no-op. Деление на ноль защищено (`tasks == 0` → 0%).
+Строка активной фазы (без перевода строки — `\x1b[2K\r` затирает предыдущий вывод);
+при отсутствии активной фазы — no-op. Деление на ноль защищено (`tasks == 0` → 0%, `ETA --`).
 
 ```go
+const clearLine = "\x1b[2K\r" // erase line + каретка в начало
+
+// estimateRemaining — линейная оценка оставшегося времени фазы по её средней скорости.
+// ok == false означает, что оценить нельзя (ещё ни одна задача не завершена либо
+// общее число задач неизвестно).
+func estimateRemaining(elapsed time.Duration, completed, total uint64) (time.Duration, bool) {
+	if completed == 0 || total == 0 {
+		return 0, false
+	}
+	if completed >= total {
+		return 0, true
+	}
+	return elapsed * time.Duration(total-completed) / time.Duration(completed), true
+}
+
+// fmtDur — формат длительности с точностью до миллисекунды ("1.234s").
+func fmtDur(d time.Duration) string { return d.Round(time.Millisecond).String() }
+
 func (m *RealMonitor) report() {
-    ph := m.active.Load()
-    if ph == nil {
-        return
-    }
-    elapsed := time.Since(m.startTime)
-    completed := ph.completed.Load()
-    totalTasks := ph.tasks.Load()
+	ph := m.active.Load()
+	if ph == nil {
+		return
+	}
+	completed := ph.completed.Load()
+	totalTasks := ph.tasks.Load()
 
-    pct := 0.0
-    if totalTasks > 0 {
-        pct = float64(completed) / float64(totalTasks) * 100
-    }
+	pct := 0.0
+	if totalTasks > 0 {
+		pct = float64(completed) / float64(totalTasks) * 100
+	}
 
-    fmt.Printf(
-        "\r[%s] Phase %s | Tasks: %d/%d (%.1f%%) | Paths %d | Writes %d | Pruned %d",
-        elapsed.String(), ph.name,
-        completed, totalTasks, pct,
-        ph.pathsFound.Load(),
-        ph.cacheWrites.Load(),
-        ph.pruned.Load(),
-    )
+	// ETA считается по времени активной фазы (ph.startTime публикуется
+	// через active.Store — happens-before, гонки нет).
+	remaining, ok := estimateRemaining(time.Since(ph.startTime), completed, totalTasks)
+	eta := "--"
+	if ok {
+		eta = fmtDur(remaining)
+	}
+
+	fmt.Printf(
+		clearLine+"[%s] Phase %s | Tasks: %d/%d (%.1f%%) | Paths %d | Writes %d | Pruned %d | ETA %s",
+		fmtDur(time.Since(m.startTime)), ph.name,
+		completed, totalTasks, pct,
+		ph.pathsFound.Load(),
+		ph.cacheWrites.Load(),
+		ph.pruned.Load(),
+		eta,
+	)
 }
 ```
 
@@ -331,7 +366,8 @@ func (*FakeMonitor) ReportPruned(count int)           {}
 
 1. **Пути:** Счётчик путей должен быть точным (атомарные операции обеспечивают потокобезопасность)
 2. **Задачи:** Количество выполненных задач — целые числа, считаются отдельно на фазу
-3. **Время:** Показания времени могут иметь погрешность ±1 секунда из-за интервала таймера; тайминги фаз точные (фиксируются в BeginPhase/Finish)
+3. **Время:** Показания времени могут иметь погрешность ±1 секунда из-за интервала таймера; тайминги фаз точные (фиксируются в BeginPhase/Finish); длительности в живой строке округлены до миллисекунд
+4. **ETA:** Линейная оценка по средней скорости активной фазы; `--` пока ни одна задача не завершена, `0s` когда фаза завершена; погрешность — ±интервал тикера и неравномерность скоростей задач
 
 ## Обработка ошибок
 
@@ -354,4 +390,7 @@ func (*FakeMonitor) ReportPruned(count int)           {}
 - компилируемые проверки реализации интерфейса `RealMonitor`/`FakeMonitor`;
 - репорты без активной фазы — no-op;
 - агрегация счётчиков по фазам (BeginPhase переключает накопление);
+- `estimateRemaining` — табличные тесты: нет завершённых/нет всего → «бесконечность»,
+  фаза завершена → 0, линейный пересчёт;
+- формат живой строки (перехват stdout): `\x1b[2K\r`, точность до мс, `ETA --` / `ETA 0s`;
 - конкурентные репорты под `-race`.

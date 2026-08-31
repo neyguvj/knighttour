@@ -72,7 +72,7 @@ func main() {
 ### Пример прерывания (SIGINT на доске 8×8)
 
 ```
-[3.741747583s] Phase counting | Tasks: 0/4436 (0.0%) | ...
+[3.742s] Phase counting | Tasks: 0/4436 (0.0%) | ... | ETA --
 Interrupted: showing partial results
 === Final ===
 Total time: 3.741932875s

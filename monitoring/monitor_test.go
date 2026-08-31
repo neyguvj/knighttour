@@ -2,10 +2,15 @@ package monitoring
 
 import (
 	"context"
+	"io"
+	"os"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestReportsWithoutPhaseAreNoop(t *testing.T) {
@@ -100,6 +105,93 @@ func TestFakeMonitorSatisfiesInterface(t *testing.T) {
 	m.ReportCacheWrites(1)
 	m.ReportPruned(1)
 	m.Finish()
+}
+
+func TestEstimateRemaining(t *testing.T) {
+	tests := []struct {
+		name      string
+		elapsed   time.Duration
+		completed uint64
+		total     uint64
+		want      time.Duration
+		wantOK    bool
+	}{
+		{name: "no completed tasks is infinite", elapsed: 5 * time.Second, completed: 0, total: 10},
+		{name: "unknown total is infinite", elapsed: 5 * time.Second, completed: 3, total: 0},
+		{name: "nothing at all is infinite", elapsed: time.Second},
+		{
+			name:    "phase fully done is zero",
+			elapsed: 1234 * time.Millisecond, completed: 8, total: 8,
+			want: 0, wantOK: true,
+		},
+		{
+			name:    "linear extrapolation quarter done",
+			elapsed: 10 * time.Second, completed: 2, total: 8,
+			want: 30 * time.Second, wantOK: true,
+		},
+		{
+			name:    "linear extrapolation seven of eight",
+			elapsed: 70 * time.Second, completed: 7, total: 8,
+			want: 10 * time.Second, wantOK: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := estimateRemaining(tc.elapsed, tc.completed, tc.total)
+			assert.Equal(t, tc.wantOK, ok)
+			if ok {
+				assert.Equal(t, tc.want, got)
+			}
+		})
+	}
+}
+
+func TestFmtDurMillisecondPrecision(t *testing.T) {
+	assert.Equal(t, "1.235s", fmtDur(1234567*time.Microsecond))
+	assert.Equal(t, "0s", fmtDur(0))
+}
+
+func captureStdout(t *testing.T, fn func()) string {
+	t.Helper()
+
+	old := os.Stdout
+	r, w, err := os.Pipe()
+	require.NoError(t, err)
+
+	os.Stdout = w
+	fn()
+	require.NoError(t, w.Close())
+	os.Stdout = old
+
+	out, err := io.ReadAll(r)
+	require.NoError(t, err)
+	return string(out)
+}
+
+func TestReportFormatWithETA(t *testing.T) {
+	m := NewMonitor()
+	m.startTime = time.Now()
+	m.BeginPhase("counting")
+	ph := m.active.Load()
+	ph.startTime = time.Now().Add(-10 * time.Second)
+
+	out := captureStdout(t, m.report)
+	assert.True(t, strings.HasPrefix(out, clearLine), "report must start with ANSI clear-line")
+	assert.Contains(t, out, "| ETA --", "no completed tasks yet -> unknown ETA")
+
+	m.AddTasks(8)
+	for range 4 {
+		m.ReportTaskCompleted()
+	}
+	out = captureStdout(t, m.report)
+	assert.Regexp(t, `\| ETA \d+(\.\d+)?s$`, out)
+
+	for range 4 {
+		m.ReportTaskCompleted()
+	}
+	out = captureStdout(t, m.report)
+	assert.Contains(t, out, "| ETA 0s", "finished phase -> zero ETA")
 }
 
 func (m *RealMonitor) activePhaseAt(t *testing.T, idx int) *phaseStats {

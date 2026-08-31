@@ -419,7 +419,7 @@ type RealMonitor struct {
 - `Start(ctx context.Context)` — запустить периодический вывод прогресса (каждую секунду)
   - Вывод в формате:
     ```
-    [1.234s] Phase gen B | Tasks: 1200/5041 (23.8%) | Paths 0 | Writes 447520 | Pruned 129334
+    [1.234s] Phase gen B | Tasks: 1200/5041 (23.8%) | Paths 0 | Writes 447520 | Pruned 129334 | ETA 3.953s
     ```
 - `Finish()` — финальный отчет и завершение мониторинга
   - Вывод:
