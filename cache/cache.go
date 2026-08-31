@@ -53,6 +53,17 @@ func (c *Cache) Get(p path.Path) (int, bool) {
 	return 0, false
 }
 
+// GetCanonical is Get for a key that is already canonical: no re-canonicalization.
+// Used by the searcher reversal early stop, which obtains the canonical key and
+// its orbit size in one symmetry pass.
+func (c *Cache) GetCanonical(p path.Path) (int, bool) {
+	shardIdx := c.getShardKey(p)
+	c.shards[shardIdx].RLock()
+	defer c.shards[shardIdx].RUnlock()
+	weight, found := c.shards[shardIdx].data[p]
+	return weight, found
+}
+
 func (c *Cache) Set(p path.Path, weight int) {
 	if weight == 0 {
 		return

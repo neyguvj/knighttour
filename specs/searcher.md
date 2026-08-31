@@ -58,12 +58,54 @@ func (s *Searcher) GenerateSubtasks(
     `start` в ключ не попадает — вместо него вклад группы кодируется весом `orbitSize`
 3. Возвращает `types.Result.CachedPaths` — количество записей, отправленных в кэш
 
-### 3. CountPathsDFS(ctx context.Context, p path.Path) types.Result
+### 3. CountPathsDFS / CountPathsWithReversal
 
 ```go
 func (s *Searcher) CountPathsDFS(ctx context.Context, p path.Path) types.Result
-// Считает полные маршруты из состояния p; если состояние уже полное — возвращает 1
+// Считает полные маршруты из состояния p; если состояние уже полное — возвращает 1.
+// Без досрочного завершения (эквивалент CountPathsWithReversal(ctx, p, nil, 0)).
+
+func (s *Searcher) CountPathsWithReversal(
+    ctx context.Context,
+    p path.Path,
+    revCache *cache.Cache,
+    precomputeDepth int,
+) types.Result
+// То же + досрочное завершение через reversal-кэш: при достижении уровня
+// CountBits(state) == totalCells - precomputeDepth спуск прекращается и ответ
+// берётся из кэша префиксов (см. «Досрочное завершение через реверс»).
+// revCache == nil или недостижимый уровень (2d > n²) — чистый полный DFS.
 ```
+
+### 4. Досрочное завершение через реверс (reversal early stop)
+
+**Тождество.** Для узла `(T, t)` с `U = fullMask &^ T` (`|U| = d`): число продолжений
+равно числу обращённых суффиксов — путей, покрывающих ровно `U` и входящих в `t`:
+
+```
+f(T, t) = Σ_{u ∈ U, u ~ t} h(U, u),      h(U,u) = #(путей, покрывающих U и кончающихся в u)
+```
+
+Биекция: продолжение `u1…uk` обращается в путь `uk→…→u1`, заканчивающийся соседом `u1 ~ t`.
+
+**Связь с кэшем.** Значение префикс-кэша `W(K)` (см. cache.md) равно сумме мультипликативностей
+по всем симметричным образам узла: `W(K) = |fiber(K)| · h(U,u)`, где `fiber(K)` — орбита пары
+`(state,end)` в D4. Поэтому для lookup'а любого несимметричного `(U,u)`:
+
+```go
+h(U, u) = W(canon(U,u)) / fiberSize(canon(U,u))   // деление всегда точное
+```
+
+**Безопасность прунинга.** Любой обращённый суффикс, нужный для lookup'а, продолжается через `t`
+обратно по уже покрытому `T`, значит он не мог быть отрезан `ShouldPruneAfterVisit` на генерации
+(прунинг D4-эквивариантен). На нечётных досках старты нужных путей — концы реальных туров,
+т.е. правильного цвета (группы с `SholdSkip` ничего не теряют).
+
+**Стоимость.** Одно сравнение `CountBits(st) == stopLevel` на узел count-DFS; lookup'и — только
+на уровне досрочного завершения, причём маска `U` трансформируется один раз на узел
+(`TransformStates`), а для каждого соседа `u` канонизация пары идёт по готовым образам
+(`CanonicalFromStates`) + один `GetCanonical`. При `d = n²/2` задачи решаются одним lookup'ом
+(meet-in-the-middle).
 
 **Единый горячий DFS (`dfs`) — по маскам, без колбэков:**
 
@@ -71,28 +113,37 @@ func (s *Searcher) CountPathsDFS(ctx context.Context, p path.Path) types.Result
 сводится к базовому случаю:
 
 ```go
-func (s *Searcher) dfs(ctx context.Context, st State, end, depth int, c *Cache, weight int, cached *int) int
+// rev != nil включает досрочное завершение count-DFS (см. раздел выше).
+func (s *Searcher) dfs(ctx context.Context, st State, end, depth int, c *Cache, weight int, cached *int, rev *Reversal) int
+
+type Reversal struct {
+    Cache     *Cache // префикс-кэш, построенный на глубине d
+    StopLevel int    // totalCells - d; при CountBits(st) == StopLevel — lookup вместо спуска
+}
 ```
 
 1. Базовый случай: `CountBits(st) >= depth` → если `c != nil`, сохранить
    `path.New(st, end)` в кэш с весом `weight` и инкрементировать `*cached`; вернуть 1
-2. `unvisited := fullMask &^ state`; кандидаты: `neighborMasks[end] & unvisited`
-3. Перебор кандидатов через итератор `for n := range cand.AllVisited()` (без прямых битовых операций)
-4. Если после хода остались непосещённые и `pruner.ShouldPruneAfterVisit(n, newUnvisited)` → continue
-5. Рекурсия, сумма результатов — возвращаемое значение
+2. Досрочное завершение: `rev != nil && CountBits(st) == rev.StopLevel` →
+   `return completionsFromCache(st, end)` (сумма `W(canon(U,u))/fiberSize` по соседям `u ∈ U`)
+3. `unvisited := fullMask &^ state`; кандидаты: `neighborMasks[end] & unvisited`
+4. Перебор кандидатов через итератор `for n := range cand.AllVisited()` (без прямых битовых операций)
+5. Если после хода остались непосещённые и `pruner.ShouldPruneAfterVisit(n, newUnvisited)` → continue
+6. Рекурсия, сумма результатов — возвращаемое значение
 
 Вызовы:
-- полный подсчёт (`CountPathsDFS`): `depth = totalCells`, `c = nil` — лист (полная
-  доска) даёт 1 через базовый случай;
-- префиксы (`GenerateSubtasks`): `depth = precomputeDepth`, `c != nil` — возврат
+- полный подсчёт (`CountPathsDFS`): `depth = totalCells`, `c = nil`, `rev = nil`;
+- полный подсчёт с реверсом (`CountPathsWithReversal`): то же + `rev != nil`
+  (counter включает его только при `2d ≤ n²`, иначе уровень недостижим);
+- префиксы (`GenerateSubtasks`): `depth = precomputeDepth`, `c != nil`, `rev = nil` — возврат
   из базового случая игнорируется, спуск ниже `depth` не происходит.
 
 Проверка отмены контекста — на входе в каждый рекурсивный вызов (`ctx.Err() != nil`).
 
 **Без аллокаций в горячем цикле:** `unvisited` строится через `st.Invert(totalCells)`, кандидаты —
 через `graph.GetNeighborMask(end).Intersect(unvisited)`; перебор — итератором `AllVisited()`.
-Ни колбэков, ни сканов доски внутри рекурсии нет. Цена унификации — два лишних
-параметра (`depth`, `weight`) и nil-check кэша на узел.
+Ни колбэков, ни сканов доски внутри рекурсии нет. Цена унификации — лишние
+параметры (`depth`, `weight`, `rev`) и nil-check'и на узел.
 
 ## Экспериментальные прунинги (результат замеров на 5×5/6×6, НЕ реализованы)
 

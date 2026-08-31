@@ -355,6 +355,71 @@ func TestCanonicalize(t *testing.T) {
 	})
 }
 
+func TestCanonicalizeWithOrbitSize(t *testing.T) {
+	s := NewSymmetry(5)
+
+	bruteForceOrbitSize := func(st state.State, end int) int {
+		type pair struct {
+			st  state.State
+			end uint8
+		}
+		seen := make(map[pair]bool)
+		for i := range numTransforms {
+			seen[pair{s.transformState(uint8(i), st), uint8(s.applyIdx(uint8(i), end))}] = true
+		}
+		return len(seen)
+	}
+
+	tests := []struct {
+		name      string
+		state     state.State
+		end       int
+		wantOrbit int
+	}{
+		{"center cell is fixed by all transforms", state.NewState(12), 12, 1},
+		{"corner cell orbit", state.NewState(0), 0, 4},
+		{"two cells", (1 << 7) | (1 << 8), 8, bruteForceOrbitSize((1<<7)|(1<<8), 8)},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			canonical, orbitSize := s.CanonicalizeWithOrbitSize(tt.state, tt.end)
+
+			assert.Equal(t, tt.wantOrbit, orbitSize, "orbit size")
+			assert.Equal(t, s.Canonicalize(tt.state, tt.end), canonical, "canonical matches Canonicalize")
+		})
+	}
+
+	t.Run("matches brute force over random-ish states", func(t *testing.T) {
+		for _, cells := range [][]int{{0, 1}, {12, 6}, {24, 18, 17}, {2, 3, 8}} {
+			st := state.NewState(cells...)
+			end := cells[len(cells)-1]
+			_, orbitSize := s.CanonicalizeWithOrbitSize(st, end)
+			assert.Equal(t, bruteForceOrbitSize(st, end), orbitSize, "cells %v", cells)
+		}
+	})
+
+	t.Run("orbit size is invariant over the orbit", func(t *testing.T) {
+		st, end := state.NewState(23, 12), 12
+		_, base := s.CanonicalizeWithOrbitSize(st, end)
+		for i := range numTransforms {
+			_, got := s.CanonicalizeWithOrbitSize(s.transformState(uint8(i), st), s.applyIdx(uint8(i), end))
+			assert.Equal(t, base, got, "transform %d", i)
+		}
+	})
+
+	t.Run("batch API matches one-shot canonicalization", func(t *testing.T) {
+		st := state.NewState(3, 7, 12, 18)
+		states := s.TransformStates(st)
+		for end := range 25 {
+			want, wantOrbit := s.CanonicalizeWithOrbitSize(st, end)
+			got, gotOrbit := s.CanonicalFromStates(states, end)
+			assert.Equal(t, want, got, "end %d", end)
+			assert.Equal(t, wantOrbit, gotOrbit, "end %d", end)
+		}
+	})
+}
+
 func TestCanonicalizeLexicographicMinimum(t *testing.T) {
 	s := NewSymmetry(5)
 

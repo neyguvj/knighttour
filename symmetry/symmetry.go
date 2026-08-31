@@ -10,6 +10,9 @@ import (
 type Transform func(x, y, size int) (int, int)
 
 const numTransforms = 8
+
+// NumTransforms is the size of the D4 group (exported for batch APIs).
+const NumTransforms = numTransforms
 const maxCells = 64
 
 type Symmetry struct {
@@ -87,18 +90,55 @@ func (s *Symmetry) GetCanonicalGroupByPosition(pos int) CanonicalGroup {
 // board symmetries. Start is not involved: completions depend only on the
 // visited mask and the current cell.
 func (s *Symmetry) Canonicalize(st state.State, end int) path.Path {
-	bestState := s.transformState(0, st)
-	bestEnd := int(s.perms[0][end])
+	canonical, _ := s.CanonicalizeWithOrbitSize(st, end)
+	return canonical
+}
 
-	for t := 1; t < numTransforms; t++ {
-		ts := s.transformState(uint8(t), st)
-		te := int(s.perms[t][end])
-		if ts < bestState || (ts == bestState && te < bestEnd) {
-			bestState, bestEnd = ts, te
+// CanonicalizeWithOrbitSize returns the canonical pair plus the size of its
+// D4 orbit (number of distinct transformed pairs). The cache value W(K) is a
+// fiber sum over all orbit members, so per-node prefix multiplicity is
+// recovered by exact division: h(U,u) = W(canon) / orbitSize.
+func (s *Symmetry) CanonicalizeWithOrbitSize(st state.State, end int) (canonical path.Path, orbitSize int) {
+	return s.CanonicalFromStates(s.TransformStates(st), end)
+}
+
+// TransformStates returns all D4 images of the mask in one pass. Pair groups
+// that share a mask should transform once and reuse the array for every end.
+func (s *Symmetry) TransformStates(st state.State) [NumTransforms]state.State {
+	var out [NumTransforms]state.State
+	for t := range out {
+		out[t] = s.transformState(uint8(t), st)
+	}
+	return out
+}
+
+// CanonicalFromStates is CanonicalizeWithOrbitSize for a precomputed mask
+// image array: identical result, only the end permutation work per call.
+func (s *Symmetry) CanonicalFromStates(states [NumTransforms]state.State, end int) (canonical path.Path, orbitSize int) {
+	var ends [numTransforms]uint8
+
+	best := 0
+	for t := range numTransforms {
+		ends[t] = s.perms[t][end]
+		if states[t] < states[best] || (states[t] == states[best] && ends[t] < ends[best]) {
+			best = t
 		}
 	}
 
-	return path.New(bestState, bestEnd)
+	for i := range numTransforms {
+		unique := true
+		for j := range i {
+			if states[j] == states[i] && ends[j] == ends[i] {
+				unique = false
+				break
+			}
+		}
+		if unique {
+			orbitSize++
+		}
+	}
+
+	return path.New(states[best], int(ends[best])), orbitSize
 }
 
 func (s *Symmetry) transformState(t uint8, st state.State) state.State {

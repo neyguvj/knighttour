@@ -95,6 +95,18 @@ func (s *Symmetry) Canonicalize(st state.State, end int) path.Path
 // кортежа (t(state), t(end)). start в канонизации не участвует: число
 // продолжений маршрута зависит только от посещённой маски и текущей клетки,
 // поэтому симметричные пары эквивалентны полностью.
+
+func (s *Symmetry) CanonicalizeWithOrbitSize(st state.State, end int) (path.Path, int)
+// То же + размер орбиты пары — число различных кортежей (t(state), t(end)).
+// Нужен досрочному завершению searchera: h(U,u) = W(canon)/orbitSize.
+
+func (s *Symmetry) TransformStates(st state.State) [NumTransforms]state.State
+// Пакетный вариант: все 8 образов маски одним вызовом.
+
+func (s *Symmetry) CanonicalFromStates(states [NumTransforms]state.State, end int) (path.Path, int)
+// Канонизация пары по уже готовым образам маски (экономит повторные
+// transformState при групповой канонизации (mask, u1..uk) с общим mask).
+// Результат идентичен CanonicalizeWithOrbitSize.
 ```
 
 Каноническая форма корректна как инвариант орбиты: для любой симметрии g
