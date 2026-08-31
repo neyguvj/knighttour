@@ -58,6 +58,33 @@ func (s *Searcher) GenerateSubtasks(
     `start` в ключ не попадает — вместо него вклад группы кодируется весом `orbitSize`
 3. Возвращает `types.Result.CachedPaths` — количество записей, отправленных в кэш
 
+### 2.1 ExtendSubtask(ctx context.Context, cache *Cache, p path.Path, weight int, depth int) types.Result
+
+```go
+func (s *Searcher) ExtendSubtask(
+    ctx context.Context,
+    cache *Cache,
+    p path.Path,
+    weight int,
+    depth int,
+) types.Result
+// Догенерация подзадач от уже канонической записи (state, end) до целевой глубины.
+// Применяется второй фазой двухфазной генерации (см. counter.md): p — запись
+// промежуточного кэша глубины baseDepth, weight — её агрегированный вес,
+// depth > CountBits(p.State()) — целевая precomputeDepth.
+```
+
+**Алгоритм:** тот же hot `dfs` с `c != nil`, `weight = weight(entry)`, `rev = nil`;
+спуск от `p.State()/p.End()` до `depth`. `SholdSkip` не проверяется: корни уже
+отфильтрованы фазой A.
+
+**Корректность весов.** Для канонического ключа `J` все конкретные префиксы его
+fiber'а — D4-образы канонического представителя, а продолжения образов
+взаимно-однозначно отображаются с точностью до канонизации (граф и прунинг
+D4-эквивариантны). Поэтому одно продолжение `J` с весом `W(J)` даёт те же вклады
+в листовые ключи, что и перебор всех конкретных префиксов fiber'а поштучно:
+итоговый кэш побитово совпадает с однофазной генерацией до `depth`.
+
 ### 3. CountPathsDFS / CountPathsWithReversal
 
 ```go
@@ -136,7 +163,9 @@ type Reversal struct {
 - полный подсчёт с реверсом (`CountPathsWithReversal`): то же + `rev != nil`
   (counter включает его только при `2d ≤ n²`, иначе уровень недостижим);
 - префиксы (`GenerateSubtasks`): `depth = precomputeDepth`, `c != nil`, `rev = nil` — возврат
-  из базового случая игнорируется, спуск ниже `depth` не происходит.
+  из базового случая игнорируется, спуск ниже `depth` не происходит;
+- догенерация (`ExtendSubtask`): старт от канонической записи промежуточного кэша,
+  `depth = precomputeDepth`, `c != nil`, `rev = nil`, `weight` — вес записи.
 
 Проверка отмены контекста — на входе в каждый рекурсивный вызов (`ctx.Err() != nil`).
 

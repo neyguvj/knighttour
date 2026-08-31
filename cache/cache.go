@@ -110,6 +110,29 @@ func (c *Cache) ItemsCount() int {
 	return total
 }
 
+// Entry is a snapshot record: canonical key plus its aggregated weight.
+type Entry struct {
+	Path   path.Path
+	Weight int
+}
+
+// Entries takes a sequential snapshot of all records. Each shard is copied
+// under RLock and unlocked before moving to the next one, so writers are
+// never blocked for the whole traversal. Used by two-phase subtask generation,
+// which needs a work list instead of a callback under a locked shard.
+func (c *Cache) Entries() []Entry {
+	total := c.ItemsCount()
+	entries := make([]Entry, 0, total)
+	for i := range c.shards {
+		c.shards[i].RLock()
+		for p, w := range c.shards[i].data {
+			entries = append(entries, Entry{Path: p, Weight: w})
+		}
+		c.shards[i].RUnlock()
+	}
+	return entries
+}
+
 func (c *Cache) Each(ctx context.Context, workers int, f func(ctx context.Context, p path.Path, count int)) {
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(workers)

@@ -115,6 +115,18 @@ func (c *Cache) Each(ctx context.Context, workers int, f func(ctx context.Contex
 // ВАЖНО: f вызывается с удержанным RLock шарда — повторные чтения из того же
 // кэша внутри f безопасны только при отсутствии писателей (invariant фазы
 // подсчёта: генерация уже завершена, кэш read-only).
+
+type Entry struct {
+    Path   path.Path // канонический ключ (state, end)
+    Weight int       // агрегированный вес записи
+}
+
+func (c *Cache) Entries() []Entry
+// Последовательный снимок всех записей (ключ + вес). Каждый шард копируется
+// под RLock и отпускается до перехода к следующему, поэтому писатели не
+// блокируются надолго. Используется двухфазной генерацией подзадач: фазе B
+// нужен список промежуточных задач без колбэка под залоченным шардом
+// (см. counter.md «Двухфазная генерация подзадач»).
 ```
 
 ## Симметрия и канонизация
@@ -272,6 +284,20 @@ func TestCacheEach(t *testing.T) {
     })
 
     require.Equal(t, 1, count)
+}
+
+func TestCacheEntries(t *testing.T) {
+    sym := symmetry.NewSymmetry(5)
+    cache := cache.NewCache(sym)
+
+    p := path.New(state.NewState(0, 1), 1)
+    q := path.New(state.NewState(2, 3), 3)
+    cache.Set(p, 7)
+    cache.Set(q, 5)
+
+    entries := cache.Entries()
+    require.Len(t, entries, 2)
+    // Сумма весов снимка совпадает с суммой обхода Each.
 }
 ```
 

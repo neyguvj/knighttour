@@ -16,6 +16,14 @@ import (
 
 const DefaultPrecomputeDepth = 1
 
+// TwoPhaseBaseDepth is the intermediate cache depth for two-phase subtask
+// generation. When precomputeDepth exceeds it, generation runs in two phases:
+// phase A fills a small intermediate cache at this depth (parallel over start
+// groups), phase B extends every intermediate entry to the target depth
+// (parallel over thousands of entries). Below the threshold the number of
+// canonical starts provides enough parallelism and single-phase is used.
+const TwoPhaseBaseDepth = 5
+
 type Counter struct {
 	graph    *graph.Graph
 	symmetry *symmetry.Symmetry
@@ -42,7 +50,17 @@ func (c *Counter) ParallelCount(ctx context.Context, monitor monitoring.Monitor,
 	return c.ParallelCountWithDepth(ctx, monitor, workers, DefaultPrecomputeDepth)
 }
 
+// generateSubTasks builds the task cache for precomputeDepth, picking the
+// strategy by depth: single-phase (parallel over canonical start groups) up to
+// TwoPhaseBaseDepth, two-phase above it.
 func (c *Counter) generateSubTasks(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) *cache.Cache {
+	if precomputeDepth > TwoPhaseBaseDepth {
+		return c.generateSubTasksTwoPhase(ctx, monitor, workers, precomputeDepth)
+	}
+	return c.generateSubTasksSinglePhase(ctx, monitor, workers, precomputeDepth)
+}
+
+func (c *Counter) generateSubTasksSinglePhase(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) *cache.Cache {
 	taskCache := cache.NewCache(c.symmetry)
 	groups := c.symmetry.GetCanonicalGroups()
 	monitor.AddTasks(len(groups))
@@ -53,6 +71,32 @@ func (c *Counter) generateSubTasks(ctx context.Context, monitor monitoring.Monit
 		p := group.Canonical
 		g.Go(func() error {
 			result := c.searcher.GenerateSubtasks(ctx, taskCache, p, group.OrbitSize, precomputeDepth)
+			monitor.ReportPathsCached(result.CachedPaths)
+			monitor.ReportTaskCompleted()
+			return nil
+		})
+	}
+	_ = g.Wait()
+
+	return taskCache
+}
+
+// generateSubTasksTwoPhase splits generation in two phases to expose more
+// parallelism than the ~10 canonical start groups provide: phase A fills an
+// intermediate cache at TwoPhaseBaseDepth, phase B extends every intermediate
+// entry independently to precomputeDepth. The resulting cache is identical to
+// single-phase generation (see searcher.ExtendSubtask).
+func (c *Counter) generateSubTasksTwoPhase(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) *cache.Cache {
+	intermediate := c.generateSubTasksSinglePhase(ctx, monitor, workers, TwoPhaseBaseDepth)
+	entries := intermediate.Entries()
+	monitor.AddTasks(len(entries))
+
+	taskCache := cache.NewCache(c.symmetry)
+	g, ctx := errgroup.WithContext(ctx)
+	g.SetLimit(workers)
+	for _, e := range entries {
+		g.Go(func() error {
+			result := c.searcher.ExtendSubtask(ctx, taskCache, e.Path, e.Weight, precomputeDepth)
 			monitor.ReportPathsCached(result.CachedPaths)
 			monitor.ReportTaskCompleted()
 			return nil

@@ -22,6 +22,10 @@ type Counter struct {
 ```go
 const DefaultPrecomputeDepth = 1
 // Глубина предварительного разбиения задач по умолчанию
+
+const TwoPhaseBaseDepth = 5
+// Порог двухфазной генерации: при precomputeDepth > неё используется
+// двухфазная схема (см. «Генерация подзадач»)
 ```
 
 ## Инициализация
@@ -70,16 +74,13 @@ func (c *Counter) ParallelCountWithDepth(
 ```
 
 **Алгоритм:**
-1. Создать кэш с помощью `cache.NewCache(symmetry)`
-2. Получить группы канонических позиций: `symmetry.GetCanonicalGroups()`
-3. Для каждой группы вызвать `searcher.GenerateSubtasks(ctx, cache, canonicalPos, orbitSize, depth)` для предварительного разбиения; генерация групп **параллельна** через тот же `errgroup` с `SetLimit(workers)` (раньше вся генерация шла в одной горутине)
-4. Добавить количество групп в мониторинг через `monitor.AddTasks(len(groups))`
-5. После генерации подзадач добавить их количество (`taskCache.ItemsCount()`)
-6. Запустить worker pool с лимитом workers через `errgroup.Group`
-7. Если `2·precomputeDepth ≤ totalCells`, включить досрочное завершение через реверс:
+1. Сгенерировать подзадачи (см. «Генерация подзадач» ниже) — `generateSubTasks` выбирает стратегию по глубине
+2. Добавить количество подзадач в мониторинг (`monitor.AddTasks(taskCache.ItemsCount())`)
+3. Запустить worker pool с лимитом workers через `errgroup.Group` (`taskCache.Each`)
+4. Если `2·precomputeDepth ≤ totalCells`, включить досрочное завершение через реверс:
    count-DFS передаётся тот же `taskCache` и глубина генерации (см. searcher.md,
    «Досрочное завершение через реверс»); иначе — обычный полный спуск
-8. Для каждой записи в кэше:
+5. Для каждой записи в кэше:
    - Получить каноническую пару `(state, end)` и агрегированный вес `Σ count·orbitSize`
    - Вызвать `CountPathsWithReversal` (с кэшем при включённом реверсе) для подсчета
      продолжений из этого состояния
@@ -87,7 +88,54 @@ func (c *Counter) ParallelCountWithDepth(
      (`total += completions * weight`; умножение на размер орбиты уже зашито
      в вес при генерации, `start`/`GetOrbitSize` на этом этапе не нужны)
    - Зарегистрировать завершение через `monitor.ReportPathsFound()` и `monitor.ReportTaskCompleted()`
-9. Вернуть суммарное количество путей
+6. Вернуть суммарное количество путей
+
+## Генерация подзадач
+
+### Однофазная (precomputeDepth ≤ TwoPhaseBaseDepth)
+
+Пока глубина мала, число групп стартов («корней генерации») достаточен источник
+параллелизма:
+
+1. Создать кэш `cache.NewCache(symmetry)`
+2. Получить группы канонических позиций: `symmetry.GetCanonicalGroups()`
+3. Для каждой группы вызвать `searcher.GenerateSubtasks(ctx, cache, canonicalPos, orbitSize, depth)`;
+   генерация групп **параллельна** через `errgroup` с `SetLimit(workers)`
+4. Мониторинг: `monitor.AddTasks(len(groups))`, на группу — `ReportPathsCached` + `ReportTaskCompleted`
+
+### Двухфазная (precomputeDepth > TwoPhaseBaseDepth)
+
+Проблема однофазной генерации на большой глубине: канонических стартов сильно
+меньше, чем workers (на 8×8 — ~10 групп), поэтому генерация упирается в ~10
+горизонтально параллельных DFS и воркеры простаивают.
+
+Константы:
+
+```go
+const TwoPhaseBaseDepth = 5
+// Глубина промежуточного кэша фазы A; при precomputeDepth <= неё — однофазный путь.
+```
+
+**Фаза A.** Однофазная генерация до глубины `TwoPhaseBaseDepth` → промежуточный
+кэш (быстрая: группы хватает для параллелизма, поддеревья мелкие).
+
+**Фаза B.** Снимок промежуточного кэша через `cache.Entries()`; каждая запись —
+независимая задача: `searcher.ExtendSubtask(ctx, taskCache, entry.Path, entry.Weight, precomputeDepth)`
+в **отдельный финальный кэш**, параллельно через `errgroup` с `SetLimit(workers)`.
+Задач — тысячи записей вместо ~10 групп → полная утилизация воркеров.
+
+**Корректность.** Каждый префикс целевой глубины проходит ровно через один
+промежуточный канонический ключ; продолжения симметричных образов совпадают с
+точностью до канонизации (граф/прунер D4-эквивариантны), поэтому финальный кэш
+(ключи и веса) идентичен однофазной генерации — reversal-фаза не замечает разницы.
+Подробное обоснование — searcher.md, «ExtendSubtask».
+
+**Мониторинг:** `AddTasks(len(groups))` (фаза A) + `AddTasks(intermediateCount)`
+(фаза B); `ReportTaskCompleted` на каждую завершённую задачу обеих фаз;
+`ReportPathsCached` — по числу записей, добавленных в целевой кэш.
+
+**Память:** промежуточный кэш живёт только время генерации и освобождается до
+фазы подсчёта.
 
 **Использование:**
 ```go

@@ -117,3 +117,36 @@ func TestCounterFromPosition(t *testing.T) {
 
 	assert.Positive(t, count, "Should find paths from valid starting position")
 }
+
+func TestTwoPhaseMatchesSinglePhase(t *testing.T) {
+	g := graph.New(5)
+	counter := NewCounter(g)
+	ctx := context.Background()
+
+	const depth = 7 // > TwoPhaseBaseDepth: generateSubTasks must go two-phase
+
+	direct := cache.NewCache(counter.symmetry)
+	for _, group := range counter.symmetry.GetCanonicalGroups() {
+		counter.searcher.GenerateSubtasks(ctx, direct, group.Canonical, group.OrbitSize, depth)
+	}
+
+	twoPhase := counter.generateSubTasks(ctx, monitoring.NewFakeMonitor(), 8, depth)
+
+	assert.Equal(t, direct.ItemsCount(), twoPhase.ItemsCount(), "Two-phase cache has the same key set")
+	for _, e := range direct.Entries() {
+		weight, ok := twoPhase.GetCanonical(e.Path)
+		assert.True(t, ok, "Key %v present in two-phase cache", e.Path)
+		assert.Equal(t, e.Weight, weight, "Weight of key %v matches single phase", e.Path)
+	}
+}
+
+func TestTwoPhaseParallelMatchesSequential(t *testing.T) {
+	g := graph.New(5)
+	counter := NewCounter(g)
+
+	countSeq := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 1, 6)
+	countPar := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 8, 7)
+
+	assert.Equal(t, uint64(1728), countSeq)
+	assert.Equal(t, countSeq, countPar, "Two-phase results must not depend on worker count or depth")
+}

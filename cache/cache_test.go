@@ -93,3 +93,26 @@ func TestCacheWeightMergeAcrossOrbits(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, 8, weight, "Lookup by any symmetric key returns the same weight")
 }
+
+func TestCacheEntries(t *testing.T) {
+	sym := symmetry.NewSymmetry(5)
+	c := NewCache(sym)
+
+	p1 := path.New(state.State(1<<0|1<<6), 6)
+	p2 := path.New(state.State(1<<2|1<<8), 8)
+	c.Set(p1, 7)
+	c.Set(p2, 5)
+
+	entries := c.Entries()
+	assert.Len(t, entries, 2, "Snapshot contains every record")
+
+	totalWeight := 0
+	for _, e := range entries {
+		assert.Positive(t, e.Weight)
+		totalWeight += e.Weight
+	}
+	assert.Equal(t, 12, totalWeight, "Snapshot conserves total weight")
+
+	c.Clear()
+	assert.Empty(t, c.Entries(), "Cleared cache has no records")
+}

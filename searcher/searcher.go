@@ -52,6 +52,21 @@ func (s *Searcher) GenerateSubtasks(ctx context.Context, c *cache.Cache, start, 
 	return result
 }
 
+// ExtendSubtask continues prefix generation from an already canonical cache
+// entry (state, end) down to the target depth, writing leaves into c with the
+// entry's aggregated weight. This is phase B of two-phase subtask generation:
+// symmetric images of the fiber share continuation trees up to canonicalization
+// (graph and pruner are D4-equivariant), so extending the representative once
+// with W(entry) reproduces exactly the single-phase cache contents. No
+// SholdSkip check here: roots were already filtered by phase A.
+func (s *Searcher) ExtendSubtask(ctx context.Context, c *cache.Cache, p path.Path, weight, depth int) (result types.Result) {
+	if p.State().CountBits() >= depth {
+		return result
+	}
+	s.dfs(ctx, p.State(), p.End(), depth, c, weight, &result.CachedPaths, nil)
+	return result
+}
+
 func (s *Searcher) CountPathsDFS(ctx context.Context, p path.Path) types.Result {
 	result := s.CountPathsWithReversal(ctx, p, nil, 0)
 	return result

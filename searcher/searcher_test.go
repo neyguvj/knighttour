@@ -117,3 +117,52 @@ func TestSearcherReversalMatchesFullCount(t *testing.T) {
 		})
 	}
 }
+
+func TestExtendSubtaskMatchesSinglePhase(t *testing.T) {
+	g := graph.New(5)
+	sym := symmetry.NewSymmetry(5)
+	searcher := NewSearcher(g, sym)
+	ctx := context.Background()
+
+	const baseDepth, targetDepth = 2, 4
+
+	direct := cache.NewCache(sym)
+	for _, group := range sym.GetCanonicalGroups() {
+		searcher.GenerateSubtasks(ctx, direct, group.Canonical, group.OrbitSize, targetDepth)
+	}
+
+	intermediate := cache.NewCache(sym)
+	for _, group := range sym.GetCanonicalGroups() {
+		searcher.GenerateSubtasks(ctx, intermediate, group.Canonical, group.OrbitSize, baseDepth)
+	}
+
+	assert.Positive(t, intermediate.ItemsCount(), "Intermediate cache must not be empty")
+
+	extended := cache.NewCache(sym)
+	for _, e := range intermediate.Entries() {
+		result := searcher.ExtendSubtask(ctx, extended, e.Path, e.Weight, targetDepth)
+		assert.Positive(t, result.CachedPaths, "Extension of an entry generates leaves at target depth")
+	}
+
+	assert.Equal(t, direct.ItemsCount(), extended.ItemsCount(), "Two-phase cache has the same key set")
+	for _, e := range direct.Entries() {
+		weight, ok := extended.GetCanonical(e.Path)
+		assert.True(t, ok, "Key %v present in two-phase cache", e.Path)
+		assert.Equal(t, e.Weight, weight, "Weight of key %v matches single phase", e.Path)
+	}
+}
+
+func TestExtendSubtaskNoopBeyondDepth(t *testing.T) {
+	g := graph.New(5)
+	sym := symmetry.NewSymmetry(5)
+	searcher := NewSearcher(g, sym)
+
+	st := state.State(0).Visit(0).Visit(6)
+	p := path.New(st, 6)
+
+	c := cache.NewCache(sym)
+	result := searcher.ExtendSubtask(context.Background(), c, p, 1, 2)
+
+	assert.Zero(t, result.CachedPaths, "Entry already at target depth generates nothing")
+	assert.Equal(t, 0, c.ItemsCount())
+}
