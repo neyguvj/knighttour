@@ -37,6 +37,15 @@ type Reversal struct {
 	StopLevel int // totalCells - precomputeDepth; reachable iff 2*precomputeDepth <= totalCells
 }
 
+// dfsStats aggregates hot-DFS metrics behind a single pointer so the recursive
+// signature stays lean. cacheWrites counts cache.Set calls during prefix
+// generation; pruned counts branches cut by ShouldPruneAfterVisit (counted in
+// both generation and counting phases).
+type dfsStats struct {
+	cacheWrites int
+	pruned      int
+}
+
 func (s *Searcher) CountPaths(ctx context.Context, start int) types.Result {
 	st := state.State(0).Visit(start)
 	p := path.New(st, start)
@@ -48,7 +57,10 @@ func (s *Searcher) GenerateSubtasks(ctx context.Context, c *cache.Cache, start, 
 		return result
 	}
 	st := state.NewState(start)
-	s.dfs(ctx, st, start, depth, c, orbitSize, &result.CachedPaths, nil)
+	var stats dfsStats
+	s.dfs(ctx, st, start, depth, c, orbitSize, &stats, nil)
+	result.CacheWrites = stats.cacheWrites
+	result.Pruned = stats.pruned
 	return result
 }
 
@@ -63,7 +75,10 @@ func (s *Searcher) ExtendSubtask(ctx context.Context, c *cache.Cache, p path.Pat
 	if p.State().CountBits() >= depth {
 		return result
 	}
-	s.dfs(ctx, p.State(), p.End(), depth, c, weight, &result.CachedPaths, nil)
+	var stats dfsStats
+	s.dfs(ctx, p.State(), p.End(), depth, c, weight, &stats, nil)
+	result.CacheWrites = stats.cacheWrites
+	result.Pruned = stats.pruned
 	return result
 }
 
@@ -81,15 +96,18 @@ func (s *Searcher) CountPathsWithReversal(ctx context.Context, p path.Path, c *c
 	if total := s.graph.GetTotalCells(); c != nil && 2*precomputeDepth <= total {
 		rev = &Reversal{Cache: c, StopLevel: total - precomputeDepth}
 	}
-	result.TotalPathsFound = s.dfs(ctx, p.State(), p.End(), s.graph.GetTotalCells(), nil, 0, nil, rev)
+	var stats dfsStats
+	result.TotalPathsFound = s.dfs(ctx, p.State(), p.End(), s.graph.GetTotalCells(), nil, 0, &stats, rev)
+	result.Pruned = stats.pruned
 	return result
 }
 
 // dfs is the unified hot DFS. When c != nil it stops at depth and stores each
 // prefix as (state, end) with the given orbit weight; otherwise it counts full
 // completions down to a full board. When rev != nil counting stops early at
-// level totalCells-rev.PrecomputeDepth using the reversal cache lookup.
-func (s *Searcher) dfs(ctx context.Context, st state.State, end, depth int, c *cache.Cache, weight int, cached *int, rev *Reversal) int {
+// level totalCells-rev.PrecomputeDepth using the reversal cache lookup. stats
+// aggregates cache writes and pruned branches for monitoring.
+func (s *Searcher) dfs(ctx context.Context, st state.State, end, depth int, c *cache.Cache, weight int, stats *dfsStats, rev *Reversal) int {
 	if ctx.Err() != nil {
 		return 0
 	}
@@ -98,7 +116,7 @@ func (s *Searcher) dfs(ctx context.Context, st state.State, end, depth int, c *c
 	if bits >= depth {
 		if c != nil {
 			c.Set(path.New(st, end), weight)
-			*cached++
+			stats.cacheWrites++
 		}
 		return 1
 	}
@@ -115,9 +133,10 @@ func (s *Searcher) dfs(ctx context.Context, st state.State, end, depth int, c *c
 	for n := range cand.AllVisited() {
 		newUnvisited := unvisited.Unvisit(n)
 		if !newUnvisited.IsEmpty() && s.pruner.ShouldPruneAfterVisit(n, newUnvisited) {
+			stats.pruned++
 			continue
 		}
-		found += s.dfs(ctx, st.Visit(n), n, depth, c, weight, cached, rev)
+		found += s.dfs(ctx, st.Visit(n), n, depth, c, weight, stats, rev)
 	}
 	return found
 }

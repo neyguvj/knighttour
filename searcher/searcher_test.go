@@ -49,7 +49,7 @@ func TestSearcherGenerateSubtasksDepthZero(t *testing.T) {
 
 	result := searcher.GenerateSubtasks(context.Background(), cache, 0, 1, 0)
 
-	assert.Equal(t, 1, result.CachedPaths, "Should cache 1 path when depth=0")
+	assert.Equal(t, 1, result.CacheWrites, "Should cache 1 path when depth=0")
 }
 
 func TestSearcherGenerateSubtasksPartialDepth(t *testing.T) {
@@ -60,7 +60,10 @@ func TestSearcherGenerateSubtasksPartialDepth(t *testing.T) {
 
 	result := searcher.GenerateSubtasks(context.Background(), cache, 0, 1, 3)
 
-	assert.GreaterOrEqual(t, result.CachedPaths, 1, "Should cache at least 1 path when depth=3")
+	assert.GreaterOrEqual(t, result.CacheWrites, 1, "Should cache at least 1 path when depth=3")
+
+	full := searcher.CountPaths(context.Background(), 0)
+	assert.Positive(t, full.Pruned, "Pruner should cut branches during full counting")
 }
 
 func TestSearcherCountPathsDFSFromPartialPath(t *testing.T) {
@@ -141,7 +144,7 @@ func TestExtendSubtaskMatchesSinglePhase(t *testing.T) {
 	extended := cache.NewCache(sym)
 	for _, e := range intermediate.Entries() {
 		result := searcher.ExtendSubtask(ctx, extended, e.Path, e.Weight, targetDepth)
-		assert.Positive(t, result.CachedPaths, "Extension of an entry generates leaves at target depth")
+		assert.Positive(t, result.CacheWrites, "Extension of an entry generates leaves at target depth")
 	}
 
 	assert.Equal(t, direct.ItemsCount(), extended.ItemsCount(), "Two-phase cache has the same key set")
@@ -163,6 +166,6 @@ func TestExtendSubtaskNoopBeyondDepth(t *testing.T) {
 	c := cache.NewCache(sym)
 	result := searcher.ExtendSubtask(context.Background(), c, p, 1, 2)
 
-	assert.Zero(t, result.CachedPaths, "Entry already at target depth generates nothing")
+	assert.Zero(t, result.CacheWrites, "Entry already at target depth generates nothing")
 	assert.Equal(t, 0, c.ItemsCount())
 }

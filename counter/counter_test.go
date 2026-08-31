@@ -70,7 +70,7 @@ func TestGenerateSubTasksWeightsMatchOrbits(t *testing.T) {
 	counter := NewCounter(g)
 
 	// Per group: every raw prefix contributes its orbit size to the cache,
-	// so total weight must equal CachedPaths * OrbitSize regardless of merging.
+	// so total weight must equal CacheWrites * OrbitSize regardless of merging.
 	for _, group := range counter.symmetry.GetCanonicalGroups() {
 		if g.SholdSkip(group.Canonical) {
 			continue
@@ -85,7 +85,7 @@ func TestGenerateSubTasksWeightsMatchOrbits(t *testing.T) {
 			totalWeight += weight
 		})
 
-		assert.Equal(t, result.CachedPaths*group.OrbitSize, totalWeight,
+		assert.Equal(t, result.CacheWrites*group.OrbitSize, totalWeight,
 			"group %d: total weight equals prefixes * orbit size", group.Canonical)
 	}
 
@@ -103,7 +103,7 @@ func TestGenerateSubTasksWeightsMatchOrbits(t *testing.T) {
 		}
 		groupCache := cache.NewCache(counter.symmetry)
 		result := counter.searcher.GenerateSubtasks(context.Background(), groupCache, group.Canonical, group.OrbitSize, 2)
-		expectedWeight += result.CachedPaths * group.OrbitSize
+		expectedWeight += result.CacheWrites * group.OrbitSize
 	}
 
 	assert.Equal(t, expectedWeight, fullWeight, "cross-group merging conserves total weight")

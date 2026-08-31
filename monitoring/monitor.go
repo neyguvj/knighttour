@@ -3,6 +3,7 @@ package monitoring
 import (
 	"context"
 	"fmt"
+	"sync"
 	"sync/atomic"
 	"time"
 )
@@ -10,27 +11,62 @@ import (
 type Monitor interface {
 	Start(ctx context.Context)
 	Finish()
+	BeginPhase(name string)
 	AddTasks(count int)
 	ReportTaskCompleted()
 	ReportPathsFound(count int)
-	ReportPathsCached(count int)
+	ReportCacheWrites(count int)
+	ReportPruned(count int)
 }
 
-type RealMonitor struct {
+// phaseStats holds counters for a single execution phase (generation, counting).
+type phaseStats struct {
 	startTime   time.Time
-	started     atomic.Bool
-	totalTasks  atomic.Uint64
+	endTime     time.Time
+	name        string
+	tasks       atomic.Uint64
 	completed   atomic.Uint64
-	totalPaths  atomic.Uint64
-	cachedPaths atomic.Uint64
+	pathsFound  atomic.Uint64
+	cacheWrites atomic.Uint64
+	pruned      atomic.Uint64
+}
+
+// RealMonitor tracks per-phase progress with lock-free counters. BeginPhase is
+// called strictly between phases (workers of the previous phase are done), so
+// switching the active phase never races with worker reports.
+type RealMonitor struct {
+	startTime time.Time
+	active    atomic.Pointer[phaseStats]
+	phases    []*phaseStats
+	phasesMu  sync.Mutex
+	started   atomic.Bool
 }
 
 func NewMonitor() *RealMonitor {
 	return &RealMonitor{}
 }
 
+var (
+	_ Monitor = (*RealMonitor)(nil)
+	_ Monitor = (*FakeMonitor)(nil)
+)
+
+// BeginPhase closes the previous phase and starts a new active one.
+func (m *RealMonitor) BeginPhase(name string) {
+	if prev := m.active.Load(); prev != nil {
+		prev.endTime = time.Now()
+	}
+	ph := &phaseStats{name: name, startTime: time.Now()}
+	m.phasesMu.Lock()
+	m.phases = append(m.phases, ph)
+	m.phasesMu.Unlock()
+	m.active.Store(ph)
+}
+
 func (m *RealMonitor) AddTasks(count int) {
-	m.totalTasks.Add(uint64(count))
+	if ph := m.active.Load(); ph != nil {
+		ph.tasks.Add(uint64(count))
+	}
 }
 
 func (m *RealMonitor) Start(ctx context.Context) {
@@ -48,53 +84,90 @@ func (m *RealMonitor) Start(ctx context.Context) {
 				}
 				m.report()
 			case <-ctx.Done():
-				m.report()
+				// Finish() already printed the final report; only report here
+				// if it never ran (e.g. context cancelled mid-flight).
+				if m.started.Load() {
+					m.report()
+				}
 				return
 			}
 		}
 	}()
 }
 
+// report prints the active phase progress on a single line (\r-overwritten).
 func (m *RealMonitor) report() {
-	elapsed := time.Since(m.startTime)
-	completed := m.completed.Load()
-	totalTasks := m.totalTasks.Load()
+	ph := m.active.Load()
+	if ph == nil {
+		return
+	}
 
-	pct := float64(completed) / float64(totalTasks) * 100
+	elapsed := time.Since(m.startTime)
+	completed := ph.completed.Load()
+	totalTasks := ph.tasks.Load()
+
+	pct := 0.0
+	if totalTasks > 0 {
+		pct = float64(completed) / float64(totalTasks) * 100
+	}
 
 	fmt.Printf(
-		"\r[%s] Tasks: %d/%d (%.1f%%) | Total paths %d | Cached paths: %d",
-		elapsed.String(),
-		completed, totalTasks,
-		pct,
-		m.totalPaths.Load(),
-		m.cachedPaths.Load(),
+		"\r[%s] Phase %s | Tasks: %d/%d (%.1f%%) | Paths %d | Writes %d | Pruned %d",
+		elapsed.String(), ph.name,
+		completed, totalTasks, pct,
+		ph.pathsFound.Load(),
+		ph.cacheWrites.Load(),
+		ph.pruned.Load(),
 	)
 }
 
 func (m *RealMonitor) Finish() {
-	if !m.started.Load() {
+	if !m.started.Swap(false) {
 		return
 	}
 	m.report()
-	m.started.Store(false)
+	if prev := m.active.Load(); prev != nil {
+		prev.endTime = time.Now()
+	}
+
 	fmt.Printf("\n=== Final ===\n")
-	fmt.Printf("Time: %s\n", time.Since(m.startTime))
-	fmt.Printf("Tasks completed: %d/%d\n", m.completed.Load(), m.totalTasks.Load())
-	fmt.Printf("Total paths: %d\n", m.totalPaths.Load())
-	fmt.Printf("Cached paths: %d\n", m.cachedPaths.Load())
+	fmt.Printf("Total time: %s\n", time.Since(m.startTime))
+
+	var totalPaths uint64
+	for _, ph := range m.phases {
+		fmt.Printf(
+			"Phase %s [%s]: tasks %d/%d | paths %d | writes %d | pruned %d\n",
+			ph.name, ph.endTime.Sub(ph.startTime),
+			ph.completed.Load(), ph.tasks.Load(),
+			ph.pathsFound.Load(), ph.cacheWrites.Load(), ph.pruned.Load(),
+		)
+		totalPaths += ph.pathsFound.Load()
+	}
+	fmt.Printf("Total paths: %d\n", totalPaths)
 }
 
 func (m *RealMonitor) ReportTaskCompleted() {
-	m.completed.Add(1)
+	if ph := m.active.Load(); ph != nil {
+		ph.completed.Add(1)
+	}
 }
 
 func (m *RealMonitor) ReportPathsFound(count int) {
-	m.totalPaths.Add(uint64(count))
+	if ph := m.active.Load(); ph != nil {
+		ph.pathsFound.Add(uint64(count))
+	}
 }
 
-func (m *RealMonitor) ReportPathsCached(count int) {
-	m.cachedPaths.Add(uint64(count))
+func (m *RealMonitor) ReportCacheWrites(count int) {
+	if ph := m.active.Load(); ph != nil {
+		ph.cacheWrites.Add(uint64(count))
+	}
+}
+
+func (m *RealMonitor) ReportPruned(count int) {
+	if ph := m.active.Load(); ph != nil {
+		ph.pruned.Add(uint64(count))
+	}
 }
 
 type FakeMonitor struct{}
@@ -105,7 +178,9 @@ func NewFakeMonitor() *FakeMonitor {
 
 func (*FakeMonitor) Start(ctx context.Context)   {}
 func (*FakeMonitor) Finish()                     {}
+func (*FakeMonitor) BeginPhase(name string)      {}
 func (*FakeMonitor) AddTasks(count int)          {}
 func (*FakeMonitor) ReportTaskCompleted()        {}
 func (*FakeMonitor) ReportPathsFound(count int)  {}
-func (*FakeMonitor) ReportPathsCached(count int) {}
+func (*FakeMonitor) ReportCacheWrites(count int) {}
+func (*FakeMonitor) ReportPruned(count int)      {}

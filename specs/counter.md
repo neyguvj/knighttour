@@ -75,7 +75,8 @@ func (c *Counter) ParallelCountWithDepth(
 
 **Алгоритм:**
 1. Сгенерировать подзадачи (см. «Генерация подзадач» ниже) — `generateSubTasks` выбирает стратегию по глубине
-2. Добавить количество подзадач в мониторинг (`monitor.AddTasks(taskCache.ItemsCount())`)
+2. `monitor.BeginPhase("counting")`, добавить количество подзадач в мониторинг
+   (`monitor.AddTasks(taskCache.ItemsCount())`)
 3. Запустить worker pool с лимитом workers через `errgroup.Group` (`taskCache.Each`)
 4. Если `2·precomputeDepth ≤ totalCells`, включить досрочное завершение через реверс:
    count-DFS передаётся тот же `taskCache` и глубина генерации (см. searcher.md,
@@ -87,7 +88,8 @@ func (c *Counter) ParallelCountWithDepth(
    - Умножить результат на вес и добавить к общему счетчику
      (`total += completions * weight`; умножение на размер орбиты уже зашито
      в вес при генерации, `start`/`GetOrbitSize` на этом этапе не нужны)
-   - Зарегистрировать завершение через `monitor.ReportPathsFound()` и `monitor.ReportTaskCompleted()`
+   - Зарегистрировать завершение через `monitor.ReportPathsFound()`,
+     `monitor.ReportPruned(result.Pruned)` и `monitor.ReportTaskCompleted()`
 6. Вернуть суммарное количество путей
 
 ## Генерация подзадач
@@ -101,7 +103,9 @@ func (c *Counter) ParallelCountWithDepth(
 2. Получить группы канонических позиций: `symmetry.GetCanonicalGroups()`
 3. Для каждой группы вызвать `searcher.GenerateSubtasks(ctx, cache, canonicalPos, orbitSize, depth)`;
    генерация групп **параллельна** через `errgroup` с `SetLimit(workers)`
-4. Мониторинг: `monitor.AddTasks(len(groups))`, на группу — `ReportPathsCached` + `ReportTaskCompleted`
+4. Мониторинг: `monitor.BeginPhase("generation")` (или имя фазы от вызывающего),
+   `monitor.AddTasks(len(groups))`, на группу — `ReportCacheWrites` + `ReportPruned` +
+   `ReportTaskCompleted`
 
 ### Двухфазная (precomputeDepth > TwoPhaseBaseDepth)
 
@@ -130,9 +134,11 @@ const TwoPhaseBaseDepth = 5
 (ключи и веса) идентичен однофазной генерации — reversal-фаза не замечает разницы.
 Подробное обоснование — searcher.md, «ExtendSubtask».
 
-**Мониторинг:** `AddTasks(len(groups))` (фаза A) + `AddTasks(intermediateCount)`
-(фаза B); `ReportTaskCompleted` на каждую завершённую задачу обеих фаз;
-`ReportPathsCached` — по числу записей, добавленных в целевой кэш.
+**Мониторинг:** фазы `"gen A"` и `"gen B"` (`monitor.BeginPhase` перед каждой,
+причём `BeginPhase("gen B")` — после полного завершения фазы A);
+`AddTasks(len(groups))` (фаза A) + `AddTasks(intermediateCount)` (фаза B);
+на каждую завершённую задачу — `ReportCacheWrites` (записи в целевой кэш),
+`ReportPruned` и `ReportTaskCompleted` текущей фазы.
 
 **Память:** промежуточный кэш живёт только время генерации и освобождается до
 фазы подсчёта.
@@ -155,33 +161,40 @@ fmt.Printf("Total tours: %d\n", count)
 
 ## Мониторинг
 
-Мониторинг выводит прогресс каждую секунду:
+Мониторинг выводит прогресс каждую секунду — **только текущую фазу**:
 
 ```
-[00:XX:YY] Tasks: 6/6 (100.0%) | Total paths 1728 | Cached paths: 42
+[1.234s] Phase gen B | Tasks: 1200/5041 (23.8%) | Paths 0 | Writes 447520 | Pruned 129334
 ```
 
-И финальный отчет:
+И финальный отчет — по строке на каждую фазу + итоги:
 
 ```
 === Final ===
-Time: XXs
-Tasks completed: 6/6
-Total paths: 1728
-Cached paths: 42
+Total time: 63ms
+Phase generation [41ms]: tasks 6/6 | paths 0 | writes 2795 | pruned 12034
+Phase counting [22ms]: tasks 95224/95224 | paths 6637920 | writes 0 | pruned 180322
+Total paths: 6637920
 ```
+
+Фазы запуска: `generation` (depth ≤ TwoPhaseBaseDepth) либо `gen A` + `gen B`,
+затем `counting`.
 
 **Методы интерфейса Monitor:**
 ```go
 type Monitor interface {
-    AddTasks(count int)
     Start(ctx context.Context)
     Finish()
-    ReportTaskCompleted()
+    BeginPhase(name string) // переключает мониторинг на новую фазу (между фазами, при остановленных воркерах)
+    AddTasks(count int)     // в текущую фазу
+    ReportTaskCompleted()   // текущая фаза
     ReportPathsFound(count int)
-    ReportPathsCached(count int)
+    ReportCacheWrites(count int) // число записей в кэш (не «закэшированные пути»)
+    ReportPruned(count int)      // отсечённые прунером ветви
 }
 ```
+
+Все репорты относятся к **активной** фазе; счётчики фаз — атомарные.
 
 ## Использование в main.go
 

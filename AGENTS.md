@@ -70,7 +70,7 @@ make bench            # Benchmarks (counter/)
 - **state/** – `State` type (uint64 bitboard) tracking visited positions
   - Bit manipulation operations: Visit, Unvisit, IsVisited, CountBits, Intersect, Union, Invert, AllVisited
 - **path/** – `Path` value type (state + start + end) used as cache key
-- **types/** – Shared `Result` struct (TotalPathsFound, CachedPaths)
+- **types/** – Shared `Result` struct (TotalPathsFound, CacheWrites, Pruned)
 - **searcher/** – DFS path counter over bitmasks with dead-end pruning
   - Methods: `CountPaths()`, `CountPathsDFS()`, `GenerateSubtasks()` (prefix generation into cache)
 - **counter/** – High-level counting orchestrator with symmetry reduction

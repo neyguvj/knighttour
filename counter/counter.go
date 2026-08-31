@@ -52,15 +52,17 @@ func (c *Counter) ParallelCount(ctx context.Context, monitor monitoring.Monitor,
 
 // generateSubTasks builds the task cache for precomputeDepth, picking the
 // strategy by depth: single-phase (parallel over canonical start groups) up to
-// TwoPhaseBaseDepth, two-phase above it.
+// TwoPhaseBaseDepth, two-phase above it. Monitoring phases: "generation" for
+// single-phase, "gen A"/"gen B" for two-phase.
 func (c *Counter) generateSubTasks(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) *cache.Cache {
 	if precomputeDepth > TwoPhaseBaseDepth {
 		return c.generateSubTasksTwoPhase(ctx, monitor, workers, precomputeDepth)
 	}
-	return c.generateSubTasksSinglePhase(ctx, monitor, workers, precomputeDepth)
+	return c.generateSubTasksSinglePhase(ctx, monitor, "generation", workers, precomputeDepth)
 }
 
-func (c *Counter) generateSubTasksSinglePhase(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) *cache.Cache {
+func (c *Counter) generateSubTasksSinglePhase(ctx context.Context, monitor monitoring.Monitor, phase string, workers, precomputeDepth int) *cache.Cache {
+	monitor.BeginPhase(phase)
 	taskCache := cache.NewCache(c.symmetry)
 	groups := c.symmetry.GetCanonicalGroups()
 	monitor.AddTasks(len(groups))
@@ -71,7 +73,8 @@ func (c *Counter) generateSubTasksSinglePhase(ctx context.Context, monitor monit
 		p := group.Canonical
 		g.Go(func() error {
 			result := c.searcher.GenerateSubtasks(ctx, taskCache, p, group.OrbitSize, precomputeDepth)
-			monitor.ReportPathsCached(result.CachedPaths)
+			monitor.ReportCacheWrites(result.CacheWrites)
+			monitor.ReportPruned(result.Pruned)
 			monitor.ReportTaskCompleted()
 			return nil
 		})
@@ -87,8 +90,10 @@ func (c *Counter) generateSubTasksSinglePhase(ctx context.Context, monitor monit
 // entry independently to precomputeDepth. The resulting cache is identical to
 // single-phase generation (see searcher.ExtendSubtask).
 func (c *Counter) generateSubTasksTwoPhase(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) *cache.Cache {
-	intermediate := c.generateSubTasksSinglePhase(ctx, monitor, workers, TwoPhaseBaseDepth)
+	intermediate := c.generateSubTasksSinglePhase(ctx, monitor, "gen A", workers, TwoPhaseBaseDepth)
 	entries := intermediate.Entries()
+
+	monitor.BeginPhase("gen B")
 	monitor.AddTasks(len(entries))
 
 	taskCache := cache.NewCache(c.symmetry)
@@ -97,7 +102,8 @@ func (c *Counter) generateSubTasksTwoPhase(ctx context.Context, monitor monitori
 	for _, e := range entries {
 		g.Go(func() error {
 			result := c.searcher.ExtendSubtask(ctx, taskCache, e.Path, e.Weight, precomputeDepth)
-			monitor.ReportPathsCached(result.CachedPaths)
+			monitor.ReportCacheWrites(result.CacheWrites)
+			monitor.ReportPruned(result.Pruned)
 			monitor.ReportTaskCompleted()
 			return nil
 		})
@@ -109,6 +115,8 @@ func (c *Counter) generateSubTasksTwoPhase(ctx context.Context, monitor monitori
 
 func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) uint64 {
 	taskCache := c.generateSubTasks(ctx, monitor, workers, precomputeDepth)
+
+	monitor.BeginPhase("counting")
 	monitor.AddTasks(taskCache.ItemsCount())
 
 	total := atomic.Uint64{}
@@ -123,6 +131,7 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 		paths := uint64(result.TotalPathsFound) * uint64(weight)
 		total.Add(paths)
 		monitor.ReportPathsFound(int(paths))
+		monitor.ReportPruned(result.Pruned)
 		monitor.ReportTaskCompleted()
 	})
 

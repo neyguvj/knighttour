@@ -241,22 +241,22 @@ type Searcher struct {
 3. `GenerateSubtasks(ctx context.Context, c *cache.Cache, start int, orbitSize int, depth int) types.Result`
    - Генерирует префиксы глубины depth из стартовой позиции и сохраняет их в кэш
    - Позиции, пропускаемые по цветовому правилу (`SholdSkip`), дают пустой результат
-   - Возвращает types.Result с CachedPaths — количеством закэшированных путей
+   - Возвращает types.Result с CacheWrites (число записей в кэш) и Pruned (отсечённые ветви)
 
-4. `dfs(ctx context.Context, st state.State, start, end, depth int, c *cache.Cache, cached *int) int`
+4. `dfs(ctx context.Context, st state.State, start, end, depth int, c *cache.Cache, stats *dfsStats, rev *Reversal) int`
    - Единый внутренний горячий DFS: используется и для полных маршрутов
      (`depth = totalCells`, `c = nil`), и для генерации префиксов
      (`depth = precomputeDepth`, `c != nil`)
 
 **Алгоритм:**
 ```
-dfs(state, start, end, depth, cache, cached):
+dfs(state, end, depth, cache, weight, stats, rev):
     if ctx.Err() != nil: return 0
 
     if CountBits(state) >= depth:          // достигнута глубина префикса
         if cache != nil:
-            cache.Set(Path(state, start, end), 1)
-            cached++
+            cache.Set(Path(state, end), weight)
+            stats.cacheWrites++
         return 1
 
     unvisited = Invert(state)
@@ -265,9 +265,10 @@ dfs(state, start, end, depth, cache, cached):
         newUnvisited = unvisited - {n}
 
         if !newUnvisited.IsEmpty() && deadend.ShouldPruneAfterVisit(n, newUnvisited):
+            stats.pruned++
             continue
 
-        count += dfs(state.Visit(n), start, n, depth, cache, cached)
+        count += dfs(state.Visit(n), n, depth, cache, weight, stats, rev)
 
     return count
 ```
@@ -292,7 +293,8 @@ func (p Path) String() string
 ```go
 type Result struct {
     TotalPathsFound int  // количество найденных путей в поддереве
-    CachedPaths     int  // количество закэшированных путей (в GenerateSubtasks)
+    CacheWrites     int  // число записей в кэш (вызовов cache.Set)
+    Pruned          int  // ветви, отсечённые прунером
 }
 
 func (r *Result) Add(other Result)
@@ -356,11 +358,12 @@ fmt.Printf("Total tours: %d\n", count)
 ```
 
 **Мониторинг:**
-- `monitor.AddTasks(count int)` — увеличить количество отслеживаемых задач
+- `monitor.BeginPhase(name)` — начать новую фазу (`generation` / `gen A` / `gen B` / `counting`)
+- `monitor.AddTasks(count int)` — увеличить количество задач активной фазы
 - `monitor.Start(ctx)` — запустить периодический вывод прогресса (каждую секунду)
-- `monitor.ReportPathsFound(count)` / `monitor.ReportPathsCached(count)` — зарегистрировать пути
+- `monitor.ReportPathsFound(count)` / `monitor.ReportCacheWrites(count)` / `monitor.ReportPruned(count)` — зарегистрировать метрики активной фазы
 - `monitor.ReportTaskCompleted()` — зарегистрировать завершение одной задачи
-- `monitor.Finish()` — финальный отчет
+- `monitor.Finish()` — финальный отчет по фазам
 
 **Тесты:**
 - Проверка что сумма (count × orbit_size) дает полный результат
@@ -377,54 +380,70 @@ fmt.Printf("Total tours: %d\n", count)
 type Monitor interface {
     Start(ctx context.Context)
     Finish()
+    BeginPhase(name string)
     AddTasks(count int)
     ReportTaskCompleted()
     ReportPathsFound(count int)
-    ReportPathsCached(count int)
+    ReportCacheWrites(count int)
+    ReportPruned(count int)
 }
 ```
 
 **RealMonitor (реализация):**
 ```go
-type RealMonitor struct {
-    started     atomic.Bool
+type phaseStats struct {
+    name        string
     startTime   time.Time
-    totalTasks  atomic.Uint64  // общее количество задач
-    completed   atomic.Uint64  // завершенные задачи
-    totalPaths  atomic.Uint64  // найденные пути (с учетом орбит)
-    cachedPaths atomic.Uint64  // закэшированные пути
+    endTime     time.Time
+    tasks       atomic.Uint64 // задач в фазе
+    completed   atomic.Uint64 // завершённых задач фазы
+    pathsFound  atomic.Uint64 // найденные пути (с учетом орбит)
+    cacheWrites atomic.Uint64 // записей в кэш
+    pruned      atomic.Uint64 // отсечённые прунером ветви
+}
+
+type RealMonitor struct {
+    startTime time.Time
+    started   atomic.Bool
+    active    atomic.Pointer[phaseStats] // активная фаза
+    phasesMu  sync.Mutex                 // append фаз
+    phases    []*phaseStats
 }
 ```
 
 **Методы:**
-- `NewMonitor() *RealMonitor` — создание монитора
-- `AddTasks(count int)` — добавить задачи (увеличивает totalTasks на count)
+- `NewMonitor() *RealMonitor` — создание монитора (фаз ещё нет)
+- `BeginPhase(name string)` — новая активная фаза; вызывается только между фазами
+- `AddTasks(count int)` — добавить задачи активной фазе
 - `Start(ctx context.Context)` — запустить периодический вывод прогресса (каждую секунду)
   - Вывод в формате:
     ```
-    [00:XX:YY] Tasks: 6/6 (100.0%) | Total paths 1728 | Cached paths: 42
+    [1.234s] Phase gen B | Tasks: 1200/5041 (23.8%) | Paths 0 | Writes 447520 | Pruned 129334
     ```
 - `Finish()` — финальный отчет и завершение мониторинга
   - Вывод:
     ```
     === Final ===
-    Time: XXs
-    Tasks completed: 6/6
-    Total paths: 1728
-    Cached paths: 42
+    Total time: 63ms
+    Phase generation [41ms]: tasks 6/6 | paths 0 | writes 2795 | pruned 12034
+    Phase counting [22ms]: tasks 95224/95224 | paths 6637920 | writes 0 | pruned 180322
+    Total paths: 6637920
     ```
-- `ReportTaskCompleted()` — зарегистрировать завершение задачи (увеличивает completed на 1)
-- `ReportPathsFound(count int)` — зарегестрировать найденные пути
-- `ReportPathsCached(count int)` — зарегистрировать закэшированные пути
+- `ReportTaskCompleted()` — зарегистрировать завершение задачи активной фазы
+- `ReportPathsFound(count int)` — зарегистрировать найденные пути
+- `ReportCacheWrites(count int)` — зарегистрировать записи в кэш (не «закэшированные пути»)
+- `ReportPruned(count int)` — зарегистрировать отсечённые прунером ветви
 
 **FakeMonitor (для тестов):**
 ```go
-func (*FakeMonitor) Start(ctx context.Context)      {}
-func (*FakeMonitor) Finish()                        {}
-func (*FakeMonitor) AddTasks(count int)             {}
-func (*FakeMonitor) ReportTaskCompleted()           {}
-func (*FakeMonitor) ReportPathsFound(count int)     {}
-func (*FakeMonitor) ReportPathsCached(count int)    {}
+func (*FakeMonitor) Start(ctx context.Context)        {}
+func (*FakeMonitor) Finish()                          {}
+func (*FakeMonitor) BeginPhase(name string)           {}
+func (*FakeMonitor) AddTasks(count int)               {}
+func (*FakeMonitor) ReportTaskCompleted()             {}
+func (*FakeMonitor) ReportPathsFound(count int)       {}
+func (*FakeMonitor) ReportCacheWrites(count int)      {}
+func (*FakeMonitor) ReportPruned(count int)           {}
 ```
 
 **Использование в Counter:**
@@ -437,7 +456,8 @@ count := c.ParallelCountWithDepth(ctx, monitor, workers, depth)
 
 // В worker'ах (для кэширования подзадач):
 result := searcher.GenerateSubtasks(ctx, cache, p, orbitSize, depth)
-monitor.ReportPathsCached(result.CachedPaths)
+monitor.ReportCacheWrites(result.CacheWrites)
+monitor.ReportPruned(result.Pruned)
 monitor.ReportTaskCompleted()
 
 // При параллельном подсчете из кэша:

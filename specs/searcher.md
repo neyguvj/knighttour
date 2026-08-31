@@ -56,7 +56,8 @@ func (s *Searcher) GenerateSubtasks(
     сохранить задачу в кэш с весом орбиты (`cache.Set(path.New(st, end), orbitSize)`)
     и прекратить спуск; ветви режет `ShouldPruneAfterVisit` (тот же инвариант, что и в основном DFS).
     `start` в ключ не попадает — вместо него вклад группы кодируется весом `orbitSize`
-3. Возвращает `types.Result.CachedPaths` — количество записей, отправленных в кэш
+3. Возвращает `types.Result.CacheWrites` (число вызовов `Set`) и `types.Result.Pruned`
+   (ветви, отсечённые прунером на генерации)
 
 ### 2.1 ExtendSubtask(ctx context.Context, cache *Cache, p path.Path, weight int, depth int) types.Result
 
@@ -215,12 +216,30 @@ func (p Path) String() string
 ```go
 type Result struct {
     TotalPathsFound int  // количество найденных путей в поддереве
-    CachedPaths     int  // количество закэшированных путей (в GenerateSubtasks)
+    CacheWrites     int  // число записей в кэш (вызовов cache.Set)
+    Pruned          int  // ветви, отсечённые прунером
 }
 
 func (r *Result) Add(other Result)
 // Суммирует поля result и other
 ```
+
+### dfsStats (внутренний тип searcher)
+
+Горячий `dfs` агрегирует метрики через указатель на маленький mutable-структурный
+накопитель, чтобы не плодить параметры:
+
+```go
+type dfsStats struct {
+    cacheWrites int // инкремент на каждом cache.Set
+    pruned      int // инкремент на каждом сработанном ShouldPruneAfterVisit
+}
+```
+
+`dfs(..., stats *dfsStats, rev)`; публичные методы (`GenerateSubtasks`,
+`ExtendSubtask`, `CountPathsWithReversal`) создают локальный `dfsStats`, после
+возврата раскладывают в `types.Result`. За счёт этого **прунинг считается в обеих
+фазах**: и на генерации префиксов, и на подсчёте (в т.ч. реверс-lookup ветки).
 
 ## Использование в Counter
 
@@ -267,7 +286,7 @@ func TestSearcherGenerateSubtasks(t *testing.T) {
     cache := cache.NewCache(sym)
     result := searcher.GenerateSubtasks(context.Background(), cache, 0, 4, 3)
     
-    require.Greater(t, result.CachedPaths, 0)
+    require.Greater(t, result.CacheWrites, 0)
 }
 
 func TestSearcherDeadEndPrune(t *testing.T) {
