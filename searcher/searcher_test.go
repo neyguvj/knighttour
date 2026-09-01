@@ -106,13 +106,14 @@ func TestSearcherReversalMatchesFullCount(t *testing.T) {
 			}
 
 			var fullTotal, revTotal int64
-			prefixCache.Each(context.Background(), 1, func(_ context.Context, p path.Path, weight int) {
+			prefixCache.Each(context.Background(), 1, func(_ context.Context, p path.Path, weight int) error {
 				full := searcher.CountPathsDFS(context.Background(), p).TotalPathsFound
 				withRev := searcher.CountPathsWithReversal(context.Background(), p, prefixCache, tt.depth).TotalPathsFound
 
 				assert.Equal(t, full, withRev, "task %v: early stop must match full descent", p)
 				fullTotal += int64(full) * int64(weight)
 				revTotal += int64(withRev) * int64(weight)
+				return nil
 			})
 
 			assert.Positive(t, fullTotal)

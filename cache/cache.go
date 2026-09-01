@@ -133,7 +133,7 @@ func (c *Cache) Entries() []Entry {
 	return entries
 }
 
-func (c *Cache) Each(ctx context.Context, workers int, f func(ctx context.Context, p path.Path, count int)) {
+func (c *Cache) Each(ctx context.Context, workers int, f func(ctx context.Context, p path.Path, count int) error) {
 	g, ctx := errgroup.WithContext(ctx)
 	g.SetLimit(workers)
 	for i := range c.shards {
@@ -143,7 +143,9 @@ func (c *Cache) Each(ctx context.Context, workers int, f func(ctx context.Contex
 			}
 			c.shards[i].RLock()
 			for path, count := range c.shards[i].data {
-				f(ctx, path, count)
+				if err := f(ctx, path, count); err != nil {
+					return err
+				}
 			}
 			c.shards[i].RUnlock()
 			return nil

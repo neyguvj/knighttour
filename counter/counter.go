@@ -120,19 +120,22 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 	monitor.AddTasks(taskCache.ItemsCount())
 
 	total := atomic.Uint64{}
-	taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, weight int) {
+	taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, weight int) error {
 		// The task cache doubles as the reversal lookup table: when only
 		// precomputeDepth cells remain, completions are answered from it
 		// instead of descending (no-op unless 2*precomputeDepth <= totalCells).
 		// Safe for concurrent reads inside Each because generation is over:
 		// the cache is strictly read-only during this phase.
 		result := c.searcher.CountPathsWithReversal(ctx, p, taskCache, precomputeDepth)
-
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		paths := uint64(result.TotalPathsFound) * uint64(weight)
 		total.Add(paths)
 		monitor.ReportPathsFound(int(paths))
 		monitor.ReportPruned(result.Pruned)
 		monitor.ReportTaskCompleted()
+		return nil
 	})
 
 	return total.Load()

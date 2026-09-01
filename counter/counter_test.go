@@ -80,9 +80,10 @@ func TestGenerateSubTasksWeightsMatchOrbits(t *testing.T) {
 		result := counter.searcher.GenerateSubtasks(context.Background(), groupCache, group.Canonical, group.OrbitSize, 2)
 
 		totalWeight := 0
-		groupCache.Each(context.Background(), 1, func(_ context.Context, _ path.Path, weight int) {
+		groupCache.Each(context.Background(), 1, func(_ context.Context, _ path.Path, weight int) error {
 			assert.Positive(t, weight, "weight must be positive")
 			totalWeight += weight
+			return nil
 		})
 
 		assert.Equal(t, result.CacheWrites*group.OrbitSize, totalWeight,
@@ -92,8 +93,9 @@ func TestGenerateSubTasksWeightsMatchOrbits(t *testing.T) {
 	// Merging across groups conserves the total weight and never increases entry count.
 	fullCache := counter.generateSubTasks(context.Background(), monitoring.NewFakeMonitor(), 4, 2)
 	fullWeight := 0
-	fullCache.Each(context.Background(), 1, func(_ context.Context, _ path.Path, weight int) {
+	fullCache.Each(context.Background(), 1, func(_ context.Context, _ path.Path, weight int) error {
 		fullWeight += weight
+		return nil
 	})
 
 	expectedWeight := 0
