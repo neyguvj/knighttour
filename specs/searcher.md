@@ -9,9 +9,9 @@
 
 ```go
 type Searcher struct {
-    graph  *Graph           // граф смежности
-    sym    *Symmetry        // для канонизации путей в кэше
-    pruner *AdvancedPruner  // отсечение тупиков + связность + эвристика концов
+    graph  *Graph         // граф смежности
+    sym    *Symmetry      // для канонизации путей в кэше
+    pruner *pruner.Pruner // отсечение тупиков + связность + эвристика концов
 }
 ```
 
@@ -56,8 +56,9 @@ func (s *Searcher) GenerateSubtasks(
     сохранить задачу в кэш с весом орбиты (`cache.Set(path.New(st, end), orbitSize)`)
     и прекратить спуск; ветви режет `ShouldPruneAfterVisit` (тот же инвариант, что и в основном DFS).
     `start` в ключ не попадает — вместо него вклад группы кодируется весом `orbitSize`
-3. Возвращает `types.Result.CacheWrites` (число вызовов `Set`) и `types.Result.Pruned`
-   (ветви, отсечённые прунером на генерации)
+3. Возвращает заполненный `types.Result`: `CacheWrites` (число вызовов `Set`) и
+   разбивку прунинга по видам (`Pruned*`, сумма — `Pruned`). На генерации
+   hits/misses нет (lookup'и — только в count-фазе)
 
 ### 2.1 ExtendSubtask(ctx context.Context, cache *Cache, p path.Path, weight int, depth int) types.Result
 
@@ -156,7 +157,10 @@ f(T, t) = Σ_{u ∈ U, u ~ t} h(U, u),      h(U,u) = #(путей, покрыв�
 
 ```go
 // rev != nil включает досрочное завершение count-DFS (см. раздел выше).
-func (s *Searcher) dfs(ctx context.Context, st State, end, depth int, c *Cache, weight int, stats *dfsStats, rev *Reversal) int
+// res — аккумулятор статистики подзадачи (writes/hits/misses/прунинг по видам);
+// заменяет прежний dfsStats: тот же единственный указатель, но типизированный
+// types.Result — наружу уходит без раскладки.
+func (s *Searcher) dfs(ctx context.Context, st State, end, depth int, c *Cache, weight int, res *types.Result, rev *Reversal) int
 
 // Reversal — активный компонент: владеет и конфигурацией досрочного завершения,
 // и всей логикой подсчёта обратных путей. Поля неэкспортируемы; конструируется
@@ -173,17 +177,20 @@ type Reversal struct {
 // Completions отвечает f(T,end) на уровне stopLevel: Σ h(U,u) по соседям u ∈ U.
 // Выбор источника — nil-check'ом (без интерфейсов): oracle нормализует маску
 // один раз на узел через Prepare/GetPrepared; legacy-кэш — TransformStates +
-// CanonicalFromStates и W/orbitSize на запись.
-func (r *Reversal) Completions(unvisited State, end int) int
+// CanonicalFromStates и W/orbitSize на запись. В legacy-ветке каждый lookup
+// помечает попадание/промах в res (CacheHits/CacheMisses) — счёт у вызывающего,
+// конкурентно-безопасный без атомиков.
+func (r *Reversal) Completions(unvisited State, end int, res *types.Result) int
 ```
 
 1. Базовый случай: `CountBits(st) >= depth` → если `c != nil`, сохранить
-   `path.New(st, end)` в кэш с весом `weight` и инкрементировать `stats.cacheWrites`; вернуть 1
+   `path.New(st, end)` в кэш с весом `weight` и инкрементировать `res.CacheWrites`; вернуть 1
 2. Досрочное завершение: `rev != nil && CountBits(st) == rev.stopLevel` →
-   `return rev.Completions(unvisited, end)` (весь подсчёт обратных путей — внутри Reversal)
+   `return rev.Completions(unvisited, end, res)` (весь подсчёт обратных путей — внутри Reversal)
 3. `unvisited := fullMask &^ state`; кандидаты: `neighborMasks[end] & unvisited`
 4. Перебор кандидатов через итератор `for n := range cand.AllVisited()` (без прямых битовых операций)
-5. Если после хода остались непосещённые и `pruner.ShouldPruneAfterVisit(n, newUnvisited)` → continue
+5. Если после хода остались непосещённые и `pruner.ShouldPruneAfterVisit(n, newUnvisited)`
+   вернул prune → `res.CountPrune(reason)` и continue
 6. Рекурсия, сумма результатов — возвращаемое значение
 
 Вызовы:
@@ -238,35 +245,33 @@ func (p Path) String() string
 Поле `start` удалено: число продолжений из состояния зависит только от
 `(state, end)`, а вклад стартовой орбиты перенесён в вес записи кэша.
 
-### Result
+### Result — аккумулятор статистики подзадачи
 
 ```go
 type Result struct {
-    TotalPathsFound int  // количество найденных путей в поддереве
-    CacheWrites     int  // число записей в кэш (вызовов cache.Set)
-    Pruned          int  // ветви, отсечённые прунером
+    TotalPathsFound int
+    CacheHits, CacheMisses          int
+    Pruned                          int
+    PrunedDeadEnd, PrunedNoCont     int
+    PrunedDisconn, PrunedEndpoints  int
+    CacheWrites                     int
 }
 
 func (r *Result) Add(other Result)
-// Суммирует поля result и other
+func (r *Result) CountPrune(reason pruner.Reason) // горячий путь: один инкремент за prune
+func (r *Result) Finalize()                       // Pruned = Σ по видам, один раз на возврат
 ```
 
-### dfsStats (внутренний тип searcher)
+Полное описание полей — types.md. Публичные методы вызывают `Finalize()` перед
+возвратом; внутри DFS `Pruned` не поддерживается (лишний store на каждом prune).
 
-Горячий `dfs` агрегирует метрики через указатель на маленький mutable-структурный
-накопитель, чтобы не плодить параметры:
-
-```go
-type dfsStats struct {
-    cacheWrites int // инкремент на каждом cache.Set
-    pruned      int // инкремент на каждом сработанном ShouldPruneAfterVisit
-}
-```
-
-`dfs(..., stats *dfsStats, rev)`; публичные методы (`GenerateSubtasks`,
-`ExtendSubtask`, `CountPathsWithReversal`) создают локальный `dfsStats`, после
-возврата раскладывают в `types.Result`. За счёт этого **прунинг считается в обеих
-фазах**: и на генерации префиксов, и на подсчёте (в т.ч. реверс-lookup ветки).
+Горячий `dfs` агрегирует метрики через указатель на аккумулятор (`*types.Result`)
+— единственный параметр вместо прежнего внутреннего `dfsStats` (тип удалён):
+публичные методы (`GenerateSubtasks`, `ExtendSubtask`, `CountPathsWithReversal`,
+`CountPathsDFS`) создают локальный `var result types.Result`, передают его в
+`dfs`/`Completions` и возвращают наружу. За счёт этого **прунинг считается в обеих
+фазах**: и на генерации префиксов, и на подсчёте; hits/misses — на legacy-reversal
+lookup'ах фазы counting.
 
 ## Использование в Counter
 
@@ -318,13 +323,14 @@ func TestSearcherGenerateSubtasks(t *testing.T) {
 
 func TestSearcherDeadEndPrune(t *testing.T) {
     graph := graph.New(5)
-    deadend := pruner.NewDeadEndPruner(graph)
-    
-    // После посещения 2 клетка 0 изолирована среди непосещённых
+    p := pruner.New(graph)
+
+    // После посещения 7 клетка 0 изолирована среди непосещённых
     unvisited := state.NewState(0, 2, 4, 6)
-    
-    shouldPrune := deadend.ShouldPruneAfterVisit(7, unvisited)
-    require.True(t, shouldPrune)  // есть изолированная клетка
+
+    shouldPrune, reason := p.ShouldPruneAfterVisit(7, unvisited)
+    require.True(t, shouldPrune)            // есть изолированная клетка
+    require.Equal(t, pruner.DeadEnd, reason)
 }
 ```
 

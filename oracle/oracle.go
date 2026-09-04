@@ -37,7 +37,7 @@ type shard struct {
 // duplicate work but never corrupt values (computation is deterministic).
 type Oracle struct {
 	graph    *graph.Graph
-	pruner   *pruner.AdvancedPruner
+	pruner   *pruner.Pruner
 	shards   [numShards]shard
 	size     int
 	lookups  atomic.Uint64
@@ -48,7 +48,7 @@ type Oracle struct {
 }
 
 func New(g *graph.Graph) *Oracle {
-	o := &Oracle{graph: g, pruner: pruner.NewAdvancedPruner(g), size: g.Size()}
+	o := &Oracle{graph: g, pruner: pruner.New(g), size: g.Size()}
 
 	total := g.GetTotalCells()
 	closures := symmetry.GetSymmetries(o.size)
@@ -210,7 +210,7 @@ func (o *Oracle) computeH(shape state.State, end int) uint64 {
 		// completion, i.e. a true zero. It runs on normalized shape coordinates;
 		// knight adjacency is translation invariant and board-edge clipping only
 		// drops off-board cells (never in todo), so G[todo] is seen exactly.
-		if o.pruner.ShouldPruneAfterVisit(cur, todo) {
+		if pruned, _ := o.pruner.ShouldPruneAfterVisit(cur, todo); pruned {
 			memo[mk] = 0
 			return 0
 		}

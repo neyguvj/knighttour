@@ -9,6 +9,8 @@ import (
 	"testing"
 	"time"
 
+	"knighttour/types"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -20,8 +22,7 @@ func TestReportsWithoutPhaseAreNoop(t *testing.T) {
 		m.AddTasks(10)
 		m.ReportTaskCompleted()
 		m.ReportPathsFound(5)
-		m.ReportCacheWrites(3)
-		m.ReportPruned(2)
+		m.ReportSubtask(types.Result{CacheWrites: 3, Pruned: 2})
 	})
 	assert.Empty(t, m.phases)
 }
@@ -32,8 +33,7 @@ func TestPhaseAccumulation(t *testing.T) {
 	m.BeginPhase("generation")
 	m.AddTasks(6)
 	m.ReportTaskCompleted()
-	m.ReportCacheWrites(100)
-	m.ReportPruned(42)
+	m.ReportSubtask(types.Result{CacheWrites: 100, Pruned: 42, PrunedDeadEnd: 40, PrunedEndpoints: 2})
 
 	m.BeginPhase("counting")
 	m.AddTasks(10)
@@ -41,7 +41,7 @@ func TestPhaseAccumulation(t *testing.T) {
 		m.ReportTaskCompleted()
 	}
 	m.ReportPathsFound(999)
-	m.ReportPruned(7)
+	m.ReportSubtask(types.Result{CacheHits: 60, CacheMisses: 40, Pruned: 7, PrunedDisconn: 7})
 
 	assert.Len(t, m.phases, 2)
 
@@ -51,7 +51,9 @@ func TestPhaseAccumulation(t *testing.T) {
 	assert.Equal(t, uint64(1), gen.completed.Load())
 	assert.Equal(t, uint64(0), gen.pathsFound.Load())
 	assert.Equal(t, uint64(100), gen.cacheWrites.Load())
-	assert.Equal(t, uint64(42), gen.pruned.Load())
+	assert.Equal(t, uint64(42), gen.prunedTotal())
+	assert.Equal(t, uint64(40), gen.prunedDeadEnd.Load())
+	assert.Equal(t, uint64(2), gen.prunedEndpoints.Load())
 
 	cnt := m.activePhaseAt(t, 1)
 	assert.Equal(t, "counting", cnt.name)
@@ -59,10 +61,29 @@ func TestPhaseAccumulation(t *testing.T) {
 	assert.Equal(t, uint64(3), cnt.completed.Load())
 	assert.Equal(t, uint64(999), cnt.pathsFound.Load())
 	assert.Equal(t, uint64(0), cnt.cacheWrites.Load())
-	assert.Equal(t, uint64(7), cnt.pruned.Load())
+	assert.Equal(t, uint64(60), cnt.cacheHits.Load())
+	assert.Equal(t, uint64(40), cnt.cacheMisses.Load())
+	assert.Equal(t, uint64(7), cnt.prunedTotal())
 
 	// BeginPhase must close the previous phase.
 	assert.False(t, gen.endTime.IsZero(), "previous phase end time is recorded")
+}
+
+func TestReportSubtaskSumsByReason(t *testing.T) {
+	m := NewMonitor()
+	m.BeginPhase("counting")
+
+	m.ReportSubtask(types.Result{CacheHits: 10, CacheMisses: 5, PrunedDeadEnd: 3, PrunedNoCont: 1})
+	m.ReportSubtask(types.Result{CacheHits: 20, CacheMisses: 5, PrunedDisconn: 4, PrunedEndpoints: 2})
+
+	ph := m.active.Load()
+	assert.Equal(t, uint64(30), ph.cacheHits.Load())
+	assert.Equal(t, uint64(10), ph.cacheMisses.Load())
+	assert.Equal(t, uint64(3), ph.prunedDeadEnd.Load())
+	assert.Equal(t, uint64(1), ph.prunedNoCont.Load())
+	assert.Equal(t, uint64(4), ph.prunedDisconn.Load())
+	assert.Equal(t, uint64(2), ph.prunedEndpoints.Load())
+	assert.Equal(t, uint64(10), ph.prunedTotal())
 }
 
 func TestConcurrentReportsRace(t *testing.T) {
@@ -75,8 +96,7 @@ func TestConcurrentReportsRace(t *testing.T) {
 		wg.Go(func() {
 			for range reports {
 				m.ReportPathsFound(1)
-				m.ReportCacheWrites(2)
-				m.ReportPruned(3)
+				m.ReportSubtask(types.Result{CacheWrites: 2, CacheHits: 3, PrunedDeadEnd: 3})
 				m.ReportTaskCompleted()
 			}
 		})
@@ -86,7 +106,7 @@ func TestConcurrentReportsRace(t *testing.T) {
 	ph := m.active.Load()
 	assert.Equal(t, uint64(goroutines*reports), ph.pathsFound.Load())
 	assert.Equal(t, uint64(2*goroutines*reports), ph.cacheWrites.Load())
-	assert.Equal(t, uint64(3*goroutines*reports), ph.pruned.Load())
+	assert.Equal(t, uint64(3*goroutines*reports), ph.prunedTotal())
 	assert.Equal(t, uint64(goroutines*reports), ph.completed.Load())
 }
 
@@ -102,8 +122,8 @@ func TestFakeMonitorSatisfiesInterface(t *testing.T) {
 	m.AddTasks(1)
 	m.ReportTaskCompleted()
 	m.ReportPathsFound(1)
-	m.ReportCacheWrites(1)
-	m.ReportPruned(1)
+	m.ReportSubtask(types.Result{CacheWrites: 1, PrunedDeadEnd: 1})
+	m.ReportOracleStats(3, 2, 1)
 	m.Finish()
 }
 
@@ -192,6 +212,73 @@ func TestReportFormatWithETA(t *testing.T) {
 	}
 	out = captureStdout(t, m.report)
 	assert.Contains(t, out, "| ETA 0s", "finished phase -> zero ETA")
+}
+
+func TestLiveLineConditionalSegments(t *testing.T) {
+	m := NewMonitor()
+	m.startTime = time.Now()
+	m.BeginPhase("counting")
+
+	out := captureStdout(t, m.report)
+	assert.NotContains(t, out, "Writes", "no cache writes yet -> segment hidden")
+	assert.NotContains(t, out, "Hits", "no lookups yet -> segment hidden")
+
+	m.ReportSubtask(types.Result{CacheWrites: 42})
+	out = captureStdout(t, m.report)
+	assert.Contains(t, out, "| Writes 42", "generation-style phase shows writes")
+	assert.NotContains(t, out, "Hits")
+
+	m.ReportSubtask(types.Result{CacheHits: 150, CacheMisses: 50})
+	out = captureStdout(t, m.report)
+	assert.Contains(t, out, "| Hits 150 (75.0%) Misses 50", "counting phase shows hit rate")
+}
+
+func TestFinalReportFormat(t *testing.T) {
+	m := NewMonitor()
+	m.startTime = time.Now()
+	m.started.Store(true)
+
+	m.BeginPhase("generation")
+	m.AddTasks(2)
+	m.ReportTaskCompleted()
+	m.ReportSubtask(types.Result{CacheWrites: 7, Pruned: 5, PrunedDeadEnd: 4, PrunedEndpoints: 1})
+
+	m.BeginPhase("counting")
+	m.AddTasks(1)
+	m.ReportPathsFound(100)
+	m.ReportSubtask(types.Result{CacheHits: 8, CacheMisses: 2, PrunedDisconn: 3})
+	m.ReportTaskCompleted()
+	m.ReportOracleStats(90, 12, 7)
+
+	out := captureStdout(t, m.Finish)
+
+	assert.Contains(t, out, "=== Final ===")
+	assert.Contains(t, out, "Phase generation [", "generation phase line present")
+	assert.Contains(t, out, "writes 7", "generation writes present")
+	assert.Contains(t, out, "pruned 5 (deadend 4, endpoints 1)", "breakdown lists only non-zero reasons")
+	assert.Contains(t, out, "hits 8 (80.0%) misses 2", "counting hit rate present")
+
+	countingLine := ""
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(line, "Phase counting ") {
+			countingLine = line
+		}
+	}
+	require.NotEmpty(t, countingLine)
+	assert.NotContains(t, countingLine, "writes", "no zero writes segment in counting phase")
+	assert.Contains(t, out, "Oracle: lookups=90 computes=12 classes=7")
+	assert.Contains(t, out, "Total paths: 100")
+}
+
+func TestFinalReportOmitsOracleWithoutStats(t *testing.T) {
+	m := NewMonitor()
+	m.startTime = time.Now()
+	m.started.Store(true)
+	m.BeginPhase("counting")
+	m.ReportTaskCompleted()
+
+	out := captureStdout(t, m.Finish)
+	assert.NotContains(t, out, "Oracle:", "legacy mode has no oracle section")
 }
 
 func (m *RealMonitor) activePhaseAt(t *testing.T, idx int) *phaseStats {

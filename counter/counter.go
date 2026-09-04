@@ -2,8 +2,6 @@ package counter
 
 import (
 	"context"
-	"fmt"
-	"os"
 	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
@@ -77,8 +75,7 @@ func (c *Counter) generateSubTasksSinglePhase(ctx context.Context, monitor monit
 		p := group.Canonical
 		g.Go(func() error {
 			result := c.searcher.GenerateSubtasks(ctx, taskCache, p, group.OrbitSize, precomputeDepth)
-			monitor.ReportCacheWrites(result.CacheWrites)
-			monitor.ReportPruned(result.Pruned)
+			monitor.ReportSubtask(result)
 			monitor.ReportTaskCompleted()
 			return nil
 		})
@@ -106,8 +103,7 @@ func (c *Counter) generateSubTasksTwoPhase(ctx context.Context, monitor monitori
 	for _, e := range entries {
 		g.Go(func() error {
 			result := c.searcher.ExtendSubtask(ctx, taskCache, e.Path, e.Weight, precomputeDepth)
-			monitor.ReportCacheWrites(result.CacheWrites)
-			monitor.ReportPruned(result.Pruned)
+			monitor.ReportSubtask(result)
 			monitor.ReportTaskCompleted()
 			return nil
 		})
@@ -128,8 +124,11 @@ func (c *Counter) generateSubTasksTwoPhase(ctx context.Context, monitor monitori
 func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth, oracleDepth int) uint64 {
 	taskCache := c.generateSubTasks(ctx, monitor, workers, precomputeDepth)
 
-	revOracle := oracle.New(c.graph)
+	var revOracle *oracle.Oracle
 	useOracle := oracleDepth > 0
+	if useOracle {
+		revOracle = oracle.New(c.graph)
+	}
 
 	monitor.BeginPhase("counting")
 	monitor.AddTasks(taskCache.ItemsCount())
@@ -150,14 +149,14 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 		paths := uint64(result.TotalPathsFound) * uint64(weight)
 		total.Add(paths)
 		monitor.ReportPathsFound(int(paths))
-		monitor.ReportPruned(result.Pruned)
+		monitor.ReportSubtask(result) // reversal hits/misses + pruning of the counting phase
 		monitor.ReportTaskCompleted()
 		return nil
 	})
 
-	if useOracle && os.Getenv("KNIGHTTOUR_ORACLE_STATS") != "" {
+	if useOracle {
 		lookups, computes, classes := revOracle.Stats()
-		fmt.Fprintf(os.Stderr, "oracle: lookups=%d computes=%d classes=%d\n", lookups, computes, classes)
+		monitor.ReportOracleStats(int(lookups), int(computes), int(classes))
 	}
 
 	return total.Load()

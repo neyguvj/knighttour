@@ -16,14 +16,14 @@ import (
 type Searcher struct {
 	graph  *graph.Graph
 	sym    *symmetry.Symmetry
-	pruner *pruner.AdvancedPruner
+	pruner *pruner.Pruner
 }
 
 func NewSearcher(g *graph.Graph, sym *symmetry.Symmetry) *Searcher {
 	return &Searcher{
 		graph:  g,
 		sym:    sym,
-		pruner: pruner.NewAdvancedPruner(g),
+		pruner: pruner.New(g),
 	}
 }
 
@@ -83,8 +83,10 @@ func newCacheReversal(g *graph.Graph, sym *symmetry.Symmetry, c *cache.Cache, d 
 // h(U,u) over neighbors u ∈ U. The source is picked by a nil-check (no
 // interface dispatch on this hot lookup): oracle normalizes the mask once per
 // node via Prepare/GetPrepared; the legacy cache path transforms the mask once
-// and reads W(canon)/orbitSize per candidate end (missing entries → 0).
-func (r *Reversal) Completions(unvisited state.State, end int) int {
+// and reads W(canon)/orbitSize per candidate end (missing entries → 0). Each
+// cache lookup is attributed to res (CacheHits/CacheMisses) at the call site —
+// concurrent workers keep exact per-subtask statistics without atomics.
+func (r *Reversal) Completions(unvisited state.State, end int, res *types.Result) int {
 	cand := r.graph.GetNeighborMask(end).Intersect(unvisited)
 
 	if r.oracle != nil {
@@ -105,20 +107,13 @@ func (r *Reversal) Completions(unvisited state.State, end int) int {
 		canonical, orbitSize := r.sym.CanonicalFromStates(states, int(u))
 		weight, ok := r.cache.GetCanonical(canonical)
 		if !ok {
+			res.CacheMisses++
 			continue
 		}
+		res.CacheHits++
 		found += weight / orbitSize
 	}
 	return found
-}
-
-// dfsStats aggregates hot-DFS metrics behind a single pointer so the recursive
-// signature stays lean. cacheWrites counts cache.Set calls during prefix
-// generation; pruned counts branches cut by ShouldPruneAfterVisit (counted in
-// both generation and counting phases).
-type dfsStats struct {
-	cacheWrites int
-	pruned      int
 }
 
 func (s *Searcher) CountPaths(ctx context.Context, start int) types.Result {
@@ -132,10 +127,8 @@ func (s *Searcher) GenerateSubtasks(ctx context.Context, c *cache.Cache, start, 
 		return result
 	}
 	st := state.NewState(start)
-	var stats dfsStats
-	s.dfs(ctx, st, start, depth, c, orbitSize, &stats, nil)
-	result.CacheWrites = stats.cacheWrites
-	result.Pruned = stats.pruned
+	s.dfs(ctx, st, start, depth, c, orbitSize, &result, nil)
+	result.Finalize()
 	return result
 }
 
@@ -150,10 +143,8 @@ func (s *Searcher) ExtendSubtask(ctx context.Context, c *cache.Cache, p path.Pat
 	if p.State().CountBits() >= depth {
 		return result
 	}
-	var stats dfsStats
-	s.dfs(ctx, p.State(), p.End(), depth, c, weight, &stats, nil)
-	result.CacheWrites = stats.cacheWrites
-	result.Pruned = stats.pruned
+	s.dfs(ctx, p.State(), p.End(), depth, c, weight, &result, nil)
+	result.Finalize()
 	return result
 }
 
@@ -179,18 +170,18 @@ func (s *Searcher) CountPathsWithCacheReversal(ctx context.Context, p path.Path,
 }
 
 func (s *Searcher) countWithRev(ctx context.Context, p path.Path, rev *Reversal) (result types.Result) {
-	var stats dfsStats
-	result.TotalPathsFound = s.dfs(ctx, p.State(), p.End(), s.graph.GetTotalCells(), nil, 0, &stats, rev)
-	result.Pruned = stats.pruned
+	result.TotalPathsFound = s.dfs(ctx, p.State(), p.End(), s.graph.GetTotalCells(), nil, 0, &result, rev)
+	result.Finalize()
 	return result
 }
 
 // dfs is the unified hot DFS. When c != nil it stops at depth and stores each
 // prefix as (state, end) with the given orbit weight; otherwise it counts full
 // completions down to a full board. When rev != nil counting stops early at
-// level rev.stopLevel delegating to Reversal.Completions. stats aggregates
-// cache writes and pruned branches for monitoring.
-func (s *Searcher) dfs(ctx context.Context, st state.State, end, depth int, c *cache.Cache, weight int, stats *dfsStats, rev *Reversal) int {
+// level rev.stopLevel delegating to Reversal.Completions. res is the typed
+// statistics accumulator of the running subtask (cache writes, reversal hits
+// and misses, pruning broken down by reason); it replaces the former dfsStats.
+func (s *Searcher) dfs(ctx context.Context, st state.State, end, depth int, c *cache.Cache, weight int, res *types.Result, rev *Reversal) int {
 	if ctx.Err() != nil {
 		return 0
 	}
@@ -199,7 +190,7 @@ func (s *Searcher) dfs(ctx context.Context, st state.State, end, depth int, c *c
 	if bits >= depth {
 		if c != nil {
 			c.Set(path.New(st, end), weight)
-			stats.cacheWrites++
+			res.CacheWrites++
 		}
 		return 1
 	}
@@ -207,7 +198,7 @@ func (s *Searcher) dfs(ctx context.Context, st state.State, end, depth int, c *c
 	unvisited := st.Invert(s.graph.GetTotalCells())
 
 	if rev != nil && bits == rev.stopLevel {
-		return rev.Completions(unvisited, end)
+		return rev.Completions(unvisited, end, res)
 	}
 
 	cand := s.graph.GetNeighborMask(end).Intersect(unvisited)
@@ -215,11 +206,13 @@ func (s *Searcher) dfs(ctx context.Context, st state.State, end, depth int, c *c
 	found := 0
 	for n := range cand.AllVisited() {
 		newUnvisited := unvisited.Unvisit(n)
-		if !newUnvisited.IsEmpty() && s.pruner.ShouldPruneAfterVisit(n, newUnvisited) {
-			stats.pruned++
-			continue
+		if !newUnvisited.IsEmpty() {
+			if pruned, reason := s.pruner.ShouldPruneAfterVisit(n, newUnvisited); pruned {
+				res.CountPrune(reason)
+				continue
+			}
 		}
-		found += s.dfs(ctx, st.Visit(n), n, depth, c, weight, stats, rev)
+		found += s.dfs(ctx, st.Visit(n), n, depth, c, weight, res, rev)
 	}
 	return found
 }

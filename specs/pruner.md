@@ -2,74 +2,89 @@
 
 ## Назначение
 
-Отсечение ветвей дерева поиска, которые заведомо не приведут к решению. Два уровня:
+Отсечение ветвей дерева поиска, которые заведомо не приведут к решению.
+Один стейт-лесс компонент `Pruner` с двумя уровнями проверок:
 
-- `DeadEndPruner` — локальная проверка изолированных клеток за O(deg(last));
-- `AdvancedPruner` — надстройка: глобальная связность оставшихся клеток + анализ
-  вершин степени ≤1 (эвристика концов гамильтова пути). Включён всегда.
+- **локальный dead-end** — изолированные клетки за O(deg(last));
+- **глобальные проверки** — связность оставшихся клеток + анализ вершин степени
+  ≤1 (эвристика концов гамильтова пути). Включены всегда.
 
-## DeadEndPruner
+Исторически это были два типа (`DeadEndPruner` + `AdvancedPruner`-композиция);
+слиты в одну структуру — локальная проверка остаётся первым (дешёвым) блоком
+того же метода, отдельного типа больше нет.
 
-Локальное отсечение: проверяет, не появились ли изолированные непосещённые клетки
-после последнего хода.
+## Pruner
 
 ```go
-type DeadEndPruner struct {
-    graph *graph.Graph  // граф смежности (хранится ссылка, без копирования)
+type Pruner struct {
+    graph *graph.Graph // граф смежности (хранится ссылка, без копирования)
 }
+
+func New(g *graph.Graph) *Pruner
 ```
 
-### Методы
+Прунер **не хранит статистику** — он стейт-лесс и вызывается конкурентно из
+воркеров; учёт по видам прунинга ведёт вызывающий через возвращаемую причину
+(`types.Result.CountPrune`). Так сохраняется точная атрибуция по подзадачам без
+атомиков на горячем пути.
 
-#### NewDeadEndPruner(graph *graph.Graph) *DeadEndPruner
+### Reason — вид прунинга
 
-Создает новый pruner: сохраняет ссылку на граф (O(1), без предвычисления масок).
+```go
+type Reason uint8
 
-#### ShouldPruneAfterVisit(last int, unvisited state.State) bool
+const (
+    NoReason        Reason = iota // ветвь не отсечена
+    DeadEnd                       // локальный dead-end: изолированная клетка / одиночная недоступная
+    NoContinuation                // у last нет непосещённых соседей
+    Disconnected                  // G[unvisited] не одна компонента
+    Endpoints                     // эвристика концов: >2 degree-1 либо обе недосяжны от last
+)
+```
 
-Горячий метод для DFS-прунинга за O(deg(last)) вместо O(N²). Вызывается сразу после
-посещения клетки `last` родителем, который сам прошёл проверку (инвариант: среди
-непосещённых нет изолированных, кроме случая одной оставшейся клетки).
+### ShouldPruneAfterVisit(last int, unvisited state.State) (bool, Reason)
+
+Горячий метод. Возвращает признак отсечения и **причину** (первое сработавшее);
+при `false` причина — `NoReason`. Вызывается сразу после посещения клетки `last`
+родителем, который сам прошёл проверку (инвариант: среди непосещённых нет
+изолированных, кроме случая одной оставшейся клетки).
 
 **Инвариант/корректность:** посещение `last` может изолировать только непосещённых
 соседей самой клетки `last`, поэтому полный скан всех клеток не требуется.
 
-**Алгоритм:**
-1. Если непосещённых нет → не отсекать
-2. Если осталась одна клетка: отсечь, если она не соседняя к `last` (текущему концу пути)
-3. Иначе: для каждого непосещённого соседа `u` клетки `last` проверить
-   `neighborMask(u) & unvisited == 0`; если нашёлся → отсечь
+**Алгоритм (дешёвое сначала):**
+1. Если непосещённых нет → `(false, NoReason)`
+2. Если осталась одна клетка: отсечь с причиной `DeadEnd`, если она не соседняя
+   к `last` (текущему концу пути)
+3. Локальный dead-end: для каждого непосещённого соседа `u` клетки `last`
+   проверить `neighborMask(u) & unvisited == 0`; нашёлся → `(true, DeadEnd)`
+4. Глобальные проверки (`globalCheck`, только при `|unvisited| > 1`) — см. ниже
 
 Маски соседей прунер не копирует — каждый вызов `GetNeighborMask` читает предвычисленную
 маску графа за O(1).
 
-## AdvancedPruner
+### globalCheck и причины
 
 ```go
-type AdvancedPruner struct {
-    deadend *DeadEndPruner
-    graph   *graph.Graph
-}
-
-func NewAdvancedPruner(g *graph.Graph) *AdvancedPruner
-
-func (p *AdvancedPruner) ShouldPruneAfterVisit(last int, unvisited state.State) bool
+func (p *Pruner) ShouldPruneAfterVisit(last int, unvisited state.State) (bool, Reason)
 ```
 
 Композиция проверок (все — на битовых масках, включены всегда):
 
-1. **Dead-end** — делег в `DeadEndPruner` (дешёвая проверка сначала).
+1. **Dead-end** — локальный блок (дешёвая проверка сначала).
 2. **Глобальные проверки** (`globalCheck`, только при `|unvisited| > 1`):
-   - **нет продолжения** — у `last` нет непосещённых соседей → prune;
-   - **связность `G[unvisited]`** — оставшийся путь живёт только в непосещённых
-     клетках, поэтому они обязаны образовывать одну связную компоненту.
-     Проверка — bitset flood-fill от младшего бита: расширение фронта ИЛИ-ем
-     предвычисленных масок соседей; если покрыты не все → prune. По ходу флуда
-     считается степень каждой клетки в `G[unvisited]` (popcount по unvisited);
-   - **эвристика концов** — гамильтов путь на `G[unvisited]` имеет ровно 2 конца,
-     причём стартовый обязан быть соседом `last`. Вершины степени 1 обязаны стать
-     концами, поэтому: ≥3 вершин степени 1 → prune; ровно 2 и ни одна не соседна
-     `last` → prune.
+   - **нет продолжения** (причина `NoContinuation`) — у `last` нет непосещённых
+     соседей → prune;
+   - **связность `G[unvisited]`** (причина `Disconnected`) — оставшийся путь живёт
+     только в непосещённых клетках, поэтому они обязаны образовывать одну связную
+     компоненту. Проверка — bitset flood-fill от младшего бита: расширение фронта
+     ИЛИ-ем предвычисленных масок соседей; если покрыты не все → prune. По ходу
+     флуда считается степень каждой клетки в `G[unvisited]` (popcount по
+     unvisited); изолированная вершина внутри флуда — причина `DeadEnd`;
+   - **эвристика концов** (причина `Endpoints`) — гамильтов путь на `G[unvisited]`
+     имеет ровно 2 конца, причём стартовый обязан быть соседом `last`. Вершины
+     степени 1 обязаны стать концами, поэтому: ≥3 вершин степени 1 → prune; ровно
+     2 и ни одна не соседна `last` → prune.
 
 Замеры на M4 Max (`-benchtime=3x`, время полного подсчёта):
 
@@ -87,21 +102,22 @@ func (p *AdvancedPruner) ShouldPruneAfterVisit(last int, unvisited state.State) 
 
 ## Использование в Searcher
 
-`Searcher` хранит прунер в поле `pruner *pruner.AdvancedPruner` (создаётся один раз в
+`Searcher` хранит прунер в поле `pruner *pruner.Pruner` (создаётся один раз в
 `NewSearcher`). В горячем DFS (`dfs`) проверка выполняется сразу после попытки посещения
 клетки `n`, до рекурсии — если остались непосещённые клетки и ветвь тупиковая, она
-отсекается:
+отсекается, а причина уходит в аккумулятор `*types.Result`:
 
 ```go
-func (s *Searcher) dfs(ctx context.Context, st state.State, start, end, depth int, c *cache.Cache, cached *int) int {
+func (s *Searcher) dfs(ctx context.Context, st state.State, end, depth int, c *cache.Cache, weight int, res *types.Result, rev *Reversal) int {
     if ctx.Err() != nil {
         return 0
     }
 
-    if st.CountBits() >= depth { // достигнута глубина префикса — пишем в кэш
+    bits := st.CountBits()
+    if bits >= depth { // достигнута глубина префикса — пишем в кэш
         if c != nil {
-            c.Set(path.New(st, start, end), 1)
-            *cached++
+            c.Set(path.New(st, end), weight)
+            res.CacheWrites++
         }
         return 1
     }
@@ -112,10 +128,13 @@ func (s *Searcher) dfs(ctx context.Context, st state.State, start, end, depth in
     found := 0
     for n := range cand.AllVisited() {
         newUnvisited := unvisited.Unvisit(n)
-        if !newUnvisited.IsEmpty() && s.pruner.ShouldPruneAfterVisit(n, newUnvisited) {
-            continue // пропускаем отсеченную ветвь
+        if !newUnvisited.IsEmpty() {
+            if pruned, reason := s.pruner.ShouldPruneAfterVisit(n, newUnvisited); pruned {
+                res.CountPrune(reason)
+                continue // пропускаем отсеченную ветвь
+            }
         }
-        found += s.dfs(ctx, st.Visit(n), start, n, depth, c, cached)
+        found += s.dfs(ctx, st.Visit(n), n, depth, c, weight, res, rev)
     }
     return found
 }
@@ -131,11 +150,11 @@ func (s *Searcher) dfs(ctx context.Context, st state.State, start, end, depth in
 ```go
 // Доска 5×5, только что посетили клетку 7
 graph := graph.New(5)
-deadend := pruner.NewDeadEndPruner(graph)
+p := pruner.New(graph)
 
 // Непосещённые: 0, 2, 4, 6. Клетка 0 изолирована и является соседом 7.
 unvisited := state.NewState(0, 2, 4, 6)
-shouldPrune := deadend.ShouldPruneAfterVisit(7, unvisited) // true
+shouldPrune, reason := p.ShouldPruneAfterVisit(7, unvisited) // true, DeadEnd
 ```
 
 ### Одна оставшаяся клетка
@@ -143,12 +162,12 @@ shouldPrune := deadend.ShouldPruneAfterVisit(7, unvisited) // true
 ```go
 // Доска 5×5, осталась только клетка 12 (центр), последняя позиция 24
 unvisited := state.Bit(12)
-deadend.ShouldPruneAfterVisit(24, unvisited) // true — 12 не соседняя к 24
+p.ShouldPruneAfterVisit(24, unvisited) // true, DeadEnd — 12 не соседняя к 24
 ```
 
-## Тесты (`pruner/deadend_test.go`)
+## Тесты (`pruner/pruner_test.go`)
 
-Отдельные тесты на каждый случай:
+Локальный dead-end (миграция прежних `deadend_test.go` кейсов):
 
 - `TestShouldPruneAfterVisit_NoUnvisited` — нет непосещённых клеток → не отсекать
 - `TestShouldPruneAfterVisit_SingleUnvisitedReachable` / `..._Unreachable` — одна оставшаяся клетка (соседняя / недоступная)
@@ -158,18 +177,24 @@ deadend.ShouldPruneAfterVisit(24, unvisited) // true — 12 не соседня�
 Эквивалентность локальной проверки полному скану всех непосещённых клеток
 (`fullScanShouldPrune`) проверяется вероятностным тестом
 `TestShouldPruneAfterVisit_MatchesFullScan` (2000 случайных путей, seed 42).
+После слияния прунеров тест учитывает глобальные проверки: полный скан «режет»
+⟹ объединённый прунер режет с причиной `DeadEnd`; обратное не обязано
+(глобальные проверки могут отсечь сверх скана, но никогда — с причиной
+`DeadEnd` при целости инварианта).
 
-### Тесты AdvancedPruner (`pruner/advanced_test.go`)
+### Глобальные проверки и причины
 
-- `TestAdvancedConnectivity` — табличные кейсы: несвязный unvisited → prune,
-  связный → нет; одиночная клетка-остров в другой компоненте.
-- `TestAdvancedDegreeHeuristic` — 3 вершины степени 1 → prune; 2 и обе не соседни
-  `last` → prune; 2 и одна соседняя → не prune.
+- `TestAdvancedConnectivity` — табличные кейсы: несвязный unvisited → prune с
+  причиной `Disconnected`, связный → нет; одиночная клетка-остров в другой компоненте.
+- `TestAdvancedDegreeHeuristic` — 3 вершины степени 1 → prune (`Endpoints`); 2 и обе не соседни
+  `last` → prune (`Endpoints`); 2 и одна соседняя → не prune.
 - `TestAdvanced_SingleCellSkipsGlobalCheck` — при `|unvisited| <= 1` глобальная
   проверка не выполняется (одинокая соседняя клетка — завершающий ход).
 - `TestAdvancedMatchesNaive` — вероятностный equivalence: наивная реализация
   (BFS по спискам соседей + явный подсчёт степеней) против битсет-версии,
   2000 случайных состояний, seed 42.
+- `TestPruneReasons` — табличные кейсы «ситуация → ожидаемая причина» для всех
+  четырёх причин; не отсечённая ветвь даёт `NoReason`.
 
 ## Эффективность
 

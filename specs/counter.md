@@ -85,7 +85,7 @@ func (c *Counter) ParallelCountWithDepth(
 
 **Алгоритм:**
 1. Сгенерировать подзадачи (см. «Генерация подзадач» ниже) — `generateSubTasks` выбирает стратегию по глубине
-2. Создать `oracle.New(graph)` (один на прогон, читается всеми воркерами)
+2. При `oracleDepth > 0` создать `oracle.New(graph)` (один на прогон, читается всеми воркерами)
 3. `monitor.BeginPhase("counting")`, добавить количество подзадач в мониторинг
    (`monitor.AddTasks(taskCache.ItemsCount())`)
 4. Запустить worker pool с лимитом workers через `errgroup.Group` (`taskCache.Each`)
@@ -98,16 +98,18 @@ func (c *Counter) ParallelCountWithDepth(
    - Получить каноническую пару `(state, end)` и агрегированный вес `Σ count·orbitSize`
    - Вызвать `CountPathsWithReversal` (с oracle при включённом реверсе) для подсчета
      продолжений из этого состояния
-    - Умножить результат на вес и добавить к общему счетчику
-      (`total += completions * weight`; умножение на размер орбиты уже зашито
-      в вес при генерации, `start`/`GetOrbitSize` на этом этапе не нужны)
-    - Зарегистрировать завершение через `monitor.ReportPathsFound()`,
-      `monitor.ReportPruned(result.Pruned)` и `monitor.ReportTaskCompleted()`
-7. Вернуть суммарное количество путей
-
-**Метрики oracle:** при установленном `KNIGHTTOUR_ORACLE_STATS` в stderr печатается
-строка `oracle: lookups=… computes=… classes=…` — отношение классов к числу пар
-показывает фактическое трансляционное сжатие (см. oracle.md).
+     - Умножить результат на вес и добавить к общему счетчику
+       (`total += completions * weight`; умножение на размер орбиты уже зашито
+       в вес при генерации, `start`/`GetOrbitSize` на этом этапе не нужны)
+     - Зарегистрировать завершение через `monitor.ReportPathsFound(weighted)`,
+       `monitor.ReportSubtask(result)` (hits/misses + разбивка прунинга) и
+       `monitor.ReportTaskCompleted()`
+ 7. **Метрики oracle — безусловно** (без env-флага): если `oracleDepth > 0`,
+    после завершения counting взять `revOracle.Stats()` и вызвать
+    `monitor.ReportOracleStats(lookups, computes, classes)` — секция `Oracle:`
+    попадёт в финальный отчёт мониторинга. В legacy-режиме секции нет; сам
+    `oracle.New` создаётся только при `oracleDepth > 0`.
+ 8. Вернуть суммарное количество путей
 
 ## Генерация подзадач
 
@@ -121,7 +123,7 @@ func (c *Counter) ParallelCountWithDepth(
 3. Для каждой группы вызвать `searcher.GenerateSubtasks(ctx, cache, canonicalPos, orbitSize, depth)`;
    генерация групп **параллельна** через `errgroup` с `SetLimit(workers)`
 4. Мониторинг: `monitor.BeginPhase("generation")` (или имя фазы от вызывающего),
-   `monitor.AddTasks(len(groups))`, на группу — `ReportCacheWrites` + `ReportPruned` +
+   `monitor.AddTasks(len(groups))`, на группу — `ReportSubtask(result)` +
    `ReportTaskCompleted`
 
 ### Двухфазная (precomputeDepth > TwoPhaseBaseDepth)
@@ -154,8 +156,8 @@ const TwoPhaseBaseDepth = 5
 **Мониторинг:** фазы `"gen A"` и `"gen B"` (`monitor.BeginPhase` перед каждой,
 причём `BeginPhase("gen B")` — после полного завершения фазы A);
 `AddTasks(len(groups))` (фаза A) + `AddTasks(intermediateCount)` (фаза B);
-на каждую завершённую задачу — `ReportCacheWrites` (записи в целевой кэш),
-`ReportPruned` и `ReportTaskCompleted` текущей фазы.
+на каждую завершённую задачу — `ReportSubtask(result)` (записи в целевой кэш и
+разбивка прунинга) и `ReportTaskCompleted` текущей фазы.
 
 **Память:** промежуточный кэш живёт только время генерации и освобождается до
 фазы подсчёта. Oracle переживает обе фазы, но его таблица — классы форм размера
@@ -186,18 +188,21 @@ fmt.Printf("Total tours: %d\n", count)
 [1.234s] Phase gen B | Tasks: 1200/5041 (23.8%) | Paths 0 | Writes 447520 | Pruned 129334 | ETA 3.953s
 ```
 
-И финальный отчет — по строке на каждую фазу + итоги:
+И финальный отчет — по строке на каждую фазу + oracle-итоги + итоги:
 
 ```
 === Final ===
 Total time: 63ms
-Phase generation [41ms]: tasks 6/6 | paths 0 | writes 2795 | pruned 12034
-Phase counting [22ms]: tasks 95224/95224 | paths 6637920 | writes 0 | pruned 180322
+Phase generation [41ms]: tasks 6/6 | paths 0 | writes 2795 | pruned 12034 (deadend 8211, nocont 302, disconn 2901, endpoints 620)
+Phase counting [22ms]: tasks 95224/95224 | paths 6637920 | hits 120034 (78.4%) misses 33210 | pruned 180322 (deadend 140311, disconn 30011, endpoints 1000)
+Oracle: lookups=51234 computes=987 classes=654
 Total paths: 6637920
 ```
 
 Фазы запуска: `generation` (depth ≤ TwoPhaseBaseDepth) либо `gen A` + `gen B`,
-затем `counting`.
+затем `counting`. Сегменты условны: `Writes` — когда были записи кэша,
+`Hits/Misses` — когда были reversal-lookup'и; разбивка pruned перечисляет только
+ненулевые виды.
 
 **Методы интерфейса Monitor:**
 ```go
@@ -207,9 +212,9 @@ type Monitor interface {
     BeginPhase(name string) // переключает мониторинг на новую фазу (между фазами, при остановленных воркерах)
     AddTasks(count int)     // в текущую фазу
     ReportTaskCompleted()   // текущая фаза
-    ReportPathsFound(count int)
-    ReportCacheWrites(count int) // число записей в кэш (не «закэшированные пути»)
-    ReportPruned(count int)      // отсечённые прунером ветви
+    ReportPathsFound(count int)  // пути (в counting — взвешенные weight'ом)
+    ReportSubtask(r types.Result) // статистика завершённой подзадачи: writes, hits/misses, прунинг по видам
+    ReportOracleStats(lookups, computes, classes int) // безусловно при oracle-режиме, после counting
 }
 ```
 

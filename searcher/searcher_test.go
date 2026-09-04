@@ -13,6 +13,7 @@ import (
 	"knighttour/path"
 	"knighttour/state"
 	"knighttour/symmetry"
+	"knighttour/types"
 )
 
 func TestSearcherCountPaths(t *testing.T) {
@@ -216,4 +217,34 @@ func TestExtendSubtaskNoopBeyondDepth(t *testing.T) {
 
 	assert.Zero(t, result.CacheWrites, "Entry already at target depth generates nothing")
 	assert.Equal(t, 0, c.ItemsCount())
+}
+
+func TestSearcherResultStatistics(t *testing.T) {
+	g := graph.New(5)
+	sym := symmetry.NewSymmetry(5)
+	searcher := NewSearcher(g, sym)
+
+	prefixCache := cache.NewCache(sym)
+	var genTotal types.Result
+	for _, group := range sym.GetCanonicalGroups() {
+		result := searcher.GenerateSubtasks(context.Background(), prefixCache, group.Canonical, group.OrbitSize, 3)
+		assert.Equal(t, result.PrunedDeadEnd+result.PrunedNoCont+result.PrunedDisconn+result.PrunedEndpoints, result.Pruned,
+			"pruned breakdown must sum to the total")
+		genTotal.Add(result)
+	}
+
+	assert.Positive(t, genTotal.CacheWrites, "generation writes cache entries")
+	assert.Zero(t, genTotal.CacheHits+genTotal.CacheMisses, "generation performs no reversal lookups")
+	assert.Positive(t, genTotal.Pruned, "pruning fires during prefix generation")
+	assert.Positive(t, genTotal.PrunedDisconn+genTotal.PrunedEndpoints, "global checks account for early-depth pruning")
+
+	var countTotal types.Result
+	prefixCache.Each(context.Background(), 1, func(_ context.Context, p path.Path, _ int) error {
+		countTotal.Add(searcher.CountPathsWithCacheReversal(context.Background(), p, prefixCache, 3))
+		return nil
+	})
+
+	assert.Positive(t, countTotal.CacheHits+countTotal.CacheMisses, "cache reversal performs lookups")
+	assert.Zero(t, countTotal.CacheWrites, "counting writes nothing")
+	assert.Equal(t, countTotal.PrunedDeadEnd+countTotal.PrunedNoCont+countTotal.PrunedDisconn+countTotal.PrunedEndpoints, countTotal.Pruned)
 }
