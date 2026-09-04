@@ -2,6 +2,8 @@ package counter
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"sync/atomic"
 
 	"golang.org/x/sync/errgroup"
@@ -9,9 +11,11 @@ import (
 	"knighttour/cache"
 	"knighttour/graph"
 	"knighttour/monitoring"
+	"knighttour/oracle"
 	"knighttour/path"
 	"knighttour/searcher"
 	"knighttour/symmetry"
+	"knighttour/types"
 )
 
 const DefaultPrecomputeDepth = 5
@@ -47,7 +51,7 @@ func (c *Counter) CountFromPosition(ctx context.Context, start int) int {
 }
 
 func (c *Counter) ParallelCount(ctx context.Context, monitor monitoring.Monitor, workers int) uint64 {
-	return c.ParallelCountWithDepth(ctx, monitor, workers, DefaultPrecomputeDepth)
+	return c.ParallelCountWithDepth(ctx, monitor, workers, DefaultPrecomputeDepth, 0)
 }
 
 // generateSubTasks builds the task cache for precomputeDepth, picking the
@@ -113,20 +117,33 @@ func (c *Counter) generateSubTasksTwoPhase(ctx context.Context, monitor monitori
 	return taskCache
 }
 
-func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) uint64 {
+// ParallelCountWithDepth counts all open tours. precomputeDepth controls the
+// root/subtask cache (parallelism and dedup). Reversal mode:
+//   - oracleDepth > 0: shape-oracle reversal at that mask size — decoupled
+//     from generation, works for any level, memory-cheap deep tails
+//     (specs/oracle.md); costs h recomputation per class.
+//   - oracleDepth == 0 (default): legacy prefix-cache reversal when reachable
+//     (2·precomputeDepth ≤ totalCells) — fastest, free W/orbitSize lookups;
+//     plain descent otherwise, exactly as before the oracle existed.
+func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth, oracleDepth int) uint64 {
 	taskCache := c.generateSubTasks(ctx, monitor, workers, precomputeDepth)
+
+	revOracle := oracle.New(c.graph)
+	useOracle := oracleDepth > 0
 
 	monitor.BeginPhase("counting")
 	monitor.AddTasks(taskCache.ItemsCount())
 
 	total := atomic.Uint64{}
 	taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, weight int) error {
-		// The task cache doubles as the reversal lookup table: when only
-		// precomputeDepth cells remain, completions are answered from it
-		// instead of descending (no-op unless 2*precomputeDepth <= totalCells).
-		// Safe for concurrent reads inside Each because generation is over:
-		// the cache is strictly read-only during this phase.
-		result := c.searcher.CountPathsWithReversal(ctx, p, taskCache, precomputeDepth)
+		// Counting reads the oracle concurrently; generation is over and the
+		// task cache has no writers here (duplicate oracle computes are benign).
+		var result types.Result
+		if useOracle {
+			result = c.searcher.CountPathsWithReversal(ctx, p, revOracle, oracleDepth)
+		} else {
+			result = c.searcher.CountPathsWithCacheReversal(ctx, p, taskCache, precomputeDepth)
+		}
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -137,6 +154,11 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 		monitor.ReportTaskCompleted()
 		return nil
 	})
+
+	if useOracle && os.Getenv("KNIGHTTOUR_ORACLE_STATS") != "" {
+		lookups, computes, classes := revOracle.Stats()
+		fmt.Fprintf(os.Stderr, "oracle: lookups=%d computes=%d classes=%d\n", lookups, computes, classes)
+	}
 
 	return total.Load()
 }

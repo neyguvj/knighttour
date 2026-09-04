@@ -20,7 +20,7 @@ func BenchmarkCountAllToursParallel(b *testing.B) {
 			for depth := 1; depth <= size*size/2; depth++ {
 				b.Run("depth"+strconv.Itoa(depth), func(b *testing.B) {
 					for b.Loop() {
-						c.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), workers, depth)
+						c.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), workers, depth, 0)
 					}
 				})
 			}

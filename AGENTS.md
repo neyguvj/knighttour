@@ -80,6 +80,8 @@ make bench            # Benchmarks (counter/)
   - `DeadEndPruner` – `ShouldPruneAfterVisit()` (hot O(deg) check)
 - **cache/** – Thread-safe memoization with sharded lock implementation (64 shards)
   - Methods: `Get()`, `Set()`, `Clear()`, `ItemsCount()`, `Each()` for caching subtree counts
+- **oracle/** – Memoized h(mask,end) keyed by shape class under D4 + translations (16 shards)
+  - Methods: `Get()`, `Prepare()`/`GetPrepared()` (amortized normalization), `Stats()`
 - **symmetry/** – Exploits board symmetries to reduce search space
   - 8 symmetries: rotations and reflections
   - Methods: `GetCanonicalPosition()`, `GetOrbitSize()`, `GetCanonicalGroups()`, `CanonicalizePath()`

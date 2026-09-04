@@ -92,14 +92,14 @@ func (c *Cache) Get(path path.Path) (int, bool)
 // Получить агрегированный вес для канонической пары (state, end)
 // Возвращает: (weight, found)
 
-func (c *Cache) GetCanonical(p path.Path) (int, bool)
-// То же, но ключ уже канонический (повторная канонизация не выполняется).
-// Используется досрочным завершением searchera, которое получает канонический
-// ключ и размер его орбиты одним проходом symmetry.CanonicalizeWithOrbitSize.
-
-func (c *Cache) Set(path path.Path, weight int)
+func (c *Cache) Set(p path.Path, weight int)
 // Добавить вес к записи для канонической пары (state, end)
 // При совпадении ключей веса суммируются: data[key] += weight
+
+func (c *Cache) GetCanonical(p path.Path) (int, bool)
+// Get для уже канонического ключа (без повторной канонизации). Вспомогательный;
+// после перехода reversal на shape-oracle (oracle.md) используется только тестами.
+
 
 func (c *Cache) Has(path path.Path) bool
 // Проверка наличия записи

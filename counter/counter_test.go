@@ -36,7 +36,7 @@ func TestParallelCountWithDepth(t *testing.T) {
 	counter := NewCounter(g)
 
 	for depth := range size * size {
-		count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 8, depth)
+		count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 8, depth, 0)
 		assert.Equal(t, uint64(1728), count, "Expected %d count for 5x5 board, got %d", 1728, count)
 	}
 }
@@ -58,10 +58,26 @@ func TestParallelCountWithDepthMatchesReference(t *testing.T) {
 			counter := NewCounter(g)
 
 			for _, depth := range tt.depths {
-				count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 4, depth)
+				count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 4, depth, 0)
 				assert.Equal(t, tt.expected, count, "size=%d depth=%d", tt.size, depth)
 			}
 		})
+	}
+}
+
+// Root and oracle depths are independent knobs; every combination must yield
+// the same total, including pairings impossible before the shape oracle
+// (small roots with deep reversal levels).
+func TestSplitOracleDepthGrid(t *testing.T) {
+	const size = 6
+	g := graph.New(size)
+	counter := NewCounter(g)
+
+	for _, root := range []int{4, 5, 7} {
+		for _, oracleD := range []int{1, 8, 10, 14, 20} {
+			count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 4, root, oracleD)
+			assert.Equal(t, uint64(6_637_920), count, "root=%d oracle=%d", root, oracleD)
+		}
 	}
 }
 
@@ -146,8 +162,8 @@ func TestTwoPhaseParallelMatchesSequential(t *testing.T) {
 	g := graph.New(5)
 	counter := NewCounter(g)
 
-	countSeq := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 1, 6)
-	countPar := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 8, 7)
+	countSeq := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 1, 6, 0)
+	countPar := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 8, 7, 0)
 
 	assert.Equal(t, uint64(1728), countSeq)
 	assert.Equal(t, countSeq, countPar, "Two-phase results must not depend on worker count or depth")

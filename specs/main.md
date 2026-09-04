@@ -10,7 +10,8 @@
 ```go
 size := fs.Int("size", 5, "Board size (5-8)")
 workers := fs.Int("workers", runtime.NumCPU(), "Number of workers for parallel search")
-precomputeDepth := fs.Int("precompute-depth", counter.DefaultPrecomputeDepth, "Precompute depth for subtasks")
+precomputeDepth := fs.Int("precompute-depth", counter.DefaultPrecomputeDepth, "Root/subtask generation depth")
+oracleDepth := fs.Int("oracle-depth", 0, "Shape-oracle reversal mask size (0 = legacy prefix-cache reversal)")
 ```
 
 Валидация (`parseArgs`, табличные тесты в `main_test.go`):
@@ -18,7 +19,19 @@ precomputeDepth := fs.Int("precompute-depth", counter.DefaultPrecomputeDepth, "P
 - `-size` — целое от 5 до 8;
 - `-workers` — не менее 1;
 - `-precompute-depth` — от 1 до `size*size/2`;
+- `-oracle-depth` — 0 (по умолчанию: legacy prefix-cache reversal при достижимом
+  уровне, как до появления oracle; без реверса иначе) или от 1 до
+  `size*size - precompute-depth`. Верхняя граница — из достижимости stop-level:
+  oracle прекращает спуск на уровне `totalCells − oracleDepth`, и этот уровень
+  должен быть не глубже корней подзадач (`precompute-depth`), иначе реверс молча
+  не сработает, а legacy-режим при `oracle-depth > 0` уже выключен — тихая
+  деградация до чистого DFS. Привязка `2·depth ≤ n²` снята (см. oracle.md);
 - неизвестные флаги → ошибка (`flag.ContinueOnError`, вывод в stderr).
+
+Смысл развязки глубин: `-precompute-depth` — корни подзадач (параллелизм и дедуп
+весов), `-oracle-depth` — размер множества в reversal-тождестве (определяет память
+и время deep-хвоста подсчёта). Пример экономии памяти на 8×8:
+`-precompute-depth 10 -oracle-depth 14`.
 
 ## Структуры и функции
 
@@ -27,6 +40,7 @@ type appArgs struct {
     size            int
     workers         int
     precomputeDepth int
+    oracleDepth     int
 }
 
 func parseArgs(args []string) (*appArgs, error)

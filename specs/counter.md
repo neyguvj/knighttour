@@ -63,7 +63,7 @@ func (c *Counter) ParallelCount(
 // Параллельный подсчет с использованием канонических групп и глубины по умолчанию
 ```
 
-### 3. ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers int, precomputeDepth int) uint64
+### 3. ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers int, precomputeDepth, oracleDepth int) uint64
 
 ```go
 func (c *Counter) ParallelCountWithDepth(
@@ -71,28 +71,43 @@ func (c *Counter) ParallelCountWithDepth(
     monitor monitoring.Monitor,
     workers int,
     precomputeDepth int,
+    oracleDepth int,
 ) uint64
-// Параллельный подсчет с предварительным разбиением задач через кэш
+// Параллельный подсчет с предварительным разбиением задач через кэш (глубина
+// precomputeDepth) и досрочным завершением count-DFS через shape-oracle
+// (oracle.Oracle, глубина маски oracleDepth; см. oracle.md).
 ```
+
+Глубины разведены: `precomputeDepth` — корни подзадач (параллелизм/дедуп),
+`oracleDepth` — размер множества в reversal-тождестве (память/время deep-хвоста).
+Связка `2·d ≤ n²` из старой схемы снята: oracle корректен для любого
+`1 ≤ oracleDepth < totalCells`.
 
 **Алгоритм:**
 1. Сгенерировать подзадачи (см. «Генерация подзадач» ниже) — `generateSubTasks` выбирает стратегию по глубине
-2. `monitor.BeginPhase("counting")`, добавить количество подзадач в мониторинг
+2. Создать `oracle.New(graph)` (один на прогон, читается всеми воркерами)
+3. `monitor.BeginPhase("counting")`, добавить количество подзадач в мониторинг
    (`monitor.AddTasks(taskCache.ItemsCount())`)
-3. Запустить worker pool с лимитом workers через `errgroup.Group` (`taskCache.Each`)
-4. Если `2·precomputeDepth ≤ totalCells`, включить досрочное завершение через реверс:
-   count-DFS передаётся тот же `taskCache` и глубина генерации (см. searcher.md,
-   «Досрочное завершение через реверс»); иначе — обычный полный спуск
-5. Для каждой записи в кэше:
+4. Запустить worker pool с лимитом workers через `errgroup.Group` (`taskCache.Each`)
+5. Режим реверса: `oracleDepth > 0` — shape-oracle на глубине маски
+   `oracleDepth` (режим включается всегда, если stop-level достижим из корня);
+   `oracleDepth == 0` — legacy prefix-cache reversal (`W/orbitSize` из
+   taskCache) при `2·precomputeDepth ≤ totalCells`, иначе обычный спуск
+   (см. searcher.md, «Досрочное завершение через реверс»)
+6. Для каждой записи в кэше:
    - Получить каноническую пару `(state, end)` и агрегированный вес `Σ count·orbitSize`
-   - Вызвать `CountPathsWithReversal` (с кэшем при включённом реверсе) для подсчета
+   - Вызвать `CountPathsWithReversal` (с oracle при включённом реверсе) для подсчета
      продолжений из этого состояния
-   - Умножить результат на вес и добавить к общему счетчику
-     (`total += completions * weight`; умножение на размер орбиты уже зашито
-     в вес при генерации, `start`/`GetOrbitSize` на этом этапе не нужны)
-   - Зарегистрировать завершение через `monitor.ReportPathsFound()`,
-     `monitor.ReportPruned(result.Pruned)` и `monitor.ReportTaskCompleted()`
-6. Вернуть суммарное количество путей
+    - Умножить результат на вес и добавить к общему счетчику
+      (`total += completions * weight`; умножение на размер орбиты уже зашито
+      в вес при генерации, `start`/`GetOrbitSize` на этом этапе не нужны)
+    - Зарегистрировать завершение через `monitor.ReportPathsFound()`,
+      `monitor.ReportPruned(result.Pruned)` и `monitor.ReportTaskCompleted()`
+7. Вернуть суммарное количество путей
+
+**Метрики oracle:** при установленном `KNIGHTTOUR_ORACLE_STATS` в stderr печатается
+строка `oracle: lookups=… computes=… classes=…` — отношение классов к числу пар
+показывает фактическое трансляционное сжатие (см. oracle.md).
 
 ## Генерация подзадач
 
@@ -143,14 +158,16 @@ const TwoPhaseBaseDepth = 5
 `ReportPruned` и `ReportTaskCompleted` текущей фазы.
 
 **Память:** промежуточный кэш живёт только время генерации и освобождается до
-фазы подсчёта.
+фазы подсчёта. Oracle переживает обе фазы, но его таблица — классы форм размера
+`oracleDepth` (в ~10–20 раз меньше числа конкретных пар; см. oracle.md), поэтому
+память прогона определяется корнями `precomputeDepth`, а не deep-хвостом.
 
 **Использование:**
 ```go
 g := graph.New(5)
 c := counter.NewCounter(g)
 
-count := c.ParallelCountWithDepth(ctx, monitor, 8, 0) // с 8 воркерами
+count := c.ParallelCountWithDepth(ctx, monitor, 8, 5, 10) // 8 воркеров, корни на 5, oracle на 10
 fmt.Printf("Total tours: %d\n", count)
 ```
 
@@ -208,10 +225,13 @@ type appArgs struct {
     size            int
     workers         int
     precomputeDepth int
+    oracleDepth     int
 }
 
 // parseArgs разбирает аргументы командной строки (без имени программы) и
-// валидирует их: size 5–8, workers >= 1, precomputeDepth в [1, size^2/2].
+// валидирует их: size 5–8, workers >= 1, precomputeDepth в [1, size^2/2],
+// oracleDepth = 0 (legacy prefix-cache reversal) либо в [1, size^2 - precomputeDepth]
+// (stop-level totalCells - oracleDepth должен быть достижим из корней).
 // Возвращает ошибку вместо log.Fatal — это делает парсинг тестируемым.
 func parseArgs(args []string) (*appArgs, error)
 
@@ -220,7 +240,7 @@ func parseArgs(args []string) (*appArgs, error)
 func run(ctx context.Context, monitor monitoring.Monitor, args *appArgs) uint64 {
     g := graph.New(args.size)
     c := counter.NewCounter(g)
-    return c.ParallelCountWithDepth(ctx, monitor, args.workers, args.precomputeDepth)
+    return c.ParallelCountWithDepth(ctx, monitor, args.workers, args.precomputeDepth, args.oracleDepth)
 }
 
 func main() {
@@ -295,7 +315,8 @@ func TestCounterCountAllTours(t *testing.T) {
         context.Background(), 
         monitoring.NewFakeMonitor(), 
         1,
-        0,
+        5,
+        8,
     )
 
     // Проверка результата (с учетом орбит всех групп)
@@ -309,13 +330,15 @@ func TestCounterParallel(t *testing.T) {
         context.Background(), 
         monitoring.NewFakeMonitor(), 
         1,
-        0,
+        5,
+        8,
     )
     countPar := counter.ParallelCountWithDepth(
         context.Background(), 
         monitoring.NewFakeMonitor(), 
         4,
-        0,
+        5,
+        8,
     )
 
     require.Equal(t, countSeq, countPar)

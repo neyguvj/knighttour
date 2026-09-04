@@ -31,6 +31,7 @@ $ go run main.go -size 8 -workers 8
 | Symmetry | symmetry/symmetry.go | Работа с симметриями доски и канонизация путей |
 | DeadEndPruner | pruner/deadend.go | Отсечение тупиковых ветвей поиска |
 | Cache | cache/cache.go | Мемоизация промежуточных результатов с шардингом (64 шарда) |
+| Oracle | oracle/oracle.go | Мемоизация h(U,u) по классам форм (D4 ⋉ трансляции), см. `specs/oracle.md` |
 | Searcher | searcher/searcher.go | DFS backtracking алгоритм |
 | Counter | counter/counter.go | Агрегация и подсчет маршрутов с учетом симметрий |
 | Monitor | monitoring/monitor.go | Отображение прогресса поиска в реальном времени |

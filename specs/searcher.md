@@ -96,13 +96,26 @@ func (s *Searcher) CountPathsDFS(ctx context.Context, p path.Path) types.Result
 func (s *Searcher) CountPathsWithReversal(
     ctx context.Context,
     p path.Path,
-    revCache *cache.Cache,
-    precomputeDepth int,
+    o *oracle.Oracle,
+    oracleDepth int,
 ) types.Result
-// То же + досрочное завершение через reversal-кэш: при достижении уровня
-// CountBits(state) == totalCells - precomputeDepth спуск прекращается и ответ
-// берётся из кэша префиксов (см. «Досрочное завершение через реверс»).
-// revCache == nil или недостижимый уровень (2d > n²) — чистый полный DFS.
+// То же + досрочное завершение через shape-oracle: при достижении уровня
+// CountBits(state) == totalCells - oracleDepth спуск прекращается и ответ
+// берётся из оракула h (см. «Досрочное завершение через реверс»).
+// Ошибки конфигурации (o == nil, oracleDepth вне [1, totalCells), stopLevel ниже
+// текущей глубины p) обрабатывает newOracleReversal — он возвращает nil и
+// CountPathsWithReversal считает чистым полным DFS.
+
+func (s *Searcher) CountPathsWithCacheReversal(
+    ctx context.Context,
+    p path.Path,
+    c *cache.Cache,
+    d int,
+) types.Result
+// Legacy-быстрый путь: тот же уровень totalCells - d, но h = W(canon)/orbitSize
+// читается из префикс-кэша генерации (бесплатно, т.к. генерация уже посчитала
+// прогулки). Требует 2d ≤ n²; иначе newCacheReversal возвращает nil — чистый
+// полный DFS. Быстрее oracle при том же d ценой экспоненциального кэша глубины d.
 ```
 
 ### 4. Досрочное завершение через реверс (reversal early stop)
@@ -115,25 +128,26 @@ f(T, t) = Σ_{u ∈ U, u ~ t} h(U, u),      h(U,u) = #(путей, покрыв�
 ```
 
 Биекция: продолжение `u1…uk` обращается в путь `uk→…→u1`, заканчивающийся соседом `u1 ~ t`.
+Тождество выполняется для любого `d < n²` — ограничение `2d ≤ n²` из старой схемы с
+префикс-кэшем снято.
 
-**Связь с кэшем.** Значение префикс-кэша `W(K)` (см. cache.md) равно сумме мультипликативностей
-по всем симметричным образам узла: `W(K) = |fiber(K)| · h(U,u)`, где `fiber(K)` — орбита пары
-`(state,end)` в D4. Поэтому для lookup'а любого несимметричного `(U,u)`:
+**Источник значения.** Два режима (выбирает counter):
+- **Legacy prefix-cache** — `h = W(canon)/orbitSize` из префикс-кэша генерации.
+  Быстрее всего (генерация уже посчитала прогулки), но требует кэш глубины d и
+  `2d ≤ n²`.
+- **Shape-oracle** — истинное `h(U,u)` мемоизируется по классам формы с точностью
+  до D4 ⋉ трансляции (обоснование инвариантности — oracle.md). Работает для любой
+  позиции формы и любого уровня, память таблицы — классы вместо пар. Дороже lookup'а
+  из-за пересчёта h на класс; оптимален, когда префикс-кэш глубины d не помещается.
 
-```go
-h(U, u) = W(canon(U,u)) / fiberSize(canon(U,u))   // деление всегда точное
-```
-
-**Безопасность прунинга.** Любой обращённый суффикс, нужный для lookup'а, продолжается через `t`
-обратно по уже покрытому `T`, значит он не мог быть отрезан `ShouldPruneAfterVisit` на генерации
-(прунинг D4-эквивариантен). На нечётных досках старты нужных путей — концы реальных туров,
-т.е. правильного цвета (группы с `SholdSkip` ничего не теряют).
+**Безопасность прунинга.** Тождество биективно и не зависит от генерации: oracle
+считает все покрывающие прогулки независимо от того, порождались ли они фазой
+генерации префиксов и как их резал прунер.
 
 **Стоимость.** Одно сравнение `CountBits(st) == stopLevel` на узел count-DFS; lookup'и — только
-на уровне досрочного завершения, причём маска `U` трансформируется один раз на узел
-(`TransformStates`), а для каждого соседа `u` канонизация пары идёт по готовым образам
-(`CanonicalFromStates`) + один `GetCanonical`. При `d = n²/2` задачи решаются одним lookup'ом
-(meet-in-the-middle).
+на уровне досрочного завершения: маска `U` нормализуется один раз на узел
+(`oracle.ShapeCtx`/`Prepare`, без аллокаций), для каждого соседа `u` — аргмин по готовым
+образам (`GetPrepared`) + чтение шарда.
 
 **Единый горячий DFS (`dfs`) — по маскам, без колбэков:**
 
@@ -142,18 +156,31 @@ h(U, u) = W(canon(U,u)) / fiberSize(canon(U,u))   // деление всегда
 
 ```go
 // rev != nil включает досрочное завершение count-DFS (см. раздел выше).
-func (s *Searcher) dfs(ctx context.Context, st State, end, depth int, c *Cache, weight int, cached *int, rev *Reversal) int
+func (s *Searcher) dfs(ctx context.Context, st State, end, depth int, c *Cache, weight int, stats *dfsStats, rev *Reversal) int
 
+// Reversal — активный компонент: владеет и конфигурацией досрочного завершения,
+// и всей логикой подсчёта обратных путей. Поля неэкспортируемы; конструируется
+// только фабриками newOracleReversal/newCacheReversal (nil = режим выключен,
+// валидация параметров живёт там же).
 type Reversal struct {
-    Cache     *Cache // префикс-кэш, построенный на глубине d
-    StopLevel int    // totalCells - d; при CountBits(st) == StopLevel — lookup вместо спуска
+    graph     *graph.Graph      // neighborMask для кандидатов u ∈ U
+    sym       *symmetry.Symmetry // канонизация маски для legacy-кэша
+    oracle    *oracle.Oracle    // если != nil — h из мемоизации по классам форм
+    cache     *cache.Cache      // иначе — legacy W/orbitSize из префикс-кэша
+    stopLevel int               // при CountBits(st) == stopLevel — lookup вместо спуска
 }
+
+// Completions отвечает f(T,end) на уровне stopLevel: Σ h(U,u) по соседям u ∈ U.
+// Выбор источника — nil-check'ом (без интерфейсов): oracle нормализует маску
+// один раз на узел через Prepare/GetPrepared; legacy-кэш — TransformStates +
+// CanonicalFromStates и W/orbitSize на запись.
+func (r *Reversal) Completions(unvisited State, end int) int
 ```
 
 1. Базовый случай: `CountBits(st) >= depth` → если `c != nil`, сохранить
-   `path.New(st, end)` в кэш с весом `weight` и инкрементировать `*cached`; вернуть 1
-2. Досрочное завершение: `rev != nil && CountBits(st) == rev.StopLevel` →
-   `return completionsFromCache(st, end)` (сумма `W(canon(U,u))/fiberSize` по соседям `u ∈ U`)
+   `path.New(st, end)` в кэш с весом `weight` и инкрементировать `stats.cacheWrites`; вернуть 1
+2. Досрочное завершение: `rev != nil && CountBits(st) == rev.stopLevel` →
+   `return rev.Completions(unvisited, end)` (весь подсчёт обратных путей — внутри Reversal)
 3. `unvisited := fullMask &^ state`; кандидаты: `neighborMasks[end] & unvisited`
 4. Перебор кандидатов через итератор `for n := range cand.AllVisited()` (без прямых битовых операций)
 5. Если после хода остались непосещённые и `pruner.ShouldPruneAfterVisit(n, newUnvisited)` → continue
@@ -161,8 +188,8 @@ type Reversal struct {
 
 Вызовы:
 - полный подсчёт (`CountPathsDFS`): `depth = totalCells`, `c = nil`, `rev = nil`;
-- полный подсчёт с реверсом (`CountPathsWithReversal`): то же + `rev != nil`
-  (counter включает его только при `2d ≤ n²`, иначе уровень недостижим);
+- полный подсчёт с реверсом (`CountPathsWithReversal`/`CountPathsWithCacheReversal`): то же +
+  `rev != nil` (counter включает его, когда stopLevel достижим; иначе уровень просто не встречается);
 - префиксы (`GenerateSubtasks`): `depth = precomputeDepth`, `c != nil`, `rev = nil` — возврат
   из базового случая игнорируется, спуск ниже `depth` не происходит;
 - догенерация (`ExtendSubtask`): старт от канонической записи промежуточного кэша,
