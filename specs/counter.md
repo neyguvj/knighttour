@@ -178,7 +178,27 @@ fmt.Printf("Total tours: %d\n", count)
 `counter/benchmark_test.go`:
 - `BenchmarkCountAllToursParallel` — замеряет `ParallelCountWithDepth` на досках 5×5 и 6×6,
   перебирая глубины предподсчёта `depth = 1..size*size/2` (вложенные подбенчмарки `sizeN/depthD`),
-  число воркеров равно `runtime.NumCPU()`.
+  число воркеров равно `runtime.NumCPU()`. Режим legacy (`oracleDepth = 0`).
+
+- `BenchmarkCountAllToursOracle` — тюнинг и поимка регрессий oracle-режима. Кейсы задаются
+  таблицей `oracleBenchCase{size, root, oracleDepth}` (oracleDepth = 0 — legacy-анкер для
+  парной сравнимости в одном прогоне); подбенчмарки `sizeN/rootR/oracleD{d|legacy}`.
+  Матрица «root × oracle» не разворачивается целиком: в steady-state таблица
+  (`oracleBenchCases()`) содержит края кривой и самые быстрые конфигурации — регрессия на них
+  заметна сразу, а `make bench` укладывается в ~минуту.
+  Полный свип (`make bench-oracle-full`, `ORACLE_FULL_SWEEP=1`, `-benchtime=1x`) разворачивает
+  root ∈ {4..8, 10, 12} × чётные oracleDepth от 2 до min(⌊total/2⌋, total−root):
+  **oracle глубже половины доски не рассматривается** — стоимость класса O(D·2^D) растёт
+  экспоненциально, а выигрыш от раннего stop его не окупает; такие конфигурации не
+  используются на практике. По результатам свипа таблица подрезается. Каждая итерация
+  `b.Loop()` пересоздаёт taskCache — при фиксированном root это константа, сравнение по
+  oracleDepth честно.
+
+  Замер (M4 Max, benchtime=1x): на 5×5/6×6 legacy остаётся самым быстрым всегда; глубина
+  корней монотонно ускоряет вплоть до root=12 (6×6: 187→76 мс); оверхед oracle над legacy при
+  том же root — +8…15% на D≤4, ~×2 на D=10 и далее растёт с D. Выигрыш oracle — не скорость
+  на этих досках, а память на больших (specs/oracle.md), поэтому в бенче он отслеживается как
+  canary регрессий, а не как режим по умолчанию.
 
 ## Мониторинг
 

@@ -1,4 +1,4 @@
-.PHONY: all check fmt vet build test lint fix modernize bench clean
+.PHONY: all check fmt vet build test lint fix modernize bench bench-oracle-full clean
 
 all: check
 
@@ -27,6 +27,9 @@ modernize:
 
 bench:
 	go test -v -run=^$$ -bench=. -benchmem -benchtime=10x ./counter/
+
+bench-oracle-full:
+	ORACLE_FULL_SWEEP=1 go test -v -run=^$$ -bench=Oracle -benchmem -benchtime=1x -timeout=90m ./counter/
 
 clean:
 	go clean -testcache
