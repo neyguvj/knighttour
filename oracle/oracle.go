@@ -36,15 +36,16 @@ type shard struct {
 // outside the lock and inserted under it; concurrent misses on one key may
 // duplicate work but never corrupt values (computation is deterministic).
 type Oracle struct {
-	graph    *graph.Graph
-	pruner   *pruner.Pruner
-	shards   [numShards]shard
-	size     int
-	lookups  atomic.Uint64
-	computes atomic.Uint64
-	perms    [symmetry.NumTransforms][maxCells]uint8
-	rows     [maxCells]uint8
-	cols     [maxCells]uint8
+	graph       *graph.Graph
+	pruner      *pruner.Pruner
+	shards      [numShards]shard
+	size        int
+	lookups     atomic.Uint64
+	computes    atomic.Uint64
+	zeroClasses atomic.Uint64
+	perms       [symmetry.NumTransforms][maxCells]uint8
+	rows        [maxCells]uint8
+	cols        [maxCells]uint8
 }
 
 func New(g *graph.Graph) *Oracle {
@@ -183,6 +184,9 @@ func (o *Oracle) GetPrepared(sc *ShapeCtx, end int) uint64 {
 		return v
 	}
 	sh.data[k] = h
+	if h == 0 {
+		o.zeroClasses.Add(1) // useless class: no routes found inside it.
+	}
 	return h
 }
 
@@ -226,15 +230,17 @@ func (o *Oracle) computeH(shape state.State, end int) uint64 {
 }
 
 // Stats reports hot-path metrics: total lookups, recomputations (misses that
-// triggered computeH) and stored classes. classes/lookups ratios expose the
-// effective translation compression of the workload.
-func (o *Oracle) Stats() (lookups, computes, classes uint64) {
+// triggered computeH), stored classes and zero-valued ("useless") classes —
+// those where no route was found. classes/lookups ratios expose the effective
+// translation compression of the workload; zeros/classes is the useless share.
+func (o *Oracle) Stats() (lookups, computes, classes, zeros uint64) {
 	lookups = o.lookups.Load()
 	computes = o.computes.Load()
+	zeros = o.zeroClasses.Load()
 	for i := range o.shards {
 		o.shards[i].RLock()
 		classes += uint64(len(o.shards[i].data))
 		o.shards[i].RUnlock()
 	}
-	return lookups, computes, classes
+	return lookups, computes, classes, zeros
 }

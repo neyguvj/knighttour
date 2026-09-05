@@ -155,8 +155,8 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 	})
 
 	if useOracle {
-		lookups, computes, classes := revOracle.Stats()
-		monitor.ReportOracleStats(int(lookups), int(computes), int(classes))
+		lookups, computes, classes, zeros := revOracle.Stats()
+		monitor.ReportOracleStats(int(lookups), int(computes), int(classes), int(zeros))
 	}
 
 	return total.Load()

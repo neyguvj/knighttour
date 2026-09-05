@@ -123,7 +123,7 @@ func TestFakeMonitorSatisfiesInterface(t *testing.T) {
 	m.ReportTaskCompleted()
 	m.ReportPathsFound(1)
 	m.ReportSubtask(types.Result{CacheWrites: 1, PrunedDeadEnd: 1})
-	m.ReportOracleStats(3, 2, 1)
+	m.ReportOracleStats(3, 2, 1, 0)
 	m.Finish()
 }
 
@@ -248,7 +248,7 @@ func TestFinalReportFormat(t *testing.T) {
 	m.ReportPathsFound(100)
 	m.ReportSubtask(types.Result{CacheHits: 8, CacheMisses: 2, PrunedDisconn: 3})
 	m.ReportTaskCompleted()
-	m.ReportOracleStats(90, 12, 7)
+	m.ReportOracleStats(90, 12, 7, 3)
 
 	out := captureStdout(t, m.Finish)
 
@@ -266,7 +266,7 @@ func TestFinalReportFormat(t *testing.T) {
 	}
 	require.NotEmpty(t, countingLine)
 	assert.NotContains(t, countingLine, "writes", "no zero writes segment in counting phase")
-	assert.Contains(t, out, "Oracle: lookups=90 computes=12 classes=7")
+	assert.Contains(t, out, "Oracle: lookups=90 computes=12 classes=7 zeros=3")
 	assert.Contains(t, out, "Total paths: 100")
 }
 

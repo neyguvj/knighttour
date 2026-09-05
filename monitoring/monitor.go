@@ -25,8 +25,9 @@ type Monitor interface {
 	// ReportSubtask folds one finished subtask's statistics (cache writes,
 	// reversal hits/misses, pruning by reason) into the active phase.
 	ReportSubtask(r types.Result)
-	// ReportOracleStats publishes shape-oracle totals once after counting.
-	ReportOracleStats(lookups, computes, classes int)
+	// ReportOracleStats publishes shape-oracle totals once after counting;
+	// zeros counts classes with no routes found (h == 0).
+	ReportOracleStats(lookups, computes, classes, zeros int)
 }
 
 // phaseStats holds counters for a single execution phase (generation, counting).
@@ -66,6 +67,7 @@ type RealMonitor struct {
 	oracleLookups  atomic.Uint64
 	oracleComputes atomic.Uint64
 	oracleClasses  atomic.Uint64
+	oracleZeros    atomic.Uint64 // classes with h == 0 (no routes found)
 }
 
 func NewMonitor() *RealMonitor {
@@ -240,8 +242,9 @@ func (m *RealMonitor) Finish() {
 		totalPaths += ph.pathsFound.Load()
 	}
 	if m.oracleSet.Load() {
-		fmt.Printf("Oracle: lookups=%d computes=%d classes=%d\n",
-			m.oracleLookups.Load(), m.oracleComputes.Load(), m.oracleClasses.Load())
+		fmt.Printf("Oracle: lookups=%d computes=%d classes=%d zeros=%d\n",
+			m.oracleLookups.Load(), m.oracleComputes.Load(),
+			m.oracleClasses.Load(), m.oracleZeros.Load())
 	}
 	fmt.Printf("Total paths: %d\n", totalPaths)
 }
@@ -275,10 +278,11 @@ func (m *RealMonitor) ReportSubtask(r types.Result) {
 	ph.prunedEndpoints.Add(uint64(r.PrunedEndpoints))
 }
 
-func (m *RealMonitor) ReportOracleStats(lookups, computes, classes int) {
+func (m *RealMonitor) ReportOracleStats(lookups, computes, classes, zeros int) {
 	m.oracleLookups.Store(uint64(lookups))
 	m.oracleComputes.Store(uint64(computes))
 	m.oracleClasses.Store(uint64(classes))
+	m.oracleZeros.Store(uint64(zeros))
 	m.oracleSet.Store(true)
 }
 
@@ -288,11 +292,11 @@ func NewFakeMonitor() *FakeMonitor {
 	return &FakeMonitor{}
 }
 
-func (*FakeMonitor) Start(ctx context.Context)                        {}
-func (*FakeMonitor) Finish()                                          {}
-func (*FakeMonitor) BeginPhase(name string)                           {}
-func (*FakeMonitor) AddTasks(count int)                               {}
-func (*FakeMonitor) ReportTaskCompleted()                             {}
-func (*FakeMonitor) ReportPathsFound(count int)                       {}
-func (*FakeMonitor) ReportSubtask(r types.Result)                     {}
-func (*FakeMonitor) ReportOracleStats(lookups, computes, classes int) {}
+func (*FakeMonitor) Start(ctx context.Context)                               {}
+func (*FakeMonitor) Finish()                                                 {}
+func (*FakeMonitor) BeginPhase(name string)                                  {}
+func (*FakeMonitor) AddTasks(count int)                                      {}
+func (*FakeMonitor) ReportTaskCompleted()                                    {}
+func (*FakeMonitor) ReportPathsFound(count int)                              {}
+func (*FakeMonitor) ReportSubtask(r types.Result)                            {}
+func (*FakeMonitor) ReportOracleStats(lookups, computes, classes, zeros int) {}

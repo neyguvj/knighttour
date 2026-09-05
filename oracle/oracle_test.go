@@ -51,9 +51,11 @@ func TestOracleExhaustiveSmall(t *testing.T) {
 		}
 	}
 
-	_, computes, classes := o.Stats()
+	_, computes, classes, zeros := o.Stats()
 	assert.Positive(t, computes)
 	assert.LessOrEqual(t, classes, computes, "memoization must merge misses")
+	assert.Positive(t, zeros, "disconnected masks yield useless classes")
+	assert.LessOrEqual(t, zeros, classes, "zeros are a subset of stored classes")
 }
 
 func TestOracleRandomConnected(t *testing.T) {
@@ -261,14 +263,22 @@ func TestOracleZeroIsMemoized(t *testing.T) {
 	mask := state.NewState(0, 7)
 	require.Zero(t, o.Get(mask, 7))
 
-	_, computes1, classes1 := o.Stats()
+	_, computes1, classes1, zeros1 := o.Stats()
+	assert.Equal(t, uint64(1), zeros1, "the useless class must be counted once")
 	require.Zero(t, o.Get(mask, 7)) // served from table
-	_, computes2, classes2 := o.Stats()
+	_, computes2, classes2, zeros2 := o.Stats()
 	assert.Equal(t, computes1, computes2, "zero values must be stored, not recomputed")
 	assert.Equal(t, classes1, classes2)
+	assert.Equal(t, zeros1, zeros2, "lookups must not recount the zero class")
 
 	// end outside the mask is zero as well.
 	assert.Zero(t, o.Get(mask, 3))
+
+	// A useful class (h > 0) must not touch the counter.
+	require.EqualValues(t, 1, o.Get(state.NewState(0), 0))
+	_, _, classes3, zeros3 := o.Stats()
+	assert.Equal(t, zeros2, zeros3, "useful classes are not counted as useless")
+	assert.Equal(t, uint64(1), classes3-classes2)
 }
 
 func TestOraclePreparedMatchesGet(t *testing.T) {

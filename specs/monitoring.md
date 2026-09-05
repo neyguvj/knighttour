@@ -12,7 +12,9 @@
   reversal-lookup'ах фазы counting (`hits (rate) misses`)
 - Количество ветвей, отсечённых прунером, **с разбивкой по видам**
   (deadend / noContinuation / disconnected / endpoints)
-- Итоги shape-oracle (lookups/computes/classes) — безусловно, при oracle-режиме
+- Итоги shape-oracle (lookups/computes/classes/zeros, где zeros — число классов с
+  `h == 0`, т.е. «бесполезных»: маршрутов внутри класса не найдено) — безусловно,
+  при oracle-режиме
 
 Фазы запуска:
 - `generation` — однофазная генерация подзадач (`precomputeDepth ≤ TwoPhaseBaseDepth`)
@@ -65,7 +67,7 @@ searcher.md). Монитор только агрегирует — внутри 
 Total time: 63ms
 Phase generation [41ms]: tasks 6/6 | paths 0 | writes 2795 | pruned 12034 (deadend 8211, nocont 302, disconn 2901, endpoints 620)
 Phase counting [22ms]: tasks 95224/95224 | paths 6637920 | hits 120034 (78.4%) misses 33210 | pruned 180322 (deadend 140311, disconn 30011, endpoints 1000)
-Oracle: lookups=51234 computes=987 classes=654
+Oracle: lookups=51234 computes=987 classes=654 zeros=219
 Total paths: 6637920
 ```
 
@@ -84,7 +86,7 @@ type Monitor interface {
     ReportPathsFound(count int)    // пути (в counting — взвешенные weight'ом)
     ReportSubtask(r types.Result)  // статистика завершённой подзадачи: writes,
                                    // hits/misses, разбивка прунинга по видам
-    ReportOracleStats(lookups, computes, classes int) // один раз после counting
+    ReportOracleStats(lookups, computes, classes, zeros int) // один раз после counting
 }
 ```
 
@@ -132,6 +134,7 @@ type RealMonitor struct {
     oracleSet               atomic.Bool // ReportOracleStats вызывался
     oracleLookups, computes atomic.Uint64
     oracleClasses           atomic.Uint64
+    oracleZeros             atomic.Uint64 // классы с h == 0 (бесполезные)
 }
 ```
 
@@ -211,10 +214,12 @@ func (m *RealMonitor) ReportSubtask(r types.Result) {
 }
 ```
 
-#### 6. ReportOracleStats(lookups, computes, classes int)
+#### 6. ReportOracleStats(lookups, computes, classes, zeros int)
 
 Вызывается один раз после завершения counting (см. counter.md). Значения — из
-`oracle.Stats()`; вызов идемпотентен последним (Store + `oracleSet=true`).
+`oracle.Stats()`; `zeros` — число вставленных классов с `h == 0` (в классе не
+найдено ни одного маршрута; инкрементируется только при фактической вставке).
+Вызов идемпотентен последним (Store + `oracleSet=true`).
 
 #### 7. Finish()
 
@@ -241,8 +246,9 @@ func (m *RealMonitor) Finish() {
         totalPaths += ph.pathsFound.Load()
     }
     if m.oracleSet.Load() {
-        fmt.Printf("Oracle: lookups=%d computes=%d classes=%d\n",
-            m.oracleLookups.Load(), m.oracleComputes.Load(), m.oracleClasses.Load())
+        fmt.Printf("Oracle: lookups=%d computes=%d classes=%d zeros=%d\n",
+            m.oracleLookups.Load(), m.oracleComputes.Load(),
+            m.oracleClasses.Load(), m.oracleZeros.Load())
     }
     fmt.Printf("Total paths: %d\n", totalPaths)
 }
@@ -293,8 +299,8 @@ taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, weight int) 
 
 // безусловно (без env), если oracle использовался:
 if useOracle {
-    lookups, computes, classes := revOracle.Stats()
-    monitor.ReportOracleStats(lookups, computes, classes)
+    lookups, computes, classes, zeros := revOracle.Stats()
+    monitor.ReportOracleStats(lookups, computes, classes, zeros)
 }
 ```
 
@@ -318,7 +324,7 @@ func (*FakeMonitor) AddTasks(count int)                                    {}
 func (*FakeMonitor) ReportTaskCompleted()                                  {}
 func (*FakeMonitor) ReportPathsFound(count int)                            {}
 func (*FakeMonitor) ReportSubtask(r types.Result)                          {}
-func (*FakeMonitor) ReportOracleStats(lookups, computes, classes int)      {}
+func (*FakeMonitor) ReportOracleStats(lookups, computes, classes, zeros int) {}
 ```
 
 ## Требования к точности
