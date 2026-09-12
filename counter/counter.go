@@ -43,6 +43,19 @@ func DefaultPrecomputeDepth(size int) int {
 	return TwoPhaseBaseDepth + 1
 }
 
+// Mode selects the counting pipeline (specs/counter.md).
+type Mode int
+
+const (
+	// ModeClass counts via shape classes: generation leaves accumulate M by
+	// D4+translation class and a final per-shape DP pass sums Σ h(C)·M(C).
+	ModeClass Mode = iota
+	// ModeReversal counts via the shared task-cache: generation writes raw
+	// canonical prefixes into cache.Cache and a count-DFS with early stop at
+	// level totalCells−d answers Σ W(task)·f(task) (ADR-011).
+	ModeReversal
+)
+
 type Counter struct {
 	graph       *graph.Graph
 	symmetry    *symmetry.Symmetry
@@ -51,7 +64,13 @@ type Counter struct {
 	tailK       int
 	tailSlots   int
 	shapeFilter pruner.L2Checks
+	mode        Mode
 }
+
+// SetMode selects the counting pipeline (default ModeClass). Class-mode
+// properties (SetShapeFilter, SetTailMemo, SetShapeDump) are ignored in
+// ModeReversal. Call before counting.
+func (c *Counter) SetMode(m Mode) { c.mode = m }
 
 // SetShapeFilter configures the final pass pre-DP shape feasibility filter
 // (specs/shapecount.md, plan 02): pruner checks that kill provably-zero ends
@@ -100,13 +119,17 @@ func (c *Counter) ParallelCount(ctx context.Context, monitor monitoring.Monitor,
 	return c.ParallelCountWithDepth(ctx, monitor, workers, DefaultPrecomputeDepth(c.graph.Size()))
 }
 
-// ParallelCountWithDepth counts all open tours via the single class-mode
-// pipeline (specs/shapecount.md): generation leaves accumulate weights M by
+// ParallelCountWithDepth counts all open tours with the active mode
+// (specs/counter.md). precomputeDepth is the meet-in-the-middle split
+// (validated ≤ size²/2 by main.go); deeper than that duplicates the dual cut
+// of the reversed tour. ModeClass: generation leaves accumulate weights M by
 // D4+translation shape class through per-worker LocalSinks, and a final pass
-// computes h per shape once via DP — total = Σ h(C)·M(C). precomputeDepth is
-// the meet-in-the-middle split (validated ≤ size²/2 by main.go); deeper than
-// that duplicates the dual cut of the reversed tour.
+// computes h per shape once via DP — total = Σ h(C)·M(C).
 func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) uint64 {
+	if c.mode == ModeReversal {
+		return c.parallelCountReversal(ctx, monitor, workers, precomputeDepth)
+	}
+
 	intermediate := c.generateIntermediate(ctx, monitor, workers, precomputeDepth)
 
 	monitor.BeginPhase("gen B")
@@ -141,6 +164,104 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 	_ = g.Wait()
 
 	return c.countShapes(ctx, monitor, workers, acc)
+}
+
+// parallelCountReversal is the reversal-mode pipeline (specs/counter.md,
+// ADR-011): gen A is identical to class mode; gen B chunk workers extend each
+// intermediate entry into the live task-cache (direct Set — no LocalSink: the
+// record profile differs from M's and hits are read in the same run they are
+// written); counting walks the task-cache shard by shard (SnapshotShard) with
+// the early-stop count-DFS, no full snapshot (ADR-012).
+// Class-mode properties (shapeFilter, tailMemo, shapeDump) do not apply and
+// ReportShapeStats is never published here.
+func (c *Counter) parallelCountReversal(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) uint64 {
+	intermediate := c.generateIntermediate(ctx, monitor, workers, precomputeDepth)
+
+	monitor.BeginPhase("gen B")
+	monitor.AddTasks(len(intermediate))
+
+	taskCache := cache.NewCache()
+	nextEntry := atomic.Int64{}
+	// Chunk workers (not g.Go per entry): the atomic index keeps claim
+	// contention an order of magnitude below the task count.
+	g, gctx := errgroup.WithContext(ctx)
+	for range min(len(intermediate), workers) {
+		g.Go(func() error {
+			for {
+				i := int(nextEntry.Add(1)) - 1
+				if i >= len(intermediate) {
+					return nil
+				}
+				select {
+				case <-gctx.Done():
+					return nil
+				default:
+				}
+				e := intermediate[i]
+				result := c.searcher.ExtendTask(gctx, taskCache, e.Path, e.Weight, precomputeDepth)
+				monitor.ReportSubtask(&result)
+				monitor.ReportTaskCompleted()
+			}
+		})
+	}
+	_ = g.Wait()
+
+	return c.countTasks(ctx, monitor, workers, taskCache, precomputeDepth)
+}
+
+// countTasks is the reversal counting phase (specs/counter.md, ADR-012): no
+// full snapshot of the task-cache. Workers pull shard indices from an atomic
+// cursor, take SnapshotShard(i) — one shard of memory, data left in place — and
+// run every task of that shard through the early-stop count-DFS themselves,
+// adding w · f(task) into the shared total. The cache stays alive and read-only
+// until the phase ends; it is never drained (specs/cache.md).
+func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, workers int, taskCache *cache.Cache, precomputeDepth int) uint64 {
+	monitor.BeginPhase("counting")
+	monitor.AddTasks(taskCache.ItemsCount())
+
+	var total atomic.Uint64
+	var nextShard atomic.Int64
+	g, gctx := errgroup.WithContext(ctx)
+	for range min(workers, taskCache.NumShards()) {
+		g.Go(func() error {
+			c.countShard(gctx, monitor, taskCache, precomputeDepth, &nextShard, &total)
+			return nil
+		})
+	}
+	_ = g.Wait()
+
+	return total.Load()
+}
+
+// countShard drains the shared shard-index cursor: each claimed shard is
+// snapshotted once and all of its tasks are counted on this worker. Empty
+// shards are skipped; ctx is checked between shards (and, via countOneTask,
+// between tasks). Returns when the cursor is exhausted or ctx is done.
+func (c *Counter) countShard(ctx context.Context, monitor monitoring.Monitor, taskCache *cache.Cache, precomputeDepth int, nextShard *atomic.Int64, total *atomic.Uint64) {
+	numShards := taskCache.NumShards()
+	for ctx.Err() == nil {
+		i := int(nextShard.Add(1)) - 1
+		if i >= numShards {
+			return
+		}
+		for _, e := range taskCache.SnapshotShard(i) {
+			c.countOneTask(ctx, monitor, taskCache, precomputeDepth, e, total)
+		}
+	}
+}
+
+// countOneTask runs the early-stop count-DFS for a single task and folds its
+// weighted path count and per-task statistics into the shared counters.
+func (c *Counter) countOneTask(ctx context.Context, monitor monitoring.Monitor, taskCache *cache.Cache, precomputeDepth int, e cache.Entry, total *atomic.Uint64) {
+	if ctx.Err() != nil {
+		return
+	}
+	result := c.searcher.CountPathsWithCacheReversal(ctx, e.Path, taskCache, precomputeDepth)
+	paths := uint64(result.TotalPathsFound) * e.Weight
+	total.Add(paths)
+	monitor.ReportPathsFound(int(paths))
+	monitor.ReportSubtask(&result)
+	monitor.ReportTaskCompleted()
 }
 
 // generateIntermediate runs phase A: DFS from every canonical start group to

@@ -22,18 +22,22 @@ func TestParseArgs(t *testing.T) {
 		{
 			name:     "defaults",
 			args:     nil,
-			expected: &appArgs{size: 5, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(5)},
+			expected: &appArgs{size: 5, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(5), mode: modeClass},
 		},
 		{
 			name:     "explicit flags",
 			args:     []string{"-size", "6", "-workers", "4", "-precompute-depth", "3"},
-			expected: &appArgs{size: 6, workers: 4, precomputeDepth: 3},
+			expected: &appArgs{size: 6, workers: 4, precomputeDepth: 3, mode: modeClass},
 		},
-		{name: "board 5 default depth", args: []string{"-size", "5"}, expected: &appArgs{size: 5, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(5)}},
-		{name: "board 6 default depth", args: []string{"-size", "6"}, expected: &appArgs{size: 6, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(6)}},
-		{name: "board 7 default depth", args: []string{"-size", "7"}, expected: &appArgs{size: 7, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(7)}},
-		{name: "board 8 default depth", args: []string{"-size", "8"}, expected: &appArgs{size: 8, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(8)}},
-		{name: "board 8 max depth", args: []string{"-size", "8", "-precompute-depth", "32"}, expected: &appArgs{size: 8, workers: runtime.NumCPU(), precomputeDepth: 32}},
+		{name: "board 5 default depth", args: []string{"-size", "5"}, expected: &appArgs{size: 5, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(5), mode: modeClass}},
+		{name: "board 6 default depth", args: []string{"-size", "6"}, expected: &appArgs{size: 6, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(6), mode: modeClass}},
+		{name: "board 7 default depth", args: []string{"-size", "7"}, expected: &appArgs{size: 7, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(7), mode: modeClass}},
+		{name: "board 8 default depth", args: []string{"-size", "8"}, expected: &appArgs{size: 8, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(8), mode: modeClass}},
+		{name: "board 8 max depth", args: []string{"-size", "8", "-precompute-depth", "32"}, expected: &appArgs{size: 8, workers: runtime.NumCPU(), precomputeDepth: 32, mode: modeClass}},
+		{name: "mode class explicit", args: []string{"-mode", "class"}, expected: &appArgs{size: 5, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(5), mode: modeClass}},
+		{name: "mode reversal", args: []string{"-size", "6", "-mode", "reversal"}, expected: &appArgs{size: 6, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(6), mode: modeReversal}},
+		{name: "unknown mode", args: []string{"-mode", "oracle"}, wantErr: true},
+		{name: "empty mode", args: []string{"-mode", ""}, wantErr: true},
 		{name: "size too small", args: []string{"-size", "4"}, wantErr: true},
 		{name: "size too large", args: []string{"-size", "9"}, wantErr: true},
 		{name: "depth zero explicit", args: []string{"-size", "5", "-precompute-depth", "0"}, wantErr: true},
@@ -41,7 +45,7 @@ func TestParseArgs(t *testing.T) {
 		{
 			name:     "tail memo explicit",
 			args:     []string{"-size", "6", "-tail-memo", "12"},
-			expected: &appArgs{size: 6, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(6), tailMemo: 12},
+			expected: &appArgs{size: 6, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(6), tailMemo: 12, mode: modeClass},
 		},
 		{name: "tail memo negative", args: []string{"-tail-memo", "-1"}, wantErr: true},
 		{name: "workers zero", args: []string{"-workers", "0"}, wantErr: true},
@@ -63,9 +67,21 @@ func TestParseArgs(t *testing.T) {
 }
 
 func TestRunCountMatchesReference(t *testing.T) {
-	args := &appArgs{size: 5, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(5)}
+	tests := []struct {
+		name string
+		mode string
+	}{
+		{name: "class", mode: modeClass},
+		{name: "reversal", mode: modeReversal},
+	}
 
-	count := run(context.Background(), monitoring.NewFakeMonitor(), args)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := &appArgs{size: 5, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(5), mode: tt.mode}
 
-	assert.Equal(t, uint64(1728), count, "Expected 1728 for 5x5 board")
+			count := run(context.Background(), monitoring.NewFakeMonitor(), args)
+
+			assert.Equal(t, uint64(1728), count, "Expected 1728 for 5x5 board, mode %s", tt.mode)
+		})
+	}
 }

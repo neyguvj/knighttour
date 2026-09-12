@@ -239,3 +239,176 @@ func TestExtendToClassesEmitsAtEntryDepth(t *testing.T) {
 	cand := g.GetNeighborMask(6).Intersect(st.Invert(g.GetTotalCells()))
 	assert.Equal(t, uint64(cand.CountBits())*3, total, "each neighbor end gets the entry weight")
 }
+
+// --- reversal mode (specs/searcher.md, ADR-011) -----------------------------
+
+// buildTaskCache fills a task cache at depth d from every canonical group,
+// mirroring what the counter's generation phases do.
+func buildTaskCache(g *graph.Graph, searcher *Searcher, d int) *cache.Cache {
+	c := cache.NewCache()
+	sym := symmetry.NewSymmetry(g.Size())
+	for _, group := range sym.GetCanonicalGroups() {
+		searcher.GenerateTasks(context.Background(), c, group.Canonical, uint64(group.OrbitSize), d)
+	}
+	return c
+}
+
+// allTasks flattens every shard snapshot of a task-cache into one slice — the
+// per-shard iteration the count phase uses after ADR-012 removed Cache.Entries.
+func allTasks(c *cache.Cache) []cache.Entry {
+	out := make([]cache.Entry, 0, c.ItemsCount())
+	for i := range c.NumShards() {
+		out = append(out, c.SnapshotShard(i)...)
+	}
+	return out
+}
+
+// The reversal identity Σ_tasks W·f == plain count, pinned per split depth
+// against the naive brute-force total (1728). A sample of tasks is checked
+// task-by-task with shallowOracle (phase B at totalCells−1, itself pinned to
+// naiveCountFrom in TestExtendToClassesMatchesFullCount): f(task) must equal
+// the plain completions of (state, end), not merely sum up right.
+func TestReversalMatchesBruteForceAllDepths(t *testing.T) {
+	const size = 5
+	const naiveSample = 8
+
+	g := graph.New(size)
+	sym := symmetry.NewSymmetry(size)
+	searcher := NewSearcher(g, sym)
+
+	for d := 1; d <= g.GetTotalCells()/2; d++ {
+		t.Run("depth"+strconv.Itoa(d), func(t *testing.T) {
+			taskCache := buildTaskCache(g, searcher, d)
+			require.Positive(t, taskCache.ItemsCount())
+
+			var sum uint64
+			for i, e := range allTasks(taskCache) {
+				res := searcher.CountPathsWithCacheReversal(context.Background(), e.Path, taskCache, d)
+				sum += e.Weight * uint64(res.TotalPathsFound)
+
+				if i < naiveSample {
+					ref := shallowOracle(t, g, searcher, e.Path, 1)
+					assert.Equal(t, uint64(ref), uint64(res.TotalPathsFound), "task %d: f must match the oracle", i)
+				}
+			}
+			assert.Equal(t, uint64(1728), sum, "Σ W·f == plain count at depth %d", d)
+		})
+	}
+}
+
+// Degenerate phase B: an entry already at the target depth is written as-is
+// (no descent, no re-canonicalization).
+func TestExtendTaskWritesEntryAsIsAtTargetDepth(t *testing.T) {
+	g := graph.New(5)
+	sym := symmetry.NewSymmetry(5)
+	searcher := NewSearcher(g, sym)
+
+	p := path.New(state.State(0).Visit(0).Visit(6), 6)
+
+	c := cache.NewCache()
+	result := searcher.ExtendTask(context.Background(), c, p, 3, 2)
+
+	assert.Equal(t, 1, result.CacheWrites, "entry at target depth writes itself")
+	weight, found := c.Get(p)
+	assert.True(t, found, "record must be stored as-is under the entry key")
+	assert.Equal(t, uint64(3), weight)
+	assert.Equal(t, 1, c.ItemsCount())
+}
+
+// c == nil and 2d > totalCells both disable reversal: the count must equal
+// the naive full descent and never touch a cache (zero hits/misses).
+func TestCountPathsWithCacheReversalFullDescentIdentities(t *testing.T) {
+	const size = 5
+	g := graph.New(size)
+	sym := symmetry.NewSymmetry(size)
+	searcher := NewSearcher(g, sym)
+
+	tests := []struct {
+		c    *cache.Cache
+		name string
+		d    int
+	}{
+		{name: "nil cache", c: nil, d: 6},
+		{name: "beyond duality", c: cache.NewCache(), d: size*size/2 + 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for start := range g.GetTotalCells() {
+				st := state.NewState(start)
+				res := searcher.CountPathsWithCacheReversal(context.Background(), path.New(st, start), tt.c, tt.d)
+				assert.Equal(t, naiveCountFrom(g, st, start), res.TotalPathsFound, "start %d", start)
+				assert.Zero(t, res.CacheHits+res.CacheMisses, "full descent must not consult the cache")
+			}
+		})
+	}
+}
+
+// The stop fires exactly at level totalCells−d: a task whose bits already sit
+// at the stop level answers through Completions immediately — every u ∈
+// N(end)∩U is looked up once and nothing else. An empty cache gives 0 paths
+// with exactly |N(end)∩U| misses; seeding one canonical key with its orbit
+// weight contributes exactly W/orbitSize == 1 per candidate sharing that key.
+func TestReversalStopLookupsHappenAtStopLevel(t *testing.T) {
+	const size = 5
+	total := size * size
+	g := graph.New(size)
+	sym := symmetry.NewSymmetry(size)
+	searcher := NewSearcher(g, sym)
+
+	st := state.NewState(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12) // bits == stopLevel
+	p := path.New(st, 12)
+	d := total / 2 // stopLevel = total−d = 13 == bits: immediate completions
+	unvisited := st.Invert(total)
+
+	cand := g.GetNeighborMask(12).Intersect(unvisited)
+	require.Positive(t, cand.CountBits())
+
+	res := searcher.CountPathsWithCacheReversal(context.Background(), p, cache.NewCache(), d)
+	assert.Zero(t, res.TotalPathsFound, "empty cache answers zero completions")
+	assert.Zero(t, res.CacheHits)
+	assert.Equal(t, cand.CountBits(), res.CacheMisses, "one lookup per candidate end at the stop level")
+
+	var u0 int
+	for u := range cand.AllVisited() {
+		u0 = u
+		break
+	}
+	canonical, orbitSize := sym.CanonicalizeWithOrbitSize(unvisited, u0)
+	c := cache.NewCache()
+	c.Set(canonical, uint64(orbitSize))
+
+	want := 0
+	for u := range cand.AllVisited() {
+		if sym.Canonicalize(unvisited, u) == canonical {
+			want++
+		}
+	}
+
+	res = searcher.CountPathsWithCacheReversal(context.Background(), p, c, d)
+	assert.Equal(t, want, res.TotalPathsFound, "each candidate under the seeded key adds W/orbitSize == 1")
+	assert.Equal(t, want, res.CacheHits)
+	assert.Equal(t, cand.CountBits()-want, res.CacheMisses)
+}
+
+// SholdSkip starts contribute nothing to the task cache (odd-board parity).
+func TestGenerateTasksSkipsWrongColor(t *testing.T) {
+	g := graph.New(5)
+	sym := symmetry.NewSymmetry(5)
+	searcher := NewSearcher(g, sym)
+
+	var skipped = -1
+	for p := range g.GetTotalCells() {
+		if g.SholdSkip(p) {
+			skipped = p
+			break
+		}
+	}
+	require.NotEqual(t, -1, skipped)
+
+	c := cache.NewCache()
+	result := searcher.GenerateTasks(context.Background(), c, skipped, 1, 3)
+
+	assert.Zero(t, result.CacheWrites, "SholdSkip start emits nothing")
+	assert.Zero(t, c.ItemsCount())
+}

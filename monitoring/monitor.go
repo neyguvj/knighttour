@@ -41,6 +41,8 @@ type phaseStats struct {
 	subtasks        atomic.Uint64 // folded ReportSubtask calls (never printed)
 	pathsFound      atomic.Uint64 // weighted paths (counting only)
 	cacheWrites     atomic.Uint64 // accumulator emissions (gen A / gen B)
+	cacheHits       atomic.Uint64 // task-cache lookups answered (reversal counting)
+	cacheMisses     atomic.Uint64 // task-cache lookups with no entry (reversal counting)
 	prunedDeadEnd   atomic.Uint64
 	prunedNoCont    atomic.Uint64
 	prunedDisconn   atomic.Uint64
@@ -149,6 +151,8 @@ func (m *monitor) ReportSubtask(r *types.Result) {
 	}
 	ph.subtasks.Add(1)
 	ph.cacheWrites.Add(uint64(r.CacheWrites))
+	ph.cacheHits.Add(uint64(r.CacheHits))
+	ph.cacheMisses.Add(uint64(r.CacheMisses))
 	ph.prunedDeadEnd.Add(uint64(r.PrunedDeadEnd))
 	ph.prunedNoCont.Add(uint64(r.PrunedNoCont))
 	ph.prunedDisconn.Add(uint64(r.PrunedDisconn))
@@ -251,6 +255,7 @@ func (m *monitor) report() {
 	if w := ph.cacheWrites.Load(); w > 0 {
 		fmt.Fprintf(&b, " | Writes %d", w)
 	}
+	b.WriteString(ph.hitsSegment(false))
 	b.WriteString(ph.tailSegment(false))
 	fmt.Fprintf(&b, " | Pruned %d | ETA %s", ph.prunedTotal(), eta)
 
@@ -266,12 +271,29 @@ func (ph *phaseStats) summary() string {
 	if w := ph.cacheWrites.Load(); w > 0 {
 		fmt.Fprintf(&b, " | writes %d", w)
 	}
+	b.WriteString(ph.hitsSegment(true))
 	b.WriteString(ph.tailSegment(true))
 	if f := ph.filteredShapes.Load(); f > 0 {
 		fmt.Fprintf(&b, " | filtered %d", f)
 	}
 	fmt.Fprintf(&b, " | pruned %d%s", ph.prunedTotal(), ph.pruneBreakdown())
 	return b.String()
+}
+
+// hitsSegment renders " | Hits hits/misses" once the phase probed a reversal
+// task-cache (ReportSubtask carries the lookups); printed when at least one
+// of the two is non-zero, so class-mode lines stay free of zeros. lowercase
+// picks the summary-line spelling.
+func (ph *phaseStats) hitsSegment(lowercase bool) string {
+	hits, misses := ph.cacheHits.Load(), ph.cacheMisses.Load()
+	if hits == 0 && misses == 0 {
+		return ""
+	}
+	name := "Hits"
+	if lowercase {
+		name = "hits"
+	}
+	return fmt.Sprintf(" | %s %d/%d", name, hits, misses)
 }
 
 // tailSegment renders " | Tail hits/lookups (pct%)" once the phase probed the
@@ -357,6 +379,9 @@ type PhaseStats struct {
 	PathsFound  uint64
 	CacheWrites uint64
 
+	CacheHits   uint64 // reversal task-cache lookups answered (counting)
+	CacheMisses uint64 // reversal task-cache lookups with no entry (counting)
+
 	Pruned             uint64
 	PrunedDeadEnd      uint64
 	PrunedNoCont       uint64
@@ -412,6 +437,8 @@ func (a *PhaseStats) add(ph *phaseStats) {
 	a.Subtasks += ph.subtasks.Load()
 	a.PathsFound += ph.pathsFound.Load()
 	a.CacheWrites += ph.cacheWrites.Load()
+	a.CacheHits += ph.cacheHits.Load()
+	a.CacheMisses += ph.cacheMisses.Load()
 	a.Pruned += ph.prunedTotal()
 	a.PrunedDeadEnd += ph.prunedDeadEnd.Load()
 	a.PrunedNoCont += ph.prunedNoCont.Load()

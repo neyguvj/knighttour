@@ -31,6 +31,7 @@ go test -v -run='^$' -bench=. -benchmem ./counter/
 | `depthFloors` (`{7:6}`) | пол глубины свипа; ниже неинформативно/небезопасно (см. ниже) |
 | `sweepDefaults` (`{8:{32,30}}`) | без `BENCH_DEPTHS` у 8×8 гоняется только этот cap |
 | `BENCH_DEPTHS=a,b` | точечный набор вместо свипа; вне `[floor, size²/2]` — отбрасывается; если для размера не осталось ни одной — SKIP (переменная не ломает остальные размеры) |
+| `BENCH_MODE=class\|reversal` | режим подсчёта (`counter.SetMode`), по умолчанию `class`; неизвестное значение → `b.Fatalf`. A/B-свод планов 06 (ADR-011): одним бенчмарком гоняется любой из двух конвейеров |
 
 Подтесты именуются `size{N}/depth{D}`; родительский уровень `size{N}` нужен ровно для
 SKIP'а gated-размера.
@@ -52,7 +53,8 @@ SKIP'а gated-размера.
 | `prunedA/op`, `prunedB/op` | отсечено прунером в генерации |
 | `prunedDP_artic/op`, `prunedDP_chain/op` | L2-прунинг DP (только counting) |
 | `filtered/op` | форм, убитых pre-DP фильтром (ADR-008); A/B свип — env `SHAPE_FILTER=off` |
-| `classes/op`, `shapes/op`, `zeros/op` | записи M / различные формы / формы с h≡0 |
+| `classes/op`, `shapes/op`, `zeros/op` | записи M / различные формы / формы с h≡0 (class mode) |
+| `cacheHits/op`, `cacheMisses/op` | lookup'ы task-cache на уровне стопа в counting (reversal mode; в class — нули) |
 | `peakRSS_MB/op` | **максимум резидента процесса** (`syscall.Getrusage`) |
 | `totalAllocMB/op` | дельта `runtime.MemStats.TotalAlloc` вокруг итерации |
 

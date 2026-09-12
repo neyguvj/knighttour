@@ -10,10 +10,14 @@
 
 ```go
 type Result struct {
-    TotalPathsFound int   // ЗАРЕЗЕРВИРОВАН: production не заполняет
-                          // (counting публикует взвешенные пути через ReportPathsFound)
+    TotalPathsFound int   // reversal count-DFS: число дополнений подзадачи; class mode
+                          // не заполняет (counting публикует взвешенные пути через ReportPathsFound)
 
-    CacheWrites int       // эмиссии в аккумуляторы (sink.Add, включая слияние в ключ)
+    CacheWrites int       // эмиссии в аккумуляторы/task-cache (sink.Add, Set)
+
+    // Reversal mode: попадания/промахи lookup'ов в task-cache на уровне стопа.
+    CacheHits   int
+    CacheMisses int
 
     // Прунинг по видам (значения pruner.Reason); Pruned == сумма видов (Finalize).
     Pruned            int
@@ -48,7 +52,9 @@ func (r *Result) Finalize()                 // Pruned = Σ видов; один 
 ## Ограничения и edge cases
 
 - Все поля экспортированы; логика минимальна (сложение/инкремент).
-- `TotalPathsFound` — зарезервированное поле, в текущем пайплайне не заполняется.
+- `TotalPathsFound` заполняет только reversal count-DFS; мониторинг его игнорирует
+  (пути публикует контур через `ReportPathsFound`). `CacheHits/CacheMisses` заполняет
+  тоже только reversal.
 
 ## Тесты
 

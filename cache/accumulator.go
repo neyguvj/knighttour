@@ -6,23 +6,26 @@ import (
 	"knighttour/path"
 )
 
-const numAccShards = 128
+// numShards is the shard count of both tables (Accumulator and Cache); it
+// must stay 1<<7 to match the shift in shardIndex.
+const numShards = 128
 
+// accShard is one Accumulator shard: its map plus the exclusive lock guarding it.
 type accShard struct {
 	data map[path.Path]uint64
 	mu   sync.Mutex
 }
 
-// Accumulator is the single weight table of the pipeline (specs/cache.md):
-// an additive multiset "key → Σ weights" shared by both generation phases.
-// Phase A keys are D4-canonical placements (state, end); phase B keys are
-// translation+D4 normalized complement shape classes (specs/shapecount.md).
-// Entries exist only for keys actually added — zeros are never stored.
-// Thread-safe via sharding; read through DrainShard/Drain after the writing
-// phase ends (the copying Snapshot was removed: it doubled peak memory on
-// large boards).
+// Accumulator is the class-mode weight table of the pipeline (specs/cache.md):
+// one of the two additive "key → Σ weights" tables (the reversal task-cache is
+// Cache), shared by both generation phases. Phase A keys are D4-canonical
+// placements (state, end); phase B keys are translation+D4 normalized
+// complement shape classes (specs/shapecount.md). Entries exist only for keys
+// actually added — zeros are never stored. Thread-safe via sharding; read
+// through DrainShard/Drain after the writing phase ends (the copying Snapshot
+// was removed: it doubled peak memory on large boards).
 type Accumulator struct {
-	shards [numAccShards]accShard
+	shards [numShards]accShard
 }
 
 func NewAccumulator() *Accumulator {
@@ -33,17 +36,20 @@ func NewAccumulator() *Accumulator {
 	return a
 }
 
-// accShardIndex hashes State only, so every end of one shape class lands in
-// the same shard and downstream can group by shape per shard without a global
-// sort (specs/cache.md).
-func accShardIndex(p path.Path) int {
+// shardIndex is the shard hash shared by both tables (Accumulator and
+// Cache). It hashes State only, so every end of one shape class lands in the
+// same shard: the counting stage groups per shard without a global snapshot
+// (specs/cache.md, ADR-004); for the task-cache it merely spreads contention.
+// Allocation-free: golden-ratio multiply, take the high bits. numShards must
+// stay 1<<7 to match the shift.
+func shardIndex(p path.Path) int {
 	h := uint64(p.State()) * 0x9E3779B97F4A7C15
-	return int(h >> (64 - 7)) // numAccShards = 128
+	return int(h >> (64 - 7)) // numShards = 128
 }
 
 // Add accumulates one contribution: data[key] += weight.
 func (a *Accumulator) Add(p path.Path, weight uint64) {
-	sh := &a.shards[accShardIndex(p)]
+	sh := &a.shards[shardIndex(p)]
 	sh.mu.Lock()
 	sh.data[p] += weight
 	sh.mu.Unlock()
@@ -93,7 +99,7 @@ type Entry struct {
 }
 
 // NumShards returns the number of independently drainable shards.
-func (a *Accumulator) NumShards() int { return numAccShards }
+func (a *Accumulator) NumShards() int { return numShards }
 
 // DrainShard hands out shard i's records and releases its map, so peak memory
 // of a per-shard consumer stays bounded by one shard (specs/cache.md). Call

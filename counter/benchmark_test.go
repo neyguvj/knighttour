@@ -45,6 +45,24 @@ var depthFloors = map[int]int{7: 6}
 // point measurements of hour-long cuts; values outside [floor, size²/2] are dropped.
 const benchDepthsEnv = "BENCH_DEPTHS"
 
+// benchModeEnv selects the counting mode ("class" | "reversal", default
+// class) so one benchmark measures either pipeline for the A/B sweep (plan 06).
+const benchModeEnv = "BENCH_MODE"
+
+// benchMode resolves the counting mode from the environment; unknown values
+// fail fast instead of silently measuring the wrong pipeline.
+func benchMode(b *testing.B) Mode {
+	switch v := os.Getenv(benchModeEnv); v {
+	case "", "class":
+		return ModeClass
+	case "reversal":
+		return ModeReversal
+	default:
+		b.Fatalf("%s: unknown mode %q (want class|reversal)", benchModeEnv, v)
+		return ModeClass
+	}
+}
+
 // sweepDefaults caps the 8×8 default sweep: a full descent from depth 32 is many
 // hours per point, so without BENCH_DEPTHS only these run until the first real
 // measurements fix a proper floor (plan 05).
@@ -64,7 +82,9 @@ var toursExpected = map[int]uint64{
 // interesting ones on big boards, so they run first. Metrics are published next
 // to ns/op and split by phase — per-phase wall time (genA/genB/cnt ms),
 // generation footprint (writes/pruned of gen A and gen B), final-pass totals
-// (classes/shapes/zeros) and memory (peakRSS_MB/op, totalAllocMB/op).
+// (classes/shapes/zeros; reversal counting: cacheHits/cacheMisses) and memory
+// (peakRSS_MB/op, totalAllocMB/op). BENCH_MODE selects the pipeline
+// (class|reversal, default class — plan 06 A/B).
 //
 // peakRSS is a process-wide maximum: run one board size per process
 // (`make bench-size N=…`), otherwise it reflects the most hungry subtest.
@@ -110,6 +130,7 @@ func sweepDepths(b *testing.B, size int) []int {
 func runDepths(b *testing.B, size int, depths []int) {
 	workers := runtime.NumCPU()
 	c := NewCounter(graph.New(size))
+	c.SetMode(benchMode(b)) // BENCH_MODE=class|reversal (default class)
 	if os.Getenv("SHAPE_FILTER") == "off" {
 		c.SetShapeFilter(pruner.L2None) // A/B measurement of the plan-02 filter
 	}
@@ -176,6 +197,9 @@ func reportBenchMetrics(b *testing.B, m *monitoring.FakeMonitor) {
 	b.ReportMetric(float64(counting.PrunedArticulation), "prunedDP_artic/op")
 	b.ReportMetric(float64(counting.PrunedForcedChain), "prunedDP_chain/op")
 	b.ReportMetric(float64(counting.FilteredShapes), "filtered/op")
+	// Reversal task-cache lookups of the counting phase (zero in class mode).
+	b.ReportMetric(float64(counting.CacheHits), "cacheHits/op")
+	b.ReportMetric(float64(counting.CacheMisses), "cacheMisses/op")
 }
 
 // ms renders a phase duration as milliseconds with microsecond precision.

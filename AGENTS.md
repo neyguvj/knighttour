@@ -111,7 +111,8 @@ make bench            # Benchmarks (counter/)
 
 - **main.go** – Entry point, CLI flags: `-size` (5–8), `-workers`, `-precompute-depth`
   (default per board size via `counter.DefaultPrecomputeDepth`; validated `[1, size²/2]`),
-  `-tail-memo` (counting tail memo threshold K, 0 = off)
+  `-tail-memo` (counting tail memo threshold K, 0 = off), `-mode` (`class|reversal`, default
+  `class`)
 - **graph/** – `Graph` struct with precomputed knight moves on an N×N board
   - Neighbors in fixed possibleMoves order (no special sorting)
   - Methods: `GetNeighbors()`, `GetDegree()`, `GetNeighborMask()`, `SholdSkip()` (color parity skip for odd boards)
@@ -120,22 +121,26 @@ make bench            # Benchmarks (counter/)
 - **path/** – `Path` value type (state + end); the single key of every accumulator
   (D4-canonical placements in gen A, shape classes in M)
 - **types/** – Shared `Result` struct (TotalPathsFound, CacheWrites, Pruned breakdown)
-- **searcher/** – DFS over bitmasks with dead-end pruning; no memo tables
+- **searcher/** – DFS over bitmasks with dead-end pruning; no memo tables of its own
   - Methods: `GenerateRoots()` (phase A prefix emission into a LocalSink),
     `ExtendToClasses()` (phase B complement-class emission into the M accumulator);
-    internal `dfs` full-descent oracle for tests (public CountPaths* were removed)
-- **counter/** – High-level counting orchestrator, single class-mode pipeline
+    reversal mode: `GenerateTasks()`/`ExtendTask()` (task-cache generation),
+    `CountPathsWithCacheReversal()` (count-DFS with early stop in the task cache);
+    no public counting entry points — correctness is pinned by the brute-force
+    and shallow phase-B oracles in searcher_test.go
+- **counter/** – High-level counting orchestrator, two modes behind `SetMode`
   - Methods: `ParallelCount()`, `ParallelCountWithDepth()` (gen A over start groups →
-    gen B chunk workers → final shape pass; `total = Σ h(C)·M(C)`)
+    gen B chunk workers → final pass; class: `total = Σ h(C)·M(C)`, reversal:
+    `total = Σ W(task)·f(task)` via task-cache); `ModeClass` default, `ModeReversal`
   - `DefaultPrecomputeDepth(size)` – per-board default split depth
 - **pruner/** – Pruning strategies:
   - `DeadEndPruner` – `ShouldPruneAfterVisit()` (hot O(deg) check)
-- **cache/** – Single shared structure: sharded additive weight table (128 shards,
-  hashed by State only — all ends of one shape class share a shard)
+- **cache/** – Two sharded weight tables (128 shards, hashed by State only):
   - `Accumulator` keyed by `path.Path` (`Add()`, `DrainShard(i)`, `Drain()`, `ItemsCount()`);
     writers use `Local()` → `LocalSink` (per-goroutine buffer, threshold `Flush`) to avoid
     lock churn. Reading is per-shard drain (no copying Snapshot — it doubled peak memory).
-    The old memo-style `Cache` (Get/Set/Each) was removed with legacy reversal
+  - `Cache` – reversal-mode task cache (`Set()`, concurrent `Get()`, lazy `NumShards()`/
+    `SnapshotShard(i)` dispatch); lives until the end of the count phase, never drained per shard.
 - **shapecount/** – DP h(shape,ends) per translation+D4 shape class, no memo table (class mode final pass)
   - Methods: `CountShape(shape, ends)` (shared memo across ends of one shape),
     `CountShapeWithTail(..., tail)` + `NewTail()`/`SetTailMemo(k, slots)` – optional

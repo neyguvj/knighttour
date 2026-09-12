@@ -40,7 +40,7 @@ func TestParallelCountWithDepth(t *testing.T) {
 	}
 }
 
-// Every run publishes shape stats: the class pipeline is the only mode.
+// Every class-mode run publishes shape stats (the reversal mode does not).
 func TestShapeStatsAlwaysPublished(t *testing.T) {
 	g := graph.New(5)
 	counter := NewCounter(g)
@@ -50,6 +50,65 @@ func TestShapeStatsAlwaysPublished(t *testing.T) {
 	classes, shapes, _ := fm.ShapeStats()
 	assert.Positive(t, classes, "run must accumulate shape classes")
 	assert.Positive(t, shapes, "run must publish final-pass shapes")
+}
+
+// Both counting modes must reproduce the tour-count invariant at every split
+// depth they cover (specs/counter.md): reversal shares the generation phases
+// and only replaces the final pass.
+func TestModesMatchReference(t *testing.T) {
+	tests := []struct {
+		name     string
+		depths   []int
+		size     int
+		expected uint64
+	}{
+		{name: "5x5 all depths", size: 5, expected: 1_728, depths: []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}},
+		// 6×6 sweeps are slow; sample shallow + the default-ish middle.
+		{name: "6x6 sampled depths", size: 6, expected: 6_637_920, depths: []int{1, 5, 8, 14}},
+	}
+	modes := []struct {
+		name string
+		mode Mode
+	}{
+		{name: "class", mode: ModeClass},
+		{name: "reversal", mode: ModeReversal},
+	}
+
+	for _, tt := range tests {
+		for _, m := range modes {
+			t.Run(tt.name+"/"+m.name, func(t *testing.T) {
+				g := graph.New(tt.size)
+				counter := NewCounter(g)
+				counter.SetMode(m.mode)
+
+				for _, depth := range tt.depths {
+					count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 4, depth)
+					assert.Equal(t, tt.expected, count, "mode=%s depth=%d", m.name, depth)
+				}
+			})
+		}
+	}
+}
+
+// Reversal publishes task-cache hits/misses into the counting phase and never
+// calls ReportShapeStats; class-mode tail memo stays silent too
+// (specs/counter.md, specs/monitoring.md).
+func TestReversalCountingPublishesHitsNotShapeStats(t *testing.T) {
+	g := graph.New(5)
+	counter := NewCounter(g)
+	counter.SetMode(ModeReversal)
+
+	fm := monitoring.NewFakeMonitor()
+	assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), fm, 8, 6))
+
+	counting := fm.Phase("counting")
+	assert.Positive(t, counting.CacheHits, "the stop level must hit the task cache")
+	assert.Zero(t, counting.TailLookups, "class-mode tail memo is ignored in reversal")
+
+	classes, shapes, zeros := fm.ShapeStats()
+	assert.Zero(t, classes, "reversal does not publish shape classes")
+	assert.Zero(t, shapes, "reversal does not publish final-pass shapes")
+	assert.Zero(t, zeros)
 }
 
 // The final-pass DP pruner must surface its statistics into the counting

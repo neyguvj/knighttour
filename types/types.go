@@ -6,9 +6,13 @@ import "knighttour/pruner"
 // to monitoring once the subtask completes. Prune counters are split by the
 // reason returned from ShouldPruneAfterVisit; Pruned is their sum.
 type Result struct {
-	TotalPathsFound int // number of full paths found in the subtree
+	TotalPathsFound int // reversal count-DFS only: completions of the subtask;
+	// class mode leaves it zero (counting publishes weighted paths via ReportPathsFound)
 
 	CacheWrites int // accumulator emissions (sink.Add, incl. merges into existing keys)
+
+	CacheHits   int // reversal mode only: task-cache lookups answered at the stop level
+	CacheMisses int // reversal mode only: task-cache lookups with no entry (h == 0)
 
 	Pruned          int // branches cut by ShouldPruneAfterVisit (sum of the breakdown below)
 	PrunedDeadEnd   int // local dead-end: isolated cell / lone unreachable cell
@@ -34,6 +38,8 @@ type Result struct {
 func (r *Result) Add(other *Result) {
 	r.TotalPathsFound += other.TotalPathsFound
 	r.CacheWrites += other.CacheWrites
+	r.CacheHits += other.CacheHits
+	r.CacheMisses += other.CacheMisses
 	r.Pruned += other.Pruned
 	r.PrunedDeadEnd += other.PrunedDeadEnd
 	r.PrunedNoCont += other.PrunedNoCont

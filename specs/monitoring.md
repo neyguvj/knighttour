@@ -4,8 +4,9 @@
 
 Отслеживание и отображение прогресса подсчёта **с разбивкой по фазам** (`gen A` → `gen B`
 → `counting`): время, ETA активной фазы, задачи, найденные пути, эмиссии в аккумуляторы,
-прунинг с разбивкой по видам, итоги форм. Монитор только агрегирует — счётчиков поиска
-внутри нет; статистика приходит от завершённых подзадач через `ReportSubtask`.
+попадания/промахи task-cache, прунинг с разбивкой по видам, итоги форм. Монитор только
+агрегирует — счётчиков поиска внутри нет; статистика приходит от завершённых подзадач через
+`ReportSubtask`.
 
 ## Публичный API
 
@@ -26,6 +27,7 @@ func NewFakeMonitor() *FakeMonitor       // verbose: false — только на
 
 // Снимки для тестов/бенчмарков (на общем ядре, доступны и у RealMonitor):
 type PhaseStats struct { Tasks, Completed, Subtasks, PathsFound, CacheWrites uint64;
+    CacheHits, CacheMisses uint64;
     Pruned uint64; PrunedDeadEnd, PrunedNoCont, PrunedDisconn, PrunedEndpoints uint64;
     PrunedArticulation, PrunedForcedChain uint64; TailLookups, TailHits uint64;
     FilteredShapes uint64; Duration time.Duration }
@@ -59,7 +61,8 @@ func (m *monitor) ShapeStats() (classes, shapes, zeros uint64)
 
 ETA — линейная оценка `elapsed_phase·(total−completed)/completed`; при `completed==0` или
 `total==0` → `ETA --`, при `completed>=total` → `ETA 0s`. Сегменты `Writes`/`Tail` условны
-(печатаются при ненулевых значениях).
+(печатаются при ненулевых значениях). Сегмент `Hits x/y` (попадания/промахи task-cache из
+`ReportSubtask`) печатается после `Writes`, когда хотя бы одно ненулевое.
 
 ## Инварианты и edge cases
 
@@ -74,8 +77,9 @@ ETA — линейная оценка `elapsed_phase·(total−completed)/comple
 ## Тесты
 
 `monitoring/monitor_test.go`: репорты без активной фазы no-op; агрегация по фазам;
-`ReportSubtask` раскладывает по видам; `estimateRemaining` таблично; формат живой/финальной
-строки (перехват stdout: `\x1b[2K\r`, мс, `ETA --`/`0s`, условность сегментов); **общность
+`ReportSubtask` раскладывает по видам (включая hits/misses); `estimateRemaining` таблично;
+формат живой/финальной строки (перехват stdout: `\x1b[2K\r`, мс, `ETA --`/`0s`, условность
+сегментов `Writes`/`Tail`/`Hits`); **общность
 кода** — один сценарий на Real и Fake даёт совпадающие снимки, stdout фейка пуст; повторный
 BeginPhase — новая фаза; конкурентные репорты под `-race`.
 

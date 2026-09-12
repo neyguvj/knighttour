@@ -85,6 +85,20 @@ func TestReportSubtaskSumsByReason(t *testing.T) {
 	assert.Equal(t, uint64(5), m.Phase("counting").FilteredShapes)
 }
 
+// Reversal task-cache lookups fold through ReportSubtask into the phase
+// snapshot (specs/monitoring.md).
+func TestReportSubtaskFoldsCacheHitsMisses(t *testing.T) {
+	m := NewMonitor()
+	m.BeginPhase("counting")
+
+	m.ReportSubtask(&types.Result{CacheHits: 7, CacheMisses: 2})
+	m.ReportSubtask(&types.Result{CacheHits: 1})
+
+	ph := m.Phase("counting")
+	assert.Equal(t, uint64(8), ph.CacheHits)
+	assert.Equal(t, uint64(2), ph.CacheMisses)
+}
+
 func TestConcurrentReportsRace(t *testing.T) {
 	m := NewMonitor()
 	m.BeginPhase("counting")
@@ -261,7 +275,7 @@ func TestMonitorsShareCountingLogic(t *testing.T) {
 			m.ReportTaskCompleted()
 		}
 		m.ReportPathsFound(77)
-		m.ReportSubtask(&types.Result{PrunedDisconn: 3, PrunedEndpoints: 1})
+		m.ReportSubtask(&types.Result{PrunedDisconn: 3, PrunedEndpoints: 1, CacheHits: 9, CacheMisses: 2})
 		m.ReportShapeStats(9, 6, 2)
 	}
 
@@ -419,10 +433,25 @@ func TestLiveLineConditionalSegments(t *testing.T) {
 
 	out := captureStdout(t, m.report)
 	assert.NotContains(t, out, "Writes", "no cache writes yet -> segment hidden")
+	assert.NotContains(t, out, "Hits", "no task-cache lookups yet -> segment hidden")
 
 	m.ReportSubtask(&types.Result{CacheWrites: 42})
 	out = captureStdout(t, m.report)
 	assert.Contains(t, out, "| Writes 42", "generation-style phase shows writes")
+
+	// Hits appears once lookups happened (reversal counting), printed after Writes.
+	m.ReportSubtask(&types.Result{CacheHits: 5, CacheMisses: 2})
+	out = captureStdout(t, m.report)
+	assert.Contains(t, out, "| Hits 5/2", "hits/misses segment appears")
+	assert.Less(t, strings.Index(out, "Writes"), strings.Index(out, "Hits"), "Hits follows Writes")
+
+	// A phase with misses only still prints the segment (at least one non-zero).
+	m2 := NewMonitor()
+	m2.startTime = time.Now()
+	m2.BeginPhase("counting")
+	m2.ReportSubtask(&types.Result{CacheMisses: 3})
+	out = captureStdout(t, m2.report)
+	assert.Contains(t, out, "| Hits 0/3", "misses alone make the segment appear")
 }
 
 func TestFinalReportFormat(t *testing.T) {
@@ -438,7 +467,7 @@ func TestFinalReportFormat(t *testing.T) {
 	m.BeginPhase("counting")
 	m.AddTasks(1)
 	m.ReportPathsFound(100)
-	m.ReportSubtask(&types.Result{PrunedDisconn: 3})
+	m.ReportSubtask(&types.Result{PrunedDisconn: 3, CacheHits: 5, CacheMisses: 2})
 	m.ReportTaskCompleted()
 	m.ReportShapeStats(90, 12, 7)
 
@@ -457,6 +486,14 @@ func TestFinalReportFormat(t *testing.T) {
 	}
 	require.NotEmpty(t, countingLine)
 	assert.NotContains(t, countingLine, "writes", "no zero writes segment in counting phase")
+	assert.Contains(t, countingLine, "hits 5/2", "task-cache hits/misses appear on the phase line")
+	genLine := ""
+	for line := range strings.SplitSeq(out, "\n") {
+		if strings.HasPrefix(line, "Phase generation ") {
+			genLine = line
+		}
+	}
+	assert.NotContains(t, genLine, "hits", "phases without lookups print no hits segment")
 	assert.Contains(t, out, "Shapes: classes=90 shapes=12 zeros=7")
 	assert.Contains(t, out, "Total paths: 100")
 }
