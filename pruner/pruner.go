@@ -221,6 +221,10 @@ func (p *Pruner) ShouldPruneState(cur int, todo state.State) (bool, Reason) {
 //
 // All scratch arrays are fixed-size locals (no heap allocation); vertex ids
 // index them directly, DFS order fits int8 (|H| ≤ 64).
+//
+// add calls to the inner loop.
+//
+//nolint:cyclop // hot path: evaluated per DP state (ADR-007); splitting the DFS would
 func (p *Pruner) articulationCut(cur int, todo state.State) bool {
 	h := todo | state.Bit(cur)
 
@@ -330,6 +334,10 @@ func (p *Pruner) articulationCut(cur int, todo state.State) bool {
 //
 // Prune when forced degrees exceed the path degree (>2 in todo, >1 at cur) or
 // the forced edges contain a cycle (union-find: |E| ≥ |V| in a component).
+//
+// would duplicate work on every call.
+//
+//nolint:cyclop // hot path: evaluated per DP state (ADR-007); splitting the traversal
 func (p *Pruner) forcedChainCut(cur int, todo state.State) bool {
 	h := todo | state.Bit(cur)
 

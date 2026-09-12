@@ -275,6 +275,10 @@ func groupShards(ctx context.Context, monitor monitoring.Monitor, workers int, a
 // from the shared stack of grouped shards (biggest last, i.e. claimed first).
 // An empty stack means everything was claimed — workers exit without waiting,
 // because the stack never grows during this stage.
+//
+// and atomics; extracting helpers would only thread them through.
+//
+//nolint:cyclop // hot path: per-task body of the counting workers shares scratch buffers
 func processShapes(ctx context.Context, monitor monitoring.Monitor, sc *shapecount.Counter, workers int, jobs []*shardJob, dump func(shape state.State, ends []int, allZero bool)) (totalPaths uint64, zeroShapes int64) {
 	var (
 		mu    sync.Mutex

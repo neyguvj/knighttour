@@ -15,7 +15,10 @@ linters:
     - nolintlint
     - usestdlibvars
     - misspell
+    - cyclop
   settings:
+    cyclop:
+      max-complexity: 12
     gocritic:
       enabled-tags:
         - performance
@@ -30,6 +33,7 @@ linters:
       - path: .*_test\.go
         linters:
           - gocritic
+          - cyclop
 
 formatters:
   enable:

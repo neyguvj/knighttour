@@ -70,6 +70,19 @@ make bench            # Benchmarks (counter/)
 ## Code style
 - Import groups: stdlib then third-party, separated by blank line
 
+## Code quality
+- Documentation: every function and struct (exported or not) carries a doc comment starting with
+  its name and stating the contract/invariants — never a restatement of the signature. Non-obvious
+  fields of shared structs get trailing comments. Comments explain *why*, code explains *what*.
+- No duplication: extract repeated logic into a named function/method; if two types are structurally
+  identical, unify them or alias one. Test scaffolding is table-driven, not copy-pasted.
+- Short, single-purpose functions: guard clauses / early returns over deep nesting; no nested
+  anonymous functions (extract a named func or method) and no long inline pipelines. Cyclomatic
+  complexity budget is enforced by `cyclop` (`make lint`) — split the function instead of raising
+  the threshold, unless it is a measured hot path (then note the reason in the report).
+- Dead code is deleted in the same change that orphans it: unused functions/types/fields/flags,
+  commented-out code, and "for the future" API that no spec requires.
+
 ## Concurency and safety
 - Goroutines: Never use fire-and-forget goroutines. Always orchestrate via `sync.WaitGroup` or `errgroup.ErrGroup`.
 - Channels: Channel size must be exactly 1 or 0 (unbuffered) unless a clear performance justification is provided.

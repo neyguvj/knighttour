@@ -323,6 +323,10 @@ func (c *Counter) CountShape(shape state.State, ends []int, res *types.Result) [
 // (plan 03 variant B): a non-nil tail lets small subproblems (popcount(todo)
 // ≤ configured k) computed for one shape answer the same key in later shapes
 // of the same worker. A nil tail makes this bit-identical to CountShape.
+//
+// inline to avoid extra calls in the memoized recursion.
+//
+//nolint:cyclop // hot path: the DP core, evaluated per shape class; branching is kept
 func (c *Counter) CountShapeWithTail(shape state.State, ends []int, res *types.Result, tail *TailMemo) []uint64 {
 	out := make([]uint64, len(ends))
 
