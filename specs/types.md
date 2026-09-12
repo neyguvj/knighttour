@@ -1,72 +1,60 @@
-# Компонент Types: Типы данных для обмена
+# types: общий носитель статистики подзадачи
 
-## Назначение
+## Ответственность
 
-Общие типы данных, используемые в разных компонентах системы.
+`Result` — широкий блок счётчиков одной подзадачи, собираемый локально у вызывающего
+(searcher/shapecount) по ходу горячего DFS/DP и один раз репортимый контуром в
+мониторинг по завершении. Единый формат пер-подзадачной статистики.
 
-## Result
-
-Полная статистика одной подзадачи (или агрегат), собираемая searcher'ом по ходу
-горячего DFS и репортимая контуром в мониторинг по завершении подзадачи.
+## Публичный API
 
 ```go
 type Result struct {
-    TotalPathsFound int // количество найденных путей в поддереве (сейчас никто не заполняет)
+    TotalPathsFound int   // ЗАРЕЗЕРВИРОВАН: production не заполняет
+                          // (counting публикует взвешенные пути через ReportPathsFound)
 
-    // Прунинг по видам (значения pruner.Reason); Pruned == сумма по видам
-    // (пересчитывается методом Finalize на выходе публичных методов searcher)
-    Pruned           int
-    PrunedDeadEnd    int // локальный dead-end / изолированная клетка
-    PrunedNoCont     int // у last нет непосещённых соседей (нет продолжения)
-    PrunedDisconn    int // G[unvisited] несвязен
-    PrunedEndpoints  int // эвристика концов (degree-1 вершины)
-    PrunedArticulation int // L2: сочленения графа состояния (только shapecount DP)
-    PrunedForcedChain  int // L2: противоречие обязательных цепочек (только shapecount DP)
+    CacheWrites int       // эмиссии в аккумуляторы (sink.Add, включая слияние в ключ)
 
-    CacheWrites int // число эмиссий в аккумуляторы (sink.Add, включая слияние в существующий ключ)
+    // Прунинг по видам (значения pruner.Reason); Pruned == сумма видов (Finalize).
+    Pruned            int
+    PrunedDeadEnd     int
+    PrunedNoCont      int
+    PrunedDisconn     int
+    PrunedEndpoints   int
+    PrunedArticulation int // L2, только shapecount DP
+    PrunedForcedChain  int // L2, только shapecount DP
 
-    DPStates int // заполняет shapecount: состояний DP, промахнувшихся по memo
-                 // (метрика «узлов DP» для этапа 0 плана 04; searcher не ведёт)
-
-    TailLookups int // shapecount only: обращений к persistent tail-мемо (план 03)
-    TailHits    int // shapecount only: попаданий в tail-мемо (hit-rate = hits/lookups)
-
-    FilteredShapes int // shapecount only: форм, убитых shape-фильтром до DP (план 02);
-                       // отдельно от pruned* — исторические метрики прунинга не смешиваются
+    DPStates      int // shapecount: вычисленные состояния DP (промахи memo)
+    TailLookups   int // shapecount: обращения к persistent tail-мемо
+    TailHits      int // shapecount: попадания tail-мемо
+    FilteredShapes int // shapecount: форм, убитых pre-DP фильтром (отдельно от pruned*)
 }
 
-func (r *Result) Add(other *Result)
-// Суммирует поля result и other покомпонентно
-
-func (r *Result) CountPrune(reason pruner.Reason)
-// Горячий путь: ровно один инкремент поля вида по причине из
-// ShouldPruneAfterVisit; NoReason игнорируется. Индексную сводку Pruned не
-// трогает — для этого есть Finalize
-
-func (r *Result) Finalize()
-// Pruned = сумма счётчиков по видам; вызывается один раз перед возвратом Result
+func (r *Result) Add(other *Result)         // покомпонентное сложение (pointer — wide block)
+func (r *Result) CountPrune(reason pruner.Reason) // горячий путь: ровно один инкремент вида
+func (r *Result) Finalize()                 // Pruned = Σ видов; один раз перед возвратом
 ```
 
-Историческая справка: поле `CachedPaths` называло счётчик `Set()` «закэшированными
-путями», хотя это именно **записи в кэш** (одно и то же состояние может быть
-записано многократно из разных префиксов) — переименовано в `CacheWrites`.
-Поля `CacheHits/CacheMisses` удалены вместе с legacy prefix-cache reversal.
+## Инварианты
 
-Замечание об учёте статистики: счётчики ведутся **локально у вызывающего** —
-локальный аккумулятор `*Result` прокидывается через DFS без атомиков и
-contention; конкурентные воркеры не делят общих счётчиков.
+- Счётчики ведёт **локальный** `*Result` одного воркера — без атомиков и contention;
+  конкурентные воркеры не делят общих счётчиков.
+- `CountPrune` не трогает агрегат `Pruned` (лишний store на каждом prune); сводку
+  считает `Finalize` на выходе публичных методов.
+- `NoReason` в `CountPrune` игнорируется (означает «не отсечено»).
+- `FilteredShapes` держится отдельно от `Pruned*`, чтобы исторические метрики прунинга
+  оставались сопоставимы (ADR-008).
 
-## Использование
+## Ограничения и edge cases
 
-```go
-// В Searcher (фазы генерации):
-result := searcher.GenerateRoots(ctx, sink, start, orbitSize, depth)
-fmt.Printf("Cache writes %d, pruned %d\n", result.CacheWrites, result.Pruned)
+- Все поля экспортированы; логика минимальна (сложение/инкремент).
+- `TotalPathsFound` — зарезервированное поле, в текущем пайплайне не заполняется.
 
-result2 := searcher.ExtendToClasses(ctx, sink, p, weight, depth)
-```
+## Тесты
 
-## Ограничения
+`types/types_test.go`: `TestResultAdd` (покомпонентно), `TestResultCountPrune`
+(вид → поле, `NoReason` no-op), `Finalize` (агрегат = сумма видов).
 
-- Типы простые и не имеют сложной логики
-- All fields are public (exported) для удобства доступа
+## Связанные
+
+`specs/pruner.md` (`Reason`), `specs/monitoring.md` (`ReportSubtask`).

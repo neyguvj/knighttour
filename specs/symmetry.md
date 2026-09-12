@@ -1,254 +1,87 @@
-# Компонент Symmetry: Работа с симметриями доски
+# symmetry: симметрии доски (D4) и канонизация
 
-## Назначение
+## Ответственность
 
-Использование геометрических симметрий квадратной доски для сокращения объема поиска. Квадратная доска обладает группой симметрий D4 (8 элементов), что позволяет уменьшить количество стартовых позиций, из которых нужно искать маршруты.
+Группа симметрий квадрата D4 для сокращения поиска: канонические стартовые группы с
+размерами орбит, D4-канонизация пар `(state, end)` и нормализация классов форм
+(D4 ⋉ трансляции). Горячий путь работает через предвычисленные LUT, без замыканий и
+деления.
 
-## Группа D4
+## Группа D4 (8 преобразований)
 
-Группа симметрий квадрата состоит из 8 преобразований:
+| № | Название | Формула (x,y) |
+|---|----------|---------------|
+| 0 | Identity | (x, y) |
+| 1 | Rotate 90° | (y, size-1-x) |
+| 2 | Rotate 180° | (size-1-x, size-1-y) |
+| 3 | Rotate 270° | (size-1-y, x) |
+| 4 | Flip horizontal | (x, size-1-y) |
+| 5 | Flip vertical | (size-1-x, y) |
+| 6 | Flip diag1 | (y, x) |
+| 7 | Flip diag2 | (size-1-y, size-1-x) |
 
-| № | Название | Описание | Формула для (x,y) |
-|---|----------|----------|------------------|
-| 0 | Identity | Без изменений | (x, y) |
-| 1 | Rotate 90° | Поворот на 90° по часовой | (y, size-1-x) |
-| 2 | Rotate 180° | Поворот на 180° | (size-1-x, size-1-y) |
-| 3 | Rotate 270° | Поворот на 270° | (size-1-y, x) |
-| 4 | Flip horizontal | Отражение по горизонтали | (x, size-1-y) |
-| 5 | Flip vertical | Отражение по вертикали | (size-1-x, y) |
-| 6 | Flip diag1 | Отражение по главной диагонали | (y, x) |
-| 7 | Flip diag2 | Отражение по побочной диагонали | (size-1-y, size-1-x) |
-
-## Структура данных
-
-```go
-type Transform func(x, y, size int) (int, int) // сохранён для API/GetSymmetries
-
-type Symmetry struct {
-    canonical     []int        // каноническая позиция для каждой клетки (слайсы первыми — pointer-префикс, fieldalignment)
-    orbitSize     []int        // размер орбиты для каждой клетки
-    groups        []CanonicalGroup // предвычисленные канонические группы
-    size          int
-    perms         [8][64]uint8 // LUT: perms[t][pos] — образ клетки при t-м преобразовании (строится один раз из замыканий)
-}
-```
-
-**Оптимизация:** горячий путь (`Canonicalize`, `transformState`) не использует
-замыкания `Transform` и деление/остаток — только подстановку в LUT. `transformState`
-перебирает установленные биты маски (O(посещённых)), а не все клетки доски. Замыкания
-вызываются ровно один раз при построении `perms`.
-
-LUT `bestIdx` для пар `(start, end)` удалена: ключ кэша больше не содержит start,
-канонизация пары `(state, end)` выполняется перебором всех 8 преобразований.
-
-## Основные методы
-
-### 1. Создание симметрий
+## Публичный API
 
 ```go
-func NewSymmetry(size int) *Symmetry
-// Создает симметрии и предварительно вычисляет канонические позиции для всех клеток
-// Выполняет:
-// - Вычисление канонической позиции и трансформации для каждой клетки
-// - Расчет размера орбиты для каждой клетки
-```
+const NumTransforms = 8
 
-### 2. Доступ к каноническим позициям
-
-```go
-func (s *Symmetry) GetCanonicalPosition(pos int) int
-// Возвращает каноническую позицию из линейного индекса
-
-func (s *Symmetry) IsCanonicalPosition(pos int) bool
-// Проверяет, является ли позиция канонической
-```
-
-### 3. Размер орбиты
-
-```go
-func (s *Symmetry) GetOrbitSize(pos int) int
-// Возвращает количество симметричных позиций в классе эквивалентности
-```
-
-### 4. Канонические группы
-
-```go
-type CanonicalGroup struct {
-    Positions []int   // все позиции в группе (первой — pointer-префикс, fieldalignment)
-    Canonical int     // каноническая позиция
-    OrbitSize int     // размер орбиты
-}
-
-func (s *Symmetry) GetCanonicalGroups() []CanonicalGroup
-// Возвращает все группы канонических позиций (предвычислены при создании)
-
-func (s *Symmetry) GetCanonicalGroupByPosition(pos int) CanonicalGroup
-// Возвращает группу, содержащую данную позицию
-```
-
-### 5. Канонизация состояния поиска
-
-```go
-func (s *Symmetry) Canonicalize(st state.State, end int) path.Path
-// Возвращает канонического представителя орбиты D4 для пары (state, end).
-// Алгоритм: среди всех 8 преобразований выбирается лексикографический минимум
-// кортежа (t(state), t(end)). start в канонизации не участвует: число
-// продолжений маршрута зависит только от посещённой маски и текущей клетки,
-// поэтому симметричные пары эквивалентны полностью.
-
-func (s *Symmetry) CanonicalizeWithOrbitSize(st state.State, end int) (path.Path, int)
-// То же + размер орбиты пары — число различных кортежей (t(state), t(end)).
-// Нужен досрочному завершению searchera: h(U,u) = W(canon)/orbitSize.
-
-func (s *Symmetry) TransformStates(st state.State) [NumTransforms]state.State
-// Пакетный вариант: все 8 образов маски одним вызовом.
-
-func (s *Symmetry) CanonicalFromStates(states [NumTransforms]state.State, end int) (path.Path, int)
-// Канонизация пары по уже готовым образам маски (экономит повторные
-// transformState при групповой канонизации (mask, u1..uk) с общим mask).
-// Результат идентичен CanonicalizeWithOrbitSize.
-```
-
-Каноническая форма корректна как инвариант орбиты: для любой симметрии g
-выполняется `Canonicalize(g(st), g(end)) == Canonicalize(st, end)`, т.к. умножение
-на g — биекция множества 8 преобразований на себе (D4 — группа).
-
-### 5а. Канонизация класса формы (D4 ⋉ трансляции)
-
-Значения, зависящие только от индуцированного подграфа маски с отмеченным концом
-(h, W), инвариантны и к параллельным переносам. Нормализация — bbox к (0,0) +
-лексминимум пар `(shape, end_rel)` по 8 ориентациям (tie-break по end). Математика
-перенесена из удалённого oracle; обоснование — shapecount.md.
-
-```go
-// Амортизированный контекст: одна PrepareShape на маску, KeyFromPrepared на каждый конец.
-type ShapeCtx struct { ... } // 8 нормализованных масок + смещения bbox по ориентациям (стек, без аллокаций)
-
-func (s *Symmetry) PrepareShape(st state.State, sc *ShapeCtx)
-func (s *Symmetry) KeyFromPrepared(sc *ShapeCtx, end int) path.Path
-func (s *Symmetry) CanonicalizeShape(st state.State, end int) path.Path // обёртка Prepare+Key
-```
-
-Ключ класса — `path.Path` (пара «нормализованная маска, конец в нормализованных
-координатах»): отдельный тип `ShapeKey` удалён, он был структурным дубликатом.
-
-Размер bbox ≤ N×N ⇒ нормализованная маска помещается в uint64 при N ≤ 8.
-
-## Использование в Counter
-
-```go
-groups := symmetry.GetCanonicalGroups()
-for _, group := range groups {
-    // Группа канонических позиций с размером орбиты group.OrbitSize
-
-    sink := intermediate.Local()
-    result := searcher.GenerateRoots(ctx, sink, group.Canonical, group.OrbitSize, depth)
-    sink.Flush()
-    // Аккумулятор содержит префиксы с агрегированным весом орбит
-}
-```
-
-## Использование в генерации
-
-```go
-// Фаза A канонизирует префиксы перед эмиссией в аккумулятор:
-canonical := s.sym.Canonicalize(st, end) // path.Path — ключ промежуточного аккумулятора
-sink.Add(canonical, orbitSize)
-```
-
-## Примеры размеров орбит
-
-### Доска 5×5:
-- Угловые клетки (0, 4, 20, 24): орбита = 4
-- Реберные неугловые: орбита = 4  
-- Центральная (не на диагонали): орбита = 8
-- Центральная клетка (12): орбита = 1
-
-### Доска 8×8:
-- Угловые клетки: орбита = 4
-- Клетки в центре ребер (0,3), (0,4), (7,3), (7,4): орбита = 4
-- Центральные не на диагонали: орбита = 8
-- На главной/побочной диагонали (кроме центра): орбита = 4
-
-## Эффективность по типу позиции
-
-| Тип позиции | Примеры | Размер орбиты | Уменьшение |
-|-------------|---------|---------------|------------|
-| Центральная (не на диагонали) | (2,3), (3,2) на 8×8 | 8 | в 8 раз |
-| На главной/побочной диагонали | (2,2), (2,5) на 8×8 | 4 | в 4 раза |
-| Центр ребра | (0,3), (3,7) на 8×8 | 4 | в 4 раза |
-| Угловая | (0,0), (0,7), (7,0), (7,7) | 4 | в 4 раза |
-| Центр доски нечетного размера | (2,2) на 5×5 | 1 | в 1 раз |
-
-## Трансформации
-
-```go
 type Transform func(x, y, size int) (int, int)
+func GetSymmetries(size int) []Transform      // 8 преобразований (только при построении LUT)
 
-func GetSymmetries(size int) []Transform
-// Возвращает массив из 8 преобразований для доски заданного размера
+type CanonicalGroup struct {
+    Positions []int
+    Canonical int
+    OrbitSize int
+}
+
+func NewSymmetry(size int) *Symmetry
+
+// позиции / орбиты
+func (s *Symmetry) GetCanonicalPosition(pos int) int
+func (s *Symmetry) IsCanonicalPosition(pos int) bool
+func (s *Symmetry) GetOrbitSize(pos int) int
+func (s *Symmetry) GetCanonicalGroups() []CanonicalGroup
+func (s *Symmetry) GetCanonicalGroupByPosition(pos int) CanonicalGroup
+
+// D4-канонизация пары (state, end) -> path.Path
+func (s *Symmetry) Canonicalize(st state.State, end int) path.Path
+func (s *Symmetry) CanonicalizeWithOrbitSize(st state.State, end int) (path.Path, int)
+func (s *Symmetry) TransformStates(st state.State) [NumTransforms]state.State
+func (s *Symmetry) CanonicalFromStates(states [NumTransforms]state.State, end int) (path.Path, int)
+
+// класс формы: D4 ⋉ трансляции (амортизированно на все концы маски)
+type ShapeCtx struct{ ... }                                        // стек, без аллокаций
+func (s *Symmetry) PrepareShape(st state.State, sc *ShapeCtx)      // одна нормализация маски
+func (s *Symmetry) KeyFromPrepared(sc *ShapeCtx, end int) path.Path // ключ на каждый конец
+func (s *Symmetry) CanonicalizeShape(st state.State, end int) path.Path // Prepare+Key обёртка
 ```
 
-**Примеры:**
-- Identity: `(x, y)` → без изменений
-- Rotate 90°: `(y, size-1-x)`
-- Flip horizontal: `(x, size-1-y)`
-- Flip diag1: `(y, x)`
+## Инварианты
+
+- `Canonicalize` — инвариант орбиты: `Canonicalize(g(st),g(end)) == Canonicalize(st,end)`
+  для любой `g ∈ D4` (умножение на g — биекция группы). Лексминимум кортежа `(t(state),t(end))`.
+- `start` в канонизации не участвует: число продолжений зависит только от маски и конца
+  (ADR-005).
+- Нормализация формы: bbox к (0,0) + лексминимум пар `(shape, end_rel)` по 8 ориентациям,
+  tie-break по `end`. `PrepareShape` — один раз на маску, `KeyFromPrepared` — на конец
+  (амортизация нормализации по степеням конца).
+- Размер bbox ≤ N×N ⇒ нормализованная маска помещается в `uint64` при N ≤ 8.
+- Горячий путь (`Canonicalize`, transformState) использует только подстановку в LUT
+  `perms`; замыкания `Transform` вызываются ровно один раз при построении LUT.
+
+## Ограничения и edge cases
+
+- Центр нечётной доски: орбита = 1 (симметричен себе).
+- `TransformStates`/`CanonicalFromStates`/`CanonicalizeWithOrbitSize` — пакетный путь для
+  групповой канонизации `(mask, u₁..uₖ)` с общей маской; результат идентичен поштучному.
 
 ## Тесты
 
-```go
-func TestSymmetryNew(t *testing.T) {
-    sym := symmetry.NewSymmetry(5)
-    
-    require.Equal(t, 8, len(sym.GetCanonicalGroups()))
-}
+`symmetry/symmetry_test.go`: инволютивность преобразований, GetCanonicalPosition/OrbitSize
+(углы/рёбра/центр), идемпотентность и D4-инвариант `Canonicalize`, инвариант нормализации
+формы (одинаковый ключ для всех D4/трансляций), перебор форм размера ≤ 4 против орбит
+группы, переиспользование `ShapeCtx`.
 
-func TestSymmetryGetCanonicalPosition(t *testing.T) {
-    sym := symmetry.NewSymmetry(5)
-    
-    // Все угловые позиции должны нормализоваться в одну каноническую
-    canonical0 := sym.GetCanonicalPosition(0)
-    canonical4 := sym.GetCanonicalPosition(4)
-    
-    require.Equal(t, canonical0, canonical4)
-}
+## Связанные
 
-func TestSymmetryGetOrbitSize(t *testing.T) {
-    sym := symmetry.NewSymmetry(8)
-    
-    // Угловая позиция
-    orbit0 := sym.GetOrbitSize(0)
-    require.Equal(t, 4, orbit0)
-    
-    // Центральная (не на диагонали)
-    orbit21 := sym.GetOrbitSize(21)  // (2,5)
-    require.Equal(t, 8, orbit21)
-}
-
-func TestSymmetryCanonicalize(t *testing.T) {
-    sym := symmetry.NewSymmetry(5)
-
-    st := state.State(0).Visit(6)
-    canonical := sym.Canonicalize(st, 6)
-
-    // Канонизация идемпотентна
-    require.Equal(t, canonical, sym.Canonicalize(canonical.State(), canonical.End()))
-
-    // Симметричные пары дают одного представителя
-    mirrored := sym.Canonicalize(applyFlipDiag(st), mirrorPos(6))
-    require.Equal(t, canonical, mirrored)
-}
-```
-
-## Ограничения и особенности
-
-- Для досок нечетного размера центральная клетка симметрична самой себе (orbitSize=1)
-- При использовании кэша нужно учитывать, что состояния из симметричных позиций объединяются
-- `Canonicalize` перебирает все 8 преобразований (до 8× `transformState` на вызов);
-  при необходимости ускоряется побайтовой LUT-перестановкой бит `[8][8][256]uint64`
-- Предварительное вычисление канонических позиций занимает O(N²) времени и памяти
-
-## Заключение
-
-Symmetry — компонент для работы с геометрическими свойствами доски. Канонизация пар `(state, end)` через `sym.Canonicalize` позволяет объединять симметричные состояния в кэше (в том числе префиксы из разных стартовых орбит) и уменьшать число подзадач.
+ADR-005; `specs/shapecount.md` (зачем инвариантность к трансляциям), `specs/path.md`.

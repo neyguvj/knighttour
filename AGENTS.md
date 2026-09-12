@@ -11,6 +11,28 @@
   (it runs: go fmt → go vet → go test -race → auto-fix modern idioms → golangci-lint).
   Do not report completion if it fails. Individual targets: `make fmt vet test lint fix bench`.
 
+## Spec structure (one fact = one place)
+
+- `specs/<pkg>.md` — **current reference implementation only**: responsibility, public API +
+  contracts, invariants, edge cases, test requirements. NO history, NO benchmark tables, NO
+  code/examples from other modules, NO design rationale.
+- `specs/decisions/NNN-*.md` (ADRs) — why a decision was made; **measurements live here forever**
+  (each change brings its own before/after numbers). Module specs link `(ADR-0NN)`.
+- `specs/plans/NN-*.md` — not-yet-canonical optimization ideas (hypothesis → design → steps →
+  success metrics+threshold → risks → specs touched). On acceptance → spec + ADR.
+- `specs/benchmarks.md` — benchmark methodology. `docs/requirements.md` — task spec & reference numbers.
+- Authoring guides are skills: `spec-writing`, `plan-writing` (loaded when editing `specs/`).
+
+## Automation pipeline (escalation ladder)
+
+- `/quick` – tiny code-only fix, no spec change.
+- `/task`  – lightweight spec-first in one context (specs updated before code).
+- `/feature` – full pipeline: interview (skills) → specs/plan updated → **coder ⇄ reviewer loop**
+  until `VERDICT: APPROVED` (max 5 iters, sessions resumed by task_id) → `benchmarker` writes ADR
+  measurements for hot-path changes. Subagents: `coder` (implements to green `make check`),
+  `reviewer` (read-only, severity BLOCKER/MAJOR/MINOR + `SPEC_OK`), `benchmarker`
+  (WIN/REGRESSION/NOISE, records numbers in ADR). Restart opencode after editing agent/skill files.
+
 ## Quick Start
 
 ```bash
