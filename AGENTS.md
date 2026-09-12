@@ -21,7 +21,16 @@
 - `specs/plans/NN-*.md` — not-yet-canonical optimization ideas (hypothesis → design → steps →
   success metrics+threshold → risks → specs touched). On acceptance → spec + ADR.
 - `specs/benchmarks.md` — benchmark methodology. `docs/requirements.md` — task spec & reference numbers.
-- Authoring guides are skills: `spec-writing`, `plan-writing` (loaded when editing `specs/`).
+- Authoring guides are skills: `spec-writing`, `plan-writing` (loaded when editing `specs/`),
+  `readme-writing` (loaded when editing `README.md`).
+
+## README (showcase)
+
+README = current state + final conclusions, a narrative article with tables from the single
+benchmark. Update it in the same change **only** when a trigger fires: CLI flags/defaults changed,
+pipeline structure changed, or a benchmarker verdict moves defaults/optimum/conclusions. Minor
+optimizations and their before/after numbers live in ADRs — the showcase stays untouched.
+Rules, table procedure (`make bench-table`) and freshness stamp: skill `readme-writing`.
 
 ## Automation pipeline (escalation ladder)
 
