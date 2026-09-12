@@ -33,6 +33,8 @@ make bench            # Benchmarks (counter/)
   2. create it if it does not exist
   3. update specs before code modification
   4. Use updated specs to make changes and tests for new code
+  5. optimization proposals live in `specs/plans/` — one numbered file per idea
+     (hypothesis → design → steps → success metrics → risks → specs touched)
 - Post-Change Verification: After every code modification, you MUST run `make check`.
   If any optimization or hot-path change is made, ALSO run `make bench` and attach
   before/after numbers — never claim a performance win without measurements.
@@ -64,27 +66,41 @@ make bench            # Benchmarks (counter/)
 ## Project Structure
 
 - **main.go** – Entry point, CLI flags: `-size` (5–8), `-workers`, `-precompute-depth`
+  (default per board size via `counter.DefaultPrecomputeDepth`; validated `[1, size²/2]`),
+  `-tail-memo` (counting tail memo threshold K, 0 = off)
 - **graph/** – `Graph` struct with precomputed knight moves on an N×N board
   - Neighbors in fixed possibleMoves order (no special sorting)
   - Methods: `GetNeighbors()`, `GetDegree()`, `GetNeighborMask()`, `SholdSkip()` (color parity skip for odd boards)
 - **state/** – `State` type (uint64 bitboard) tracking visited positions
   - Bit manipulation operations: Visit, Unvisit, IsVisited, CountBits, Intersect, Union, Invert, AllVisited
-- **path/** – `Path` value type (state + start + end) used as cache key
-- **types/** – Shared `Result` struct (TotalPathsFound, CacheWrites, Pruned)
-- **searcher/** – DFS path counter over bitmasks with dead-end pruning
-  - Methods: `CountPaths()`, `CountPathsDFS()`, `GenerateSubtasks()` (prefix generation into cache)
-- **counter/** – High-level counting orchestrator with symmetry reduction
-  - Methods: `ParallelCount()`, `ParallelCountWithDepth()` (multi-worker), `CountFromPosition()`
-  - Uses canonical positions to avoid duplicate computation
+- **path/** – `Path` value type (state + end); the single key of every accumulator
+  (D4-canonical placements in gen A, shape classes in M)
+- **types/** – Shared `Result` struct (TotalPathsFound, CacheWrites, Pruned breakdown)
+- **searcher/** – DFS over bitmasks with dead-end pruning; no memo tables
+  - Methods: `GenerateRoots()` (phase A prefix emission into a LocalSink),
+    `ExtendToClasses()` (phase B complement-class emission into the M accumulator);
+    internal `dfs` full-descent oracle for tests (public CountPaths* were removed)
+- **counter/** – High-level counting orchestrator, single class-mode pipeline
+  - Methods: `ParallelCount()`, `ParallelCountWithDepth()` (gen A over start groups →
+    gen B chunk workers → final shape pass; `total = Σ h(C)·M(C)`)
+  - `DefaultPrecomputeDepth(size)` – per-board default split depth
 - **pruner/** – Pruning strategies:
   - `DeadEndPruner` – `ShouldPruneAfterVisit()` (hot O(deg) check)
-- **cache/** – Thread-safe memoization with sharded lock implementation (64 shards)
-  - Methods: `Get()`, `Set()`, `Clear()`, `ItemsCount()`, `Each()` for caching subtree counts
-- **oracle/** – Memoized h(mask,end) keyed by shape class under D4 + translations (16 shards)
-  - Methods: `Get()`, `Prepare()`/`GetPrepared()` (amortized normalization), `Stats()`
+- **cache/** – Single shared structure: sharded additive weight table (128 shards,
+  hashed by State only — all ends of one shape class share a shard)
+  - `Accumulator` keyed by `path.Path` (`Add()`, `DrainShard(i)`, `Drain()`, `ItemsCount()`);
+    writers use `Local()` → `LocalSink` (per-goroutine buffer, threshold `Flush`) to avoid
+    lock churn. Reading is per-shard drain (no copying Snapshot — it doubled peak memory).
+    The old memo-style `Cache` (Get/Set/Each) was removed with legacy reversal
+- **shapecount/** – DP h(shape,ends) per translation+D4 shape class, no memo table (class mode final pass)
+  - Methods: `CountShape(shape, ends)` (shared memo across ends of one shape),
+    `CountShapeWithTail(..., tail)` + `NewTail()`/`SetTailMemo(k, slots)` – optional
+    persistent per-worker tail memo f(cur,todo), popcount(todo) ≤ K (plan 03 variant B)
 - **symmetry/** – Exploits board symmetries to reduce search space
   - 8 symmetries: rotations and reflections
-  - Methods: `GetCanonicalPosition()`, `GetOrbitSize()`, `GetCanonicalGroups()`, `CanonicalizePath()`
+  - Methods: `GetCanonicalPosition()`, `GetOrbitSize()`, `GetCanonicalGroups()`, `Canonicalize()`
+  - Shape classes (D4 + translations): `CanonicalizeShape()`, `PrepareShape()`/`KeyFromPrepared()`
+    returning `path.Path` (the separate `ShapeKey` type was removed)
 - **monitoring/** – Progress reporting (`Monitor` interface, `RealMonitor`, `FakeMonitor`)
 
 
@@ -97,7 +113,21 @@ Run benchmarks with:
 make bench
 # or directly:
 go test -v -bench=. -run=^$ -benchmem ./counter/
+# full sweep including the gated 7×7 board (many hours):
+make bench-deep
+# one board size in its own process (required for meaningful peakRSS — it is a
+# per-process maximum): make bench-size N=7 [DEPTHS=20,22]
+# gated 8×8 point run (hours/depth): make bench-8x8 DEPTHS=32
+# render markdown tables from a benchmark log: make bench-table LOG=bench.log
 ```
 
 Available benchmarks in `counter/benchmark_test.go`:
-- `BenchmarkCountAllToursParallel` – Measures parallel tour counting performance
+- `BenchmarkCountAllToursClass` – `-precompute-depth` sweep (`size²/2..floor`,
+  descending) per board under subtests `size{N}/depth{D}`; publishes per-phase
+  FakeMonitor counters as extra metrics (`genA_ms/op`, `genB_ms/op`, `cnt_ms/op`,
+  `writesA/op`, `writesB/op`, `prunedA/op`, `prunedB/op`, `classes/op`,
+  `shapes/op`, `zeros/op`) plus memory (`peakRSS_MB/op` — per-process max RSS,
+  `totalAllocMB/op` — per-iteration allocation delta)
+- sizes 5/6 always run; size 7 is gated by `BENCH_DEEP=1` (`make bench-deep`) and
+  stops at depth 6 (`depthFloors`) — below depth 10 measurements take hours, depth 6 OOMs;
+  size 8 is gated by `BENCH_8X8=1`. `BENCH_DEPTHS=a,b` overrides the swept depths

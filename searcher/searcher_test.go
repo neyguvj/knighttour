@@ -6,137 +6,171 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"knighttour/cache"
 	"knighttour/graph"
-	"knighttour/oracle"
 	"knighttour/path"
+	"knighttour/shapecount"
 	"knighttour/state"
 	"knighttour/symmetry"
-	"knighttour/types"
 )
 
-func TestSearcherCountPaths(t *testing.T) {
+// naiveCountFrom is the independent brute-force oracle: plain backtracking over
+// adjacency lists with a visited slice — no bitboards, no pruning, no symmetry.
+// It counts paths covering every remaining cell from (st, end).
+func naiveCountFrom(g *graph.Graph, st state.State, end int) int {
+	total := g.GetTotalCells()
+	visited := make([]bool, total)
+	for p := range total {
+		visited[p] = st.IsVisited(p)
+	}
+
+	var walk func(cur, covered int) int
+	walk = func(cur, covered int) int {
+		if covered == total {
+			return 1
+		}
+		found := 0
+		for _, n := range g.GetNeighbors(cur) {
+			if !visited[n] {
+				visited[n] = true
+				found += walk(n, covered+1)
+				visited[n] = false
+			}
+		}
+		return found
+	}
+
+	return walk(end, st.CountBits())
+}
+
+// The known total: open tours over all starts on 5x5, pinned by the oracle alone.
+func TestNaiveBruteForceMatchesKnownTotal(t *testing.T) {
 	g := graph.New(5)
-	sym := symmetry.NewSymmetry(5)
-	searcher := NewSearcher(g, sym)
 
 	total := 0
-	for start := range 25 {
-		result := searcher.CountPaths(context.Background(), start)
-		total += result.TotalPathsFound
+	for start := range g.GetTotalCells() {
+		total += naiveCountFrom(g, state.NewState(start), start)
 	}
 
 	assert.Equal(t, 1728, total, "Expected 1728 for 5x5 board")
 }
 
-func TestSearcherCountFromState(t *testing.T) {
+// GenerateRoots at depth = totalCells: every leaf is a full tour, so the summed
+// orbit weights must reproduce the known total (D4-invariance of tour counts
+// makes per-group weighting exact; SholdSkip starts contribute zero tours).
+func TestFullCountViaGenerateRootsMatchesKnownTotal(t *testing.T) {
 	g := graph.New(5)
 	sym := symmetry.NewSymmetry(5)
 	searcher := NewSearcher(g, sym)
 
-	s := state.State(0).Visit(0)
-	pos := path.New(s, 0)
-
-	result := searcher.CountPathsDFS(context.Background(), pos)
-
-	assert.NotEqual(t, 0, result.TotalPathsFound, "Should find paths from valid starting position")
-}
-
-func TestSearcherGenerateSubtasksDepthZero(t *testing.T) {
-	g := graph.New(5)
-	sym := symmetry.NewSymmetry(5)
-	searcher := NewSearcher(g, sym)
-	cache := cache.NewCache(sym)
-
-	result := searcher.GenerateSubtasks(context.Background(), cache, 0, 1, 0)
-
-	assert.Equal(t, 1, result.CacheWrites, "Should cache 1 path when depth=0")
-}
-
-func TestSearcherGenerateSubtasksPartialDepth(t *testing.T) {
-	g := graph.New(5)
-	sym := symmetry.NewSymmetry(5)
-	searcher := NewSearcher(g, sym)
-	cache := cache.NewCache(sym)
-
-	result := searcher.GenerateSubtasks(context.Background(), cache, 0, 1, 3)
-
-	assert.GreaterOrEqual(t, result.CacheWrites, 1, "Should cache at least 1 path when depth=3")
-
-	full := searcher.CountPaths(context.Background(), 0)
-	assert.Positive(t, full.Pruned, "Pruner should cut branches during full counting")
-}
-
-func TestSearcherCountPathsDFSFromPartialPath(t *testing.T) {
-	g := graph.New(5)
-	sym := symmetry.NewSymmetry(5)
-	searcher := NewSearcher(g, sym)
-
-	s := state.State(0).Visit(0).Visit(8)
-	pos := path.New(s, 8)
-
-	result := searcher.CountPathsDFS(context.Background(), pos)
-
-	assert.NotEqual(t, 0, result.TotalPathsFound, "Should find paths from partial path")
-}
-
-func TestSearcherReversalMatchesFullCount(t *testing.T) {
-	tests := []struct {
-		size        int
-		depth       int
-		oracleDepth int
-	}{
-		{size: 5, depth: 1, oracleDepth: 1},
-		{size: 5, depth: 2, oracleDepth: 2},
-		{size: 5, depth: 6, oracleDepth: 6},
-		{size: 5, depth: 6, oracleDepth: 12}, // stop level above roots: plain DFS path
-		{size: 5, depth: 1, oracleDepth: 16}, // deep oracle: single-lookup completions
-		{size: 5, depth: 1, oracleDepth: 24}, // |U| = n²-1: deepest oracle level
+	acc := cache.NewAccumulator()
+	for _, group := range sym.GetCanonicalGroups() {
+		sink := acc.Local()
+		searcher.GenerateRoots(context.Background(), sink, group.Canonical, uint64(group.OrbitSize), g.GetTotalCells())
+		sink.Flush()
 	}
 
-	for _, tt := range tests {
-		t.Run("size"+strconv.Itoa(tt.size)+"/depth"+strconv.Itoa(tt.depth)+"/oracle"+strconv.Itoa(tt.oracleDepth), func(t *testing.T) {
-			g := graph.New(tt.size)
-			sym := symmetry.NewSymmetry(tt.size)
-			searcher := NewSearcher(g, sym)
+	var total int64
+	for _, e := range acc.Drain() {
+		assert.Equal(t, g.GetTotalCells(), e.Path.State().CountBits(), "leaf must cover the whole board")
+		total += int64(e.Weight)
+	}
 
-			prefixCache := cache.NewCache(sym)
-			for _, group := range sym.GetCanonicalGroups() {
-				if g.SholdSkip(group.Canonical) {
-					continue
-				}
-				searcher.GenerateSubtasks(context.Background(), prefixCache, group.Canonical, group.OrbitSize, tt.depth)
-			}
+	assert.Equal(t, int64(1728), total, "Σ orbit weights over full-depth leaves == plain count")
+}
 
-			o := oracle.New(g)
+// shallowOracle counts full extensions of p through phase B at depth total-1:
+// each complete path emits exactly one singleton complement class and
+// h({u}, u) == 1, so Σ weight·h(C) is the exact plain count.
+func shallowOracle(t *testing.T, g *graph.Graph, searcher *Searcher, p path.Path, weight uint64) int64 {
+	t.Helper()
 
-			var fullTotal, revTotal int64
-			prefixCache.Each(context.Background(), 1, func(_ context.Context, p path.Path, weight int) error {
-				full := searcher.CountPathsDFS(context.Background(), p).TotalPathsFound
-				withRev := searcher.CountPathsWithReversal(context.Background(), p, o, tt.oracleDepth).TotalPathsFound
+	acc := cache.NewAccumulator()
+	sink := acc.Local()
+	searcher.ExtendToClasses(context.Background(), sink, p, weight, g.GetTotalCells()-1)
+	sink.Flush()
 
-				assert.Equal(t, full, withRev, "task %v: oracle early stop must match full descent", p)
-				fullTotal += int64(full) * int64(weight)
-				revTotal += int64(withRev) * int64(weight)
-				return nil
-			})
+	sc := shapecount.New(g)
+	var total int64
+	for _, e := range acc.Drain() {
+		assert.Equal(t, 1, e.Path.State().CountBits(), "shallow complement must be a single cell")
+		h := sc.CountShape(e.Path.State(), []int{e.Path.End()}, nil)[0]
+		assert.Equal(t, uint64(1), h, "singleton shape has exactly one covering path")
+		total += int64(h) * int64(e.Weight)
+	}
+	return total
+}
 
-			assert.Positive(t, fullTotal)
-			assert.Equal(t, fullTotal, revTotal)
-		})
+func TestGenerateRootsEmitsCanonicalPrefixes(t *testing.T) {
+	g := graph.New(5)
+	sym := symmetry.NewSymmetry(5)
+	searcher := NewSearcher(g, sym)
+
+	acc := cache.NewAccumulator()
+	sink := acc.Local()
+	result := searcher.GenerateRoots(context.Background(), sink, 0, 4, 3)
+	sink.Flush()
+
+	assert.Positive(t, result.CacheWrites, "depth=3 must emit prefixes")
+	for _, e := range acc.Drain() {
+		assert.Equal(t, 3, e.Path.State().CountBits(), "every prefix sits at target depth")
+		assert.Positive(t, e.Weight)
 	}
 }
 
-func TestSearcherCacheReversalMatchesFullCount(t *testing.T) {
+func TestGenerateRootsDepthZeroEmitsStart(t *testing.T) {
+	g := graph.New(5)
+	sym := symmetry.NewSymmetry(5)
+	searcher := NewSearcher(g, sym)
+
+	acc := cache.NewAccumulator()
+	sink := acc.Local()
+	result := searcher.GenerateRoots(context.Background(), sink, 0, 1, 0)
+	sink.Flush()
+
+	assert.Equal(t, 1, result.CacheWrites, "depth=0 emits the start itself")
+}
+
+func TestGenerateRootsSkipsWrongColor(t *testing.T) {
+	g := graph.New(5)
+	sym := symmetry.NewSymmetry(5)
+	searcher := NewSearcher(g, sym)
+
+	// Find a position the parity filter rejects on the odd board.
+	var skipped = -1
+	for p := range g.GetTotalCells() {
+		if g.SholdSkip(p) {
+			skipped = p
+			break
+		}
+	}
+	require.NotEqual(t, -1, skipped, "5x5 must filter some starts")
+
+	acc := cache.NewAccumulator()
+	sink := acc.Local()
+	result := searcher.GenerateRoots(context.Background(), sink, skipped, 1, 3)
+	sink.Flush()
+
+	assert.Zero(t, result.CacheWrites, "SholdSkip start emits nothing")
+	assert.Zero(t, acc.ItemsCount())
+}
+
+// The class-mode identity: Σ h(C)·M(C) over the emitted accumulator must
+// reproduce the plain full count from the same roots. The reference is the
+// shallow phase-B oracle (depth = totalCells-1, singleton complements with
+// h == 1), cross-checked against the naive brute force on a small sample.
+func TestExtendToClassesMatchesFullCount(t *testing.T) {
+	const baseDepth = 5
+	const naiveSampleSize = 8
+
 	tests := []struct {
 		size  int
-		depth int
+		depth int // target depth; complement size total-depth must stay DP-cheap
 	}{
-		{size: 5, depth: 1},
-		{size: 5, depth: 6},
-		{size: 5, depth: 12}, // deepest reachable prefix-cache reversal
-		{size: 5, depth: 13}, // 2d > n²: guard disables early stop
+		{size: 5, depth: 13}, // mid roots, medium complements (q=12)
+		{size: 5, depth: 20}, // deep roots, small complements (q=5)
 	}
 
 	for _, tt := range tests {
@@ -145,66 +179,46 @@ func TestSearcherCacheReversalMatchesFullCount(t *testing.T) {
 			sym := symmetry.NewSymmetry(tt.size)
 			searcher := NewSearcher(g, sym)
 
-			prefixCache := cache.NewCache(sym)
+			intermediate := cache.NewAccumulator()
 			for _, group := range sym.GetCanonicalGroups() {
-				if g.SholdSkip(group.Canonical) {
-					continue
-				}
-				searcher.GenerateSubtasks(context.Background(), prefixCache, group.Canonical, group.OrbitSize, tt.depth)
+				sink := intermediate.Local()
+				searcher.GenerateRoots(context.Background(), sink, group.Canonical, uint64(group.OrbitSize), baseDepth)
+				sink.Flush()
 			}
 
-			var fullTotal, revTotal int64
-			prefixCache.Each(context.Background(), 1, func(_ context.Context, p path.Path, weight int) error {
-				full := searcher.CountPathsDFS(context.Background(), p).TotalPathsFound
-				withRev := searcher.CountPathsWithCacheReversal(context.Background(), p, prefixCache, tt.depth).TotalPathsFound
+			entries := intermediate.Drain()
 
-				assert.Equal(t, full, withRev, "task %v: cache early stop must match full descent", p)
-				fullTotal += int64(full) * int64(weight)
-				revTotal += int64(withRev) * int64(weight)
-				return nil
-			})
+			acc := cache.NewAccumulator()
+			sink := acc.Local()
+			var fullTotal int64
+			for i, e := range entries {
+				searcher.ExtendToClasses(context.Background(), sink, e.Path, e.Weight, tt.depth)
+				fullTotal += shallowOracle(t, g, searcher, e.Path, e.Weight)
+
+				if i < naiveSampleSize {
+					ref := int64(naiveCountFrom(g, e.Path.State(), e.Path.End())) * int64(e.Weight)
+					assert.Equal(t, ref, shallowOracle(t, g, searcher, e.Path, e.Weight),
+						"shallow oracle must match the naive brute force (entry %d)", i)
+				}
+			}
+			sink.Flush()
+
+			sc := shapecount.New(g)
+			var classTotal int64
+			for _, ce := range acc.Drain() {
+				h := sc.CountShape(ce.Path.State(), []int{ce.Path.End()}, nil)[0]
+				classTotal += int64(h) * int64(ce.Weight)
+			}
 
 			assert.Positive(t, fullTotal)
-			assert.Equal(t, fullTotal, revTotal)
+			assert.Equal(t, fullTotal, classTotal, "Σ h(C)·M(C) must equal the plain count")
 		})
 	}
 }
 
-func TestExtendSubtaskMatchesSinglePhase(t *testing.T) {
-	g := graph.New(5)
-	sym := symmetry.NewSymmetry(5)
-	searcher := NewSearcher(g, sym)
-	ctx := context.Background()
-
-	const baseDepth, targetDepth = 2, 4
-
-	direct := cache.NewCache(sym)
-	for _, group := range sym.GetCanonicalGroups() {
-		searcher.GenerateSubtasks(ctx, direct, group.Canonical, group.OrbitSize, targetDepth)
-	}
-
-	intermediate := cache.NewCache(sym)
-	for _, group := range sym.GetCanonicalGroups() {
-		searcher.GenerateSubtasks(ctx, intermediate, group.Canonical, group.OrbitSize, baseDepth)
-	}
-
-	assert.Positive(t, intermediate.ItemsCount(), "Intermediate cache must not be empty")
-
-	extended := cache.NewCache(sym)
-	for _, e := range intermediate.Entries() {
-		result := searcher.ExtendSubtask(ctx, extended, e.Path, e.Weight, targetDepth)
-		assert.Positive(t, result.CacheWrites, "Extension of an entry generates leaves at target depth")
-	}
-
-	assert.Equal(t, direct.ItemsCount(), extended.ItemsCount(), "Two-phase cache has the same key set")
-	for _, e := range direct.Entries() {
-		weight, ok := extended.GetCanonical(e.Path)
-		assert.True(t, ok, "Key %v present in two-phase cache", e.Path)
-		assert.Equal(t, e.Weight, weight, "Weight of key %v matches single phase", e.Path)
-	}
-}
-
-func TestExtendSubtaskNoopBeyondDepth(t *testing.T) {
+// Degenerate split (entry already at target depth): ExtendToClasses emits the
+// complement classes of the entry itself instead of descending.
+func TestExtendToClassesEmitsAtEntryDepth(t *testing.T) {
 	g := graph.New(5)
 	sym := symmetry.NewSymmetry(5)
 	searcher := NewSearcher(g, sym)
@@ -212,39 +226,16 @@ func TestExtendSubtaskNoopBeyondDepth(t *testing.T) {
 	st := state.State(0).Visit(0).Visit(6)
 	p := path.New(st, 6)
 
-	c := cache.NewCache(sym)
-	result := searcher.ExtendSubtask(context.Background(), c, p, 1, 2)
+	acc := cache.NewAccumulator()
+	sink := acc.Local()
+	result := searcher.ExtendToClasses(context.Background(), sink, p, 3, 2)
+	sink.Flush()
 
-	assert.Zero(t, result.CacheWrites, "Entry already at target depth generates nothing")
-	assert.Equal(t, 0, c.ItemsCount())
-}
-
-func TestSearcherResultStatistics(t *testing.T) {
-	g := graph.New(5)
-	sym := symmetry.NewSymmetry(5)
-	searcher := NewSearcher(g, sym)
-
-	prefixCache := cache.NewCache(sym)
-	var genTotal types.Result
-	for _, group := range sym.GetCanonicalGroups() {
-		result := searcher.GenerateSubtasks(context.Background(), prefixCache, group.Canonical, group.OrbitSize, 3)
-		assert.Equal(t, result.PrunedDeadEnd+result.PrunedNoCont+result.PrunedDisconn+result.PrunedEndpoints, result.Pruned,
-			"pruned breakdown must sum to the total")
-		genTotal.Add(result)
+	assert.Positive(t, result.CacheWrites, "entry at target depth emits immediately")
+	var total uint64
+	for _, e := range acc.Drain() {
+		total += e.Weight
 	}
-
-	assert.Positive(t, genTotal.CacheWrites, "generation writes cache entries")
-	assert.Zero(t, genTotal.CacheHits+genTotal.CacheMisses, "generation performs no reversal lookups")
-	assert.Positive(t, genTotal.Pruned, "pruning fires during prefix generation")
-	assert.Positive(t, genTotal.PrunedDisconn+genTotal.PrunedEndpoints, "global checks account for early-depth pruning")
-
-	var countTotal types.Result
-	prefixCache.Each(context.Background(), 1, func(_ context.Context, p path.Path, _ int) error {
-		countTotal.Add(searcher.CountPathsWithCacheReversal(context.Background(), p, prefixCache, 3))
-		return nil
-	})
-
-	assert.Positive(t, countTotal.CacheHits+countTotal.CacheMisses, "cache reversal performs lookups")
-	assert.Zero(t, countTotal.CacheWrites, "counting writes nothing")
-	assert.Equal(t, countTotal.PrunedDeadEnd+countTotal.PrunedNoCont+countTotal.PrunedDisconn+countTotal.PrunedEndpoints, countTotal.Pruned)
+	cand := g.GetNeighborMask(6).Intersect(st.Invert(g.GetTotalCells()))
+	assert.Equal(t, uint64(cand.CountBits())*3, total, "each neighbor end gets the entry weight")
 }

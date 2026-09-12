@@ -7,6 +7,12 @@
 - Параллельных вычислений (ускорение на многопроцессорных системах)
 - Мониторинга прогресса (отображение статистики в реальном времени)
 
+Единственный режим — **class mode** (specs/shapecount.md): генерация префиксов
+двухфазная, продолжения считаются DP по классам форм дополнений. Legacy
+prefix-cache reversal и task-cache (`cache.Cache`) удалены: старый кэш больше не
+нужен, оба хранилища пайплайна — аддитивные аккумуляторы `path.Path → uint64`
+(cache.md).
+
 ## Структура данных
 
 ```go
@@ -20,50 +26,22 @@ type Counter struct {
 ## Константы
 
 ```go
-const DefaultPrecomputeDepth = 5
-// Глубина предварительного разбиения задач по умолчанию
-// (совпадает с TwoPhaseBaseDepth, поэтому по умолчанию используется
-// однофазная генерация)
-
 const TwoPhaseBaseDepth = 5
-// Порог двухфазной генерации: при precomputeDepth > неё используется
-// двухфазная схема (см. «Генерация подзадач»)
-```
+// Глубина промежуточного аккумулятора фазы A. При precomputeDepth ≤ неё фаза B
+// вырождается: M строится эмиссией прямо из промежуточных записей.
 
-## Инициализация
+var DefaultPrecomputeDepths = map[int]int{5: 6, 6: 10, 7: 20, 8: 14}
+// Глубина по умолчанию для каждого размера доски (main.go подставляет, если
+// флаг не задан). Значения — эмпирические оптимумы/осторожные оценки:
+// 5×5/6×6 — по свипам, 7×7 — по свипу глубин ≥18, 8×8 — консервативно
+// (глубже — риск нехватки памяти на аккумуляторе M).
 
-```go
-func NewCounter(graph *Graph) *Counter
-// Создает Counter с инициализацией симметрий и searcher
+func DefaultPrecomputeDepth(size int) int
 ```
 
 ## Основные методы
 
-### 1. CountFromPosition(ctx context.Context, start int) int
-
-```go
-func (c *Counter) CountFromPosition(ctx context.Context, start int) int
-// Подсчет маршрутов из конкретной стартовой позиции
-```
-
-**Пример:**
-```go
-count := counter.CountFromPosition(context.Background(), 0)
-fmt.Printf("Paths from position 0: %d\n", count)
-```
-
-### 2. ParallelCount(ctx context.Context, monitor monitoring.Monitor, workers int) uint64
-
-```go
-func (c *Counter) ParallelCount(
-    ctx context.Context,
-    monitor monitoring.Monitor,
-    workers int,
-) uint64
-// Параллельный подсчет с использованием канонических групп и глубины по умолчанию
-```
-
-### 3. ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers int, precomputeDepth, oracleDepth int) uint64
+### ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers int, precomputeDepth int) uint64
 
 ```go
 func (c *Counter) ParallelCountWithDepth(
@@ -71,311 +49,189 @@ func (c *Counter) ParallelCountWithDepth(
     monitor monitoring.Monitor,
     workers int,
     precomputeDepth int,
-    oracleDepth int,
 ) uint64
-// Параллельный подсчет с предварительным разбиением задач через кэш (глубина
-// precomputeDepth) и досрочным завершением count-DFS через shape-oracle
-// (oracle.Oracle, глубина маски oracleDepth; см. oracle.md).
+// Параллельный подсчёт всех открытых туров; meet-in-the-middle разрез на глубине
+// precomputeDepth (валидируется main.go в [1, size²/2] — глубже половины доски
+// разрез дуален обращению тура).
 ```
 
-Глубины разведены: `precomputeDepth` — корни подзадач (параллелизм/дедуп),
-`oracleDepth` — размер множества в reversal-тождестве (память/время deep-хвоста).
-Связка `2·d ≤ n²` из старой схемы снята: oracle корректен для любого
-`1 ≤ oracleDepth < totalCells`.
+**Алгоритм (три фазы):**
 
-**Алгоритм:**
-1. Сгенерировать подзадачи (см. «Генерация подзадач» ниже) — `generateSubTasks` выбирает стратегию по глубине
-2. При `oracleDepth > 0` создать `oracle.New(graph)` (один на прогон, читается всеми воркерами)
-3. `monitor.BeginPhase("counting")`, добавить количество подзадач в мониторинг
-   (`monitor.AddTasks(taskCache.ItemsCount())`)
-4. Запустить worker pool с лимитом workers через `errgroup.Group` (`taskCache.Each`)
-5. Режим реверса: `oracleDepth > 0` — shape-oracle на глубине маски
-   `oracleDepth` (режим включается всегда, если stop-level достижим из корня);
-   `oracleDepth == 0` — legacy prefix-cache reversal (`W/orbitSize` из
-   taskCache) при `2·precomputeDepth ≤ totalCells`, иначе обычный спуск
-   (см. searcher.md, «Досрочное завершение через реверс»)
-6. Для каждой записи в кэше:
-   - Получить каноническую пару `(state, end)` и агрегированный вес `Σ count·orbitSize`
-   - Вызвать `CountPathsWithReversal` (с oracle при включённом реверсе) для подсчета
-     продолжений из этого состояния
-     - Умножить результат на вес и добавить к общему счетчику
-       (`total += completions * weight`; умножение на размер орбиты уже зашито
-       в вес при генерации, `start`/`GetOrbitSize` на этом этапе не нужны)
-     - Зарегистрировать завершение через `monitor.ReportPathsFound(weighted)`,
-       `monitor.ReportSubtask(result)` (hits/misses + разбивка прунинга) и
-       `monitor.ReportTaskCompleted()`
- 7. **Метрики oracle — безусловно** (без env-флага): если `oracleDepth > 0`,
-    после завершения counting взять `revOracle.Stats()` и вызвать
-    `monitor.ReportOracleStats(lookups, computes, classes)` — секция `Oracle:`
-    попадёт в финальный отчёт мониторинга. В legacy-режиме секции нет; сам
-    `oracle.New` создаётся только при `oracleDepth > 0`.
- 8. Вернуть суммарное количество путей
+1. **gen A** — параллельно по каноническим стартовым группам
+   (`symmetry.GetCanonicalGroups()`, `errgroup` + `SetLimit(workers)`):
+   `searcher.GenerateRoots(ctx, sink, canonical, orbitSize, a)`, где
+   `a = min(precomputeDepth, TwoPhaseBaseDepth)`. Каждый воркер пишет через
+   собственный `LocalSink` в промежуточный аккумулятор; после группы — `Flush`.
+   `Drain()` — worklist фазы B (тысячи независимых задач вместо ~10
+   групп → полная утилизация воркеров на большой глубине).
+2. **gen B** — чанк-воркеры (`min(len(entries), workers)` горутин, задачи тянутся
+   атомарным индексом) несут по одному `LocalSink` в аккумулятор M; каждая задача —
+   `searcher.ExtendToClasses(ctx, sink, entry.Path, entry.Weight, precomputeDepth)`.
+   Локальное схлопывание дубликатов классов до локов шарда — см. cache.md/LocalSink.
+  3. **counting** — **два stage'а, per-shard, без общего снимка M** (cache.md:
+     все концы одной формы лежат в одном шарде). Измерено на 6×6 d18: вся фаза —
+     ~8% CPU пайплайна, из них сортировка группировки ~0.3%, поэтому сложность
+     планировщика сведена к минимуму (профиль 2026-09).
+     - **Stage 1 — grouping.** `min(workers, NumShards())` горутин тянут индексы
+       шардов атомарным курсором: `DrainShard(i)` → срез сортируется по `State` и
+       режется на диапазоны форм (`groupSorted`) → получается **job**
+       `{entries, tasks}`. По завершении все job'ы известны заранее и выкладываются
+       в стек **по убыванию суммарного числа концов** (LPT: дорогие шарды
+       начинаются первыми). `monitor.AddTasks` — инкрементально по шардам.
+     - **Stage 2 — dispatch.** Воркеры берут батчи (`claimBatch = 16`) с вершины
+       стека job'ов под мьютексом, внутри job'а — атомарный курсор; пустой стек
+       означает «всё разобрано» и воркер выходит. **Сна нет**: новые задачи во
+       время исполнения не появляются (все job'ы созданы stage 1), поэтому прежние
+       `sync.Cond` и счётчик дренирующих убраны. Так дорогой шард не оставляет
+       никого простаивать, а памяти живёт ≈ по одному срезу на активного воркера.
+      Для формы — `shapecount.CountShapeWithTail(shape, ends, &stats, tail)`
+      (одно мемо на все концы + опциональный persistent tail-уровень: воркер
+      заводит себе один `sc.NewTail()` на всю жизнь stage 2 и делится мелкими
+      подзадачами между своими формами — план 03, выключен по умолчанию,
+      включается `Counter.SetTailMemo(k, slots)` из main по `-tail-memo`) и
+      `total += Σ_end h·M`; `stats` (прунинг DP и TailLookups/TailHits) →
+      `monitor.ReportSubtask`. Внутри job задачи отсортированы по убыванию числа
+      концов (прокси стоимости DP); формы с нулевым h по всем концам — дешёвые
+      (прунер отсекает в корне), лишь статистика.
 
-## Генерация подзадач
+**Корректность.** Каждая запись глубины `a` проходит ровно через один канонический
+ключ (D4-эквивариантность графа/прунера); эмиссия M — точная перегруппировка
+тождества обращения `total = Σ_C h(C)·M(C)` (searcher.md, shapecount.md).
 
-### Однофазная (precomputeDepth ≤ TwoPhaseBaseDepth)
+**Память.** Промежуточный аккумулятор живёт до конца фазы A→`Drain()` (он мал:
+глубина A ограничена `TwoPhaseBaseDepth`). Главный потребитель — M (одна запись
+на опрошенный класс формы); counting-фаза прорезает её шард за шардом и гасит
+map'ы по ходу. Stage 1 держит разобранные шарды плоскими срезами (24 Б/запись) —
+это **дешевле**, чем map'ы (~35 Б/запись), поэтому суммарный резидентный объём
+во время counting только падает, а истинный пик по-прежнему в конце gen B
+(копирующий `Snapshot` удваивал его — он удалён). Глубина разреза ограничена
+сверху `size²/2` именно размером M: выше — экспоненциальный рост.
 
-Пока глубина мала, число групп стартов («корней генерации») достаточен источник
-параллелизма:
+**Почему группировка по формам читается, а не строится на записи.** Соблазн
+хранить в аккумуляторе сразу класс (`State → концы`) вместо последующей
+сортировки разобран профилем 6×6 d18: сортировка стоит 0.3% CPU против ~20% у
+самого пути записи (`Accumulator.Add`/`LocalSink.Flush`). Вложенное значение
+добавило бы аллокации на каждую форму (на 7×7 d20 — 44.6M форм ≈ 150M мелких
+аллокаций и лишний указатель на форму в каждом GC-цикле) и merge-семантику под
+локом шарда, а `LocalSink` всё равно остался бы `map[Path]uint64` (иначе дубли
+классов перестают схлопываться локально). Плюс обход класса по плоскому срезу
+локален, чего pointer-chasing по 44M бакетам не даёт.
 
-1. Создать кэш `cache.NewCache(symmetry)`
-2. Получить группы канонических позиций: `symmetry.GetCanonicalGroups()`
-3. Для каждой группы вызвать `searcher.GenerateSubtasks(ctx, cache, canonicalPos, orbitSize, depth)`;
-   генерация групп **параллельна** через `errgroup` с `SetLimit(workers)`
-4. Мониторинг: `monitor.BeginPhase("generation")` (или имя фазы от вызывающего),
-   `monitor.AddTasks(len(groups))`, на группу — `ReportSubtask(result)` +
-   `ReportTaskCompleted`
+**Метрики:** `monitor.ReportShapeStats(classes, shapes, zeroShapes)` — секция
+`Shapes:` финального отчёта.
 
-### Двухфазная (precomputeDepth > TwoPhaseBaseDepth)
+### ParallelCount(ctx, monitor, workers) uint64
 
-Проблема однофазной генерации на большой глубине: канонических стартов сильно
-меньше, чем workers (на 8×8 — ~10 групп), поэтому генерация упирается в ~10
-горизонтально параллельных DFS и воркеры простаивают.
-
-Константы:
-
-```go
-const TwoPhaseBaseDepth = 5
-// Глубина промежуточного кэша фазы A; при precomputeDepth <= неё — однофазный путь.
-```
-
-**Фаза A.** Однофазная генерация до глубины `TwoPhaseBaseDepth` → промежуточный
-кэш (быстрая: группы хватает для параллелизма, поддеревья мелкие).
-
-**Фаза B.** Снимок промежуточного кэша через `cache.Entries()`; каждая запись —
-независимая задача: `searcher.ExtendSubtask(ctx, taskCache, entry.Path, entry.Weight, precomputeDepth)`
-в **отдельный финальный кэш**, параллельно через `errgroup` с `SetLimit(workers)`.
-Задач — тысячи записей вместо ~10 групп → полная утилизация воркеров.
-
-**Корректность.** Каждый префикс целевой глубины проходит ровно через один
-промежуточный канонический ключ; продолжения симметричных образов совпадают с
-точностью до канонизации (граф/прунер D4-эквивариантны), поэтому финальный кэш
-(ключи и веса) идентичен однофазной генерации — reversal-фаза не замечает разницы.
-Подробное обоснование — searcher.md, «ExtendSubtask».
-
-**Мониторинг:** фазы `"gen A"` и `"gen B"` (`monitor.BeginPhase` перед каждой,
-причём `BeginPhase("gen B")` — после полного завершения фазы A);
-`AddTasks(len(groups))` (фаза A) + `AddTasks(intermediateCount)` (фаза B);
-на каждую завершённую задачу — `ReportSubtask(result)` (записи в целевой кэш и
-разбивка прунинга) и `ReportTaskCompleted` текущей фазы.
-
-**Память:** промежуточный кэш живёт только время генерации и освобождается до
-фазы подсчёта. Oracle переживает обе фазы, но его таблица — классы форм размера
-`oracleDepth` (в ~10–20 раз меньше числа конкретных пар; см. oracle.md), поэтому
-память прогона определяется корнями `precomputeDepth`, а не deep-хвостом.
-
-**Использование:**
-```go
-g := graph.New(5)
-c := counter.NewCounter(g)
-
-count := c.ParallelCountWithDepth(ctx, monitor, 8, 5, 10) // 8 воркеров, корни на 5, oracle на 10
-fmt.Printf("Total tours: %d\n", count)
-```
-
-## Бенчмарки
-
-`counter/benchmark_test.go`:
-- `BenchmarkCountAllToursParallel` — замеряет `ParallelCountWithDepth` на досках 5×5 и 6×6,
-  перебирая глубины предподсчёта `depth = 1..size*size/2` (вложенные подбенчмарки `sizeN/depthD`),
-  число воркеров равно `runtime.NumCPU()`. Режим legacy (`oracleDepth = 0`).
-
-- `BenchmarkCountAllToursOracle` — тюнинг и поимка регрессий oracle-режима. Кейсы задаются
-  таблицей `oracleBenchCase{size, root, oracleDepth}` (oracleDepth = 0 — legacy-анкер для
-  парной сравнимости в одном прогоне); подбенчмарки `sizeN/rootR/oracleD{d|legacy}`.
-  Матрица «root × oracle» не разворачивается целиком: в steady-state таблица
-  (`oracleBenchCases()`) содержит края кривой и самые быстрые конфигурации — регрессия на них
-  заметна сразу, а `make bench` укладывается в ~минуту.
-  Полный свип (`make bench-oracle-full`, `ORACLE_FULL_SWEEP=1`, `-benchtime=1x`) разворачивает
-  root ∈ {4..8, 10, 12} × чётные oracleDepth от 2 до min(⌊total/2⌋, total−root):
-  **oracle глубже половины доски не рассматривается** — стоимость класса O(D·2^D) растёт
-  экспоненциально, а выигрыш от раннего stop его не окупает; такие конфигурации не
-  используются на практике. По результатам свипа таблица подрезается. Каждая итерация
-  `b.Loop()` пересоздаёт taskCache — при фиксированном root это константа, сравнение по
-  oracleDepth честно.
-
-  Замер (M4 Max, benchtime=1x): на 5×5/6×6 legacy остаётся самым быстрым всегда; глубина
-  корней монотонно ускоряет вплоть до root=12 (6×6: 187→76 мс); оверхед oracle над legacy при
-  том же root — +8…15% на D≤4, ~×2 на D=10 и далее растёт с D. Выигрыш oracle — не скорость
-  на этих досках, а память на больших (specs/oracle.md), поэтому в бенче он отслеживается как
-  canary регрессий, а не как режим по умолчанию.
+Тонкая обёртка: глубина по умолчанию для текущей доски (`DefaultPrecomputeDepth`).
 
 ## Мониторинг
 
-Мониторинг выводит прогресс каждую секунду — **только текущую фазу**:
-
-```
-[1.234s] Phase gen B | Tasks: 1200/5041 (23.8%) | Paths 0 | Writes 447520 | Pruned 129334 | ETA 3.953s
-```
-
-И финальный отчет — по строке на каждую фазу + oracle-итоги + итоги:
+Фазы: `gen A` → `gen B` → `counting` (при `precomputeDepth ≤ TwoPhaseBaseDepth`
+фаза B вырождается, но остаётся — задачи-эмиссии из промежуточных записей).
+Сегменты строки: `Writes` — эмиссии аккумуляторов; reversal-lookup'ов (Hits/
+Misses) больше нет.
 
 ```
 === Final ===
 Total time: 63ms
-Phase generation [41ms]: tasks 6/6 | paths 0 | writes 2795 | pruned 12034 (deadend 8211, nocont 302, disconn 2901, endpoints 620)
-Phase counting [22ms]: tasks 95224/95224 | paths 6637920 | hits 120034 (78.4%) misses 33210 | pruned 180322 (deadend 140311, disconn 30011, endpoints 1000)
-Oracle: lookups=51234 computes=987 classes=654
+Phase gen A [41ms]: tasks 6/6 | paths 0 | writes 2795 | pruned 12034 (...)
+Phase gen B [22ms]: tasks 95224/95224 | paths 0 | writes 250054 | pruned 180322 (...)
+Phase counting [22ms]: tasks 57457/57457 | paths 6637920 | pruned 0
+Shapes: classes=250054 shapes=57457 zeros=49880
 Total paths: 6637920
 ```
 
-Фазы запуска: `generation` (depth ≤ TwoPhaseBaseDepth) либо `gen A` + `gen B`,
-затем `counting`. Сегменты условны: `Writes` — когда были записи кэша,
-`Hits/Misses` — когда были reversal-lookup'и; разбивка pruned перечисляет только
-ненулевые виды.
+## Бенчмарки
 
-**Методы интерфейса Monitor:**
-```go
-type Monitor interface {
-    Start(ctx context.Context)
-    Finish()
-    BeginPhase(name string) // переключает мониторинг на новую фазу (между фазами, при остановленных воркерах)
-    AddTasks(count int)     // в текущую фазу
-    ReportTaskCompleted()   // текущая фаза
-    ReportPathsFound(count int)  // пути (в counting — взвешенные weight'ом)
-    ReportSubtask(r types.Result) // статистика завершённой подзадачи: writes, hits/misses, прунинг по видам
-    ReportOracleStats(lookups, computes, classes int) // безусловно при oracle-режиме, после counting
-}
-```
+`counter/benchmark_test.go` — один бенчмарк `BenchmarkCountAllToursClass`: полный
+свип глубин **по убыванию** (`depth = size²/2..floor`) для каждого размера доски.
+Убывающий порядок выбран потому, что на больших досках дорогие разрезы (глубокие)
+интереснее и именно они упираются в таймеры; свип отдаёт их первыми.
 
-Все репорты относятся к **активной** фазе; счётчики фаз — атомарные.
+- **размеры**: 5×5 и 6×6 гоняются всегда; 7×7 спрятан за `BENCH_DEEP=1` (один
+  замер там — от ~9 минут до часов), 8×8 — за `BENCH_8X8=1` (часы на точку);
+  без гейтов подтесты помечаются SKIP. Отдельного deep-бенчмарка нет;
+- **пол глубины** задаётся таблицей `depthFloors` (по умолчанию 1): для 7×7 это
+  `6` — дальше свип уже неинформативен и небезопасен: по замерам ниже десятки
+  время уходит в часы (глубина 9 — ~8.8 ч против 22 мин на 10), а глубина 6 не
+  завершилась (аккумулятор M не влез в память); для 8×8 без `BENCH_DEPTHS`
+  гоняется толькоcap из `sweepDefaults` ({32, 30}) — пол зафиксируется первым
+  живым прогоном (план 05);
+- **`BENCH_DEPTHS=16,14`** — точечный набор глубин вместо свипа (значения вне
+  `[floor, size²/2]` отбрасываются; если для размера не осталось ни одной — SKIP,
+  чтобы переменная не ломала прогон остальных размеров);
+- подтесты именуются `size{N}/depth{D}` (родительский групповой уровень `size{N}`
+  нужен ровно для SKIP'а gated-размера);
+- каждая итерация `b.Loop()` создаёт **новый** `FakeMonitor` (снимки аддитивны —
+  см. monitoring.md), оборачивает прогон в `Start(ctx)`/`Finish()` (без `Finish`
+  длительность последней фазы не фиксируется) и публикует метрики **по фазам**
+  через `b.ReportMetric`, читая снимки `Phase("gen A")` / `Phase("gen B")` /
+  `Phase("counting")` и `ShapeStats()`:
+  - тайминги фаз: `genA_ms/op`, `genB_ms/op`, `cnt_ms/op`;
+  - генерация: `writesA/op`, `writesB/op`, `prunedA/op`, `prunedB/op`;
+  - финальный проход: `classes/op`, `shapes/op`, `zeros/op`,
+    `filtered/op` (форм, убитых pre-DP фильтром плана 02; A/B свип — env
+    `SHAPE_FILTER=off`);
+  - **память**: `peakRSS_MB/op` — максимум резидента процесса
+    (`syscall.Getrusage`, darwin — байты, linux — КиБ, конвертирует
+    `counter/meminfo_{darwin,linux}_test.go`; единство единиц сторожит
+    `TestPeakRSSUnits`). Это **максимум на процесс и не убывает**: при прогоне
+    нескольких размеров в одном процессе цифра соответствует самому
+    прожорливому подтесту — для честных чисел гонять размер отдельным процессом
+    (`make bench-size N=…`); `totalAllocMB/op` — дельта
+    `runtime.MemStats.TotalAlloc` вокруг итерации (воспроизводимо, ловит
+    аллокационный шум);
+  - общие (`Totals()`) и пер-подзадачные (`subtasks`) метрики не публикуются —
+    суммы видны как A+B, а `subtasks` дублирует `tasks`;
+- итог сверяется с ожидаемым числом туров (`toursExpected`: 5×5 — 1728,
+  6×6 — 6 637 920, 7×7 — 165 575 218 320; `b.Fatalf` при расхождении) — глубина
+  split'а на него не влияет. Отсутствующих в таблице размеров сверка **не**
+  касается (разведочные прогоны, например первый 8×8).
+
+`make bench` гоняет свип с `-benchtime=10x` (7×7/8×8 — SKIP); быстрый просмотр —
+`-benchtime=1x`; `make bench-deep` ставит `BENCH_DEEP=1`, `-benchtime=1x` и
+`-timeout=48h`, то есть прогоняет и 7×7 целиком (часы).
+
+Цели сравнения подходов (план 05):
+
+- `make bench-size N=<5..8> [DEPTHS=a,b]` — один размер **отдельным процессом**
+  (корректный peak RSS), гейт выставляется сам по N;
+- `make bench-8x8 DEPTHS=32` — точечный прогон 8×8 (`-timeout=24h`);
+- `make bench-table LOG=<файл>` — рендер markdown-таблиц из лога бенчмарка
+  (`tools/bench_table.py`, по одной таблице на размер, глубины по убыванию,
+  счётчики в K/M/G).
+
+CI (`.github/workflows/test.yml`) запускает **только тесты**: гейтированные
+прогоны в CI не должны появляться — инвариант.
+
+### Shape-фильтр (план 02), замеры on/off (M4 Max, 14 ядер)
+
+По формам фильтр снимает ~9–11% (`filtered/op`: d22 — 7.3M/68.4M, d20 —
+4.2M/44.6M; 6×6 d13 — 3.1k/36k), по времени counting заметно меньше — убитые
+цепочкой формы и так умирали в DP на первых состояниях:
+
+| стенд | cnt on | cnt off | total on | total off |
+|---|---|---|---|---|
+| 7×7 d22 | 361.7 с | 372.4 с (−2.9%) | 583.8 с | 593.1 с (−1.6%) |
+| 7×7 d20 | 528.1 с | 539.9 с (−2.2%) | 612.1 с | 623.4 с (−1.8%) |
+
+6×6 по свипу: +3..9% на глубинах d11–d16/d18, проседания ≤6% на части
+глубин — в пределах шума; цель плана «counting ≤ 250 с» фильтром не достигнута
+(см. вывод в specs/plans/02: время нулей живёт в deep-классах, приоритет —
+план 03).
 
 ## Использование в main.go
 
-main.go разбит на тестируемые части: структура аргументов, их парсинг и запуск подсчёта.
-
 ```go
-// appArgs – распарсенные и провалидированные параметры запуска.
-type appArgs struct {
-    size            int
-    workers         int
-    precomputeDepth int
-    oracleDepth     int
-}
-
-// parseArgs разбирает аргументы командной строки (без имени программы) и
-// валидирует их: size 5–8, workers >= 1, precomputeDepth в [1, size^2/2],
-// oracleDepth = 0 (legacy prefix-cache reversal) либо в [1, size^2 - precomputeDepth]
-// (stop-level totalCells - oracleDepth должен быть достижим из корней).
-// Возвращает ошибку вместо log.Fatal — это делает парсинг тестируемым.
+// parseArgs: size 5–8, workers ≥ 1, precomputeDepth ∈ [1, size²/2]
+// (meet-in-the-middle глубже половины доски не имеет смысла). Если флаг
+// precompute-depth не передан — DefaultPrecomputeDepth(size).
 func parseArgs(args []string) (*appArgs, error)
 
-// run строит граф и счётчик и выполняет параллельный подсчёт.
-// Монитор передаётся параметром, чтобы в тестах использовать FakeMonitor.
 func run(ctx context.Context, monitor monitoring.Monitor, args *appArgs) uint64 {
     g := graph.New(args.size)
     c := counter.NewCounter(g)
-    return c.ParallelCountWithDepth(ctx, monitor, args.workers, args.precomputeDepth, args.oracleDepth)
-}
-
-func main() {
-    args, err := parseArgs(os.Args[1:])
-    if err != nil {
-        log.Fatal(err)
-    }
-
-    ctx, cancel := context.WithCancel(context.Background())
-    defer cancel()
-
-    realMonitor := monitoring.NewMonitor()
-    realMonitor.Start(ctx)
-    defer realMonitor.Finish()
-
-    run(ctx, realMonitor, args)
-}
-```
-
-**Тестуемость (main_test.go):**
-- `parseArgs` — табличные тесты: дефолты (`workers = runtime.NumCPU()`,
-  `precomputeDepth = counter.DefaultPrecomputeDepth`), валидные доски 5–8,
-  ошибки размера/глубины/workers.
-- `run` с `FakeMonitor` на доске 5×5 должен возвращать `1728`.
-
-**Примеры запуска:**
-```bash
-# Последовательный режим (workers=1)
-go run main.go -size 5 -workers 1
-
-# Параллельный режим с 4 воркерами
-go run main.go -size 6 -workers 4
-
-# Максимальная параллельность на доске 8×8
-go run main.go -size 8 -workers 16
-```
-
-## Симметрии и канонизация
-
-### CanonicalGroup
-
-```go
-type CanonicalGroup struct {
-    Canonical int     // каноническая позиция (лексикографически минимальная)
-    OrbitSize int     // размер орбиты (сколько симметричных позиций в классе)
-    Positions []int   // все позиции в группе
-}
-```
-
-### Использование:
-
-```go
-groups := symmetry.GetCanonicalGroups()
-for _, group := range groups {
-    // Группа канонических позиций с размером орбиты group.OrbitSize
-    
-    cache := cache.NewCache(symmetry)
-    result := searcher.GenerateSubtasks(ctx, cache, group.Canonical, group.OrbitSize, depth)
-    
-    // Кэш содержит подзадачи с агрегированным весом Σ count·orbitSize
-}
-```
-
-## Тесты
-
-```go
-func TestCounterCountAllTours(t *testing.T) {
-    g := graph.New(5)
-    counter := counter.NewCounter(g)
-
-    count := counter.ParallelCountWithDepth(
-        context.Background(), 
-        monitoring.NewFakeMonitor(), 
-        1,
-        5,
-        8,
-    )
-
-    // Проверка результата (с учетом орбит всех групп)
-}
-
-func TestCounterParallel(t *testing.T) {
-    g := graph.New(5)
-    counter := counter.NewCounter(g)
-
-    countSeq := counter.ParallelCountWithDepth(
-        context.Background(), 
-        monitoring.NewFakeMonitor(), 
-        1,
-        5,
-        8,
-    )
-    countPar := counter.ParallelCountWithDepth(
-        context.Background(), 
-        monitoring.NewFakeMonitor(), 
-        4,
-        5,
-        8,
-    )
-
-    require.Equal(t, countSeq, countPar)
-}
-
-func TestCounterFromPosition(t *testing.T) {
-    g := graph.New(5)
-    counter := counter.NewCounter(g)
-
-    count := counter.CountFromPosition(context.Background(), 0)
-
-    require.Greater(t, count, 0)
+    return c.ParallelCountWithDepth(ctx, monitor, args.workers, args.precomputeDepth)
 }
 ```
 
@@ -383,49 +239,16 @@ func TestCounterFromPosition(t *testing.T) {
 
 ### 1. Дублирование при отсутствии canonical check
 
-```go
-// НЕПРАВИЛЬНО:
-total := uint64(0)
-for start := 0; start < graph.GetTotalCells(); start++ {
-    total += searcher.CountPaths(ctx, start).TotalPathsFound // каждый старт обрабатывается повторно
-}
-
-// ПРАВИЛЬНО:
-groups := symmetry.GetCanonicalGroups()
-for _, group := range groups {
-    result := searcher.CountPaths(ctx, group.Canonical)
-    total += uint64(result.TotalPathsFound * group.OrbitSize)
-}
-```
+Суммировать нужно по каноническим группам стартов, вес орбиты переносится в
+аккумулятор на генерации (`GenerateRoots`), а не при чтении.
 
 ### 2. Race condition в параллельном коде
 
-```go
-// НЕПРАВИЛЬНО:
-var total int
-for _, task := range tasks {
-    go func() {
-        result := searcher.CountPaths(ctx, p)
-        total += result.TotalPathsFound // race condition!
-    }()
-}
-
-// ПРАВИЛЬНО:
-total := atomic.Uint64{}
-g.Go(func() error {
-    result := searcher.CountPathsDFS(ctx, p)
-    // weight = Σ count·orbitSize уже лежит в значении кэша
-    total.Add(uint64(result.TotalPathsFound) * uint64(weight))
-    return nil
-})
-```
+Общий счёт — `atomic.Uint64`; аккумуляторы шардированы; sinks не разделяются
+между горутинами.
 
 ## Ограничения и возможные улучшения
 
-1. **Dynamic load balancing**: Перераспределение работы между workers на основе времени выполнения
-2. **Checkpointing**: Промежуточное сохранение результатов (для долгих расчетов)
-3. **Adaptive parallelism**: Количество workers зависит от размера доски и доступных ядер
-
-## Заключение
-
-Counter — финальный компонент, который объединяет симметрии, параллелизм и мониторинг для эффективного подсчёта всех маршрутов.
+1. **Dynamic load balancing** для фазы A (сейчас ~10 групп).
+2. **Checkpointing** промежуточных аккумуляторов.
+3. **Адаптивный выбор глубины** по доступной памяти (оценка размера M по ходу gen B).

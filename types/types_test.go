@@ -9,18 +9,17 @@ import (
 )
 
 func TestResultAdd(t *testing.T) {
-	r := Result{TotalPathsFound: 5, CacheWrites: 3, CacheHits: 10, CacheMisses: 2, PrunedDeadEnd: 4}
-	other := Result{TotalPathsFound: 7, CacheWrites: 1, CacheHits: 5, CacheMisses: 8, PrunedDisconn: 6}
+	r := Result{TotalPathsFound: 5, CacheWrites: 3, PrunedDeadEnd: 4}
+	other := Result{TotalPathsFound: 7, CacheWrites: 1, PrunedDisconn: 6, FilteredShapes: 2}
 
-	r.Add(other)
+	r.Add(&other)
 
 	assert.Equal(t, Result{
 		TotalPathsFound: 12,
 		CacheWrites:     4,
-		CacheHits:       15,
-		CacheMisses:     10,
 		PrunedDeadEnd:   4,
 		PrunedDisconn:   6,
+		FilteredShapes:  2,
 	}, r)
 }
 

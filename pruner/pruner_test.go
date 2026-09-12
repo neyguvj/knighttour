@@ -379,3 +379,303 @@ func TestAdvanced_MatchesNaiveOnWalks(t *testing.T) {
 		}
 	}
 }
+
+// --- L2: ShouldPruneState (plan 04) ---
+
+// walkState produces a DP-like state (cur, todo): a random walk of the given
+// length is grown and then descended randomly for depth steps, mimicking the
+// states the shapecount DP feeds into the pruner.
+func walkState(rng *rand.Rand, g *graph.Graph, length, descend int) (int, state.State, bool) {
+	var mask state.State
+	for range 100 {
+		mask = state.Bit(rng.Intn(g.GetTotalCells()))
+		cur := bits.TrailingZeros64(uint64(mask))
+		grew := true
+		for range length - 1 {
+			var cand []int
+			for n := range g.GetNeighborMask(cur).AllVisited() {
+				if mask.IsUnvisited(n) {
+					cand = append(cand, n)
+				}
+			}
+			if len(cand) == 0 {
+				grew = false
+				break
+			}
+			cur = cand[rng.Intn(len(cand))]
+			mask = mask.Visit(cur)
+		}
+		if grew && mask.CountBits() == length {
+			break
+		}
+	}
+	if mask.CountBits() != length {
+		return 0, 0, false
+	}
+	cur := bits.TrailingZeros64(uint64(mask))
+	todo := mask.Unvisit(cur)
+	for range descend {
+		var cand []int
+		for n := range g.GetNeighborMask(cur).Intersect(todo).AllVisited() {
+			cand = append(cand, n)
+		}
+		if len(cand) == 0 {
+			break
+		}
+		cur = cand[rng.Intn(len(cand))]
+		todo = todo.Unvisit(cur)
+	}
+	return cur, todo, true
+}
+
+// naiveArtic replicates the L2 articulation semantics from scratch: component
+// counts via BFS after every removal plus the fixed-end refinements. Only
+// valid when H = todo ∪ {cur} is connected (guaranteed once L0/L1 pass).
+func naiveArtic(g *graph.Graph, cur int, todo state.State) bool {
+	h := todo | state.Bit(cur)
+	components := func(mask state.State) (int, map[int]int) {
+		id := map[int]int{}
+		count, n := 0, 0
+		var seen state.State
+		for v := range mask.AllVisited() {
+			if _, ok := id[v]; ok {
+				continue
+			}
+			count++
+			frontier := state.Bit(v)
+			for !frontier.IsEmpty() {
+				var next state.State
+				for u := range frontier.AllVisited() {
+					if seen.IsVisited(u) {
+						continue
+					}
+					seen = seen.Visit(u)
+					id[u] = n
+					next = next.Union(g.GetNeighborMask(u).Intersect(mask))
+				}
+				frontier = next.AndNot(seen)
+			}
+			n++
+		}
+		return count, id
+	}
+	deg1Count, t := 0, -1
+	for v := range todo.AllVisited() {
+		if g.GetNeighborMask(v).Intersect(h).CountBits() == 1 {
+			deg1Count++
+			t = v
+		}
+	}
+	for v := range h.AllVisited() {
+		c, ids := components(h.Unvisit(v))
+		if c >= 3 {
+			return true
+		}
+		if deg1Count != 1 || c < 2 {
+			continue
+		}
+		if v == cur || v == t { // removing a path endpoint must leave one segment
+			return true
+		}
+		if ids[cur] == ids[t] { // both endpoints on the same side of the split
+			return true
+		}
+	}
+	return false
+}
+
+// bruteH counts Hamiltonian paths from cur covering todo (reference oracle).
+func bruteH(g *graph.Graph, cur int, todo state.State) uint64 {
+	if todo.IsEmpty() {
+		return 1
+	}
+	var total uint64
+	for n := range g.GetNeighborMask(cur).Intersect(todo).AllVisited() {
+		total += bruteH(g, n, todo.Unvisit(n))
+	}
+	return total
+}
+
+func TestShouldPruneState_Reasons(t *testing.T) {
+	g := graph.New(6)
+	p := New(g)
+
+	tests := []struct {
+		name       string
+		cur        int
+		todo       state.State
+		wantReason Reason
+	}{
+		{"clean state survives", 26, state.State(0x8855cc8c), NoReason},
+		{"articulation point", 19, state.State(0x424318b64), Articulation},
+		{"forced chain", 29, state.State(0x311198260), ForcedChain},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.GreaterOrEqual(t, tt.todo.CountBits(), DefaultMinL2)
+			p.SetL2(L2All, DefaultMinL2)
+			pruned, reason := p.ShouldPruneState(tt.cur, tt.todo)
+			assert.Equal(t, tt.wantReason != NoReason, pruned)
+			assert.Equal(t, tt.wantReason, reason)
+
+			// With L2 disabled the same state must not be cut (L0/L1 pass).
+			p.SetL2(L2None, DefaultMinL2)
+			pruned, reason = p.ShouldPruneState(tt.cur, tt.todo)
+			assert.False(t, pruned)
+			assert.Equal(t, NoReason, reason)
+		})
+	}
+}
+
+func TestShouldPruneState_BelowThresholdMatchesBase(t *testing.T) {
+	g := graph.New(6)
+	p := New(g)
+	p.SetL2(L2All, 1000) // unreachable threshold: L2 must never run
+
+	rng := rand.New(rand.NewSource(42)) //nolint:gosec // deterministic test seed
+	for range 5000 {
+		cur, todo, ok := walkState(rng, g, 12+rng.Intn(7), rng.Intn(3))
+		if !ok {
+			continue
+		}
+		wantPruned, wantReason := p.ShouldPruneAfterVisit(cur, todo)
+		gotPruned, gotReason := p.ShouldPruneState(cur, todo)
+		assert.Equal(t, wantPruned, gotPruned)
+		assert.Equal(t, wantReason, gotReason)
+	}
+}
+
+func TestArticulationCut_MatchesNaive(t *testing.T) {
+	g := graph.New(6)
+	p := New(g)
+
+	rng := rand.New(rand.NewSource(11)) //nolint:gosec // deterministic test seed
+	compared := 0
+	for range 20000 {
+		cur, todo, ok := walkState(rng, g, 12+rng.Intn(7), rng.Intn(5))
+		if !ok || todo.CountBits() < 2 {
+			continue
+		}
+		if pruned, _ := p.ShouldPruneAfterVisit(cur, todo); pruned {
+			continue // articulationCut assumes the L0/L1 guarantees (connected H)
+		}
+		assert.Equal(t, naiveArtic(g, cur, todo), p.articulationCut(cur, todo),
+			"cur=%d todo=%s", cur, todo.String())
+		compared++
+	}
+	assert.Greater(t, compared, 5000)
+}
+
+// L2 cuts must never remove a state with a nonzero completion count.
+func TestL2_CutsAreSoundOnRandom(t *testing.T) {
+	rng := rand.New(rand.NewSource(123)) //nolint:gosec // deterministic test seed
+	for _, size := range []int{5, 6} {
+		g := graph.New(size)
+		p := New(g)
+		p.SetL2(L2All, 8)
+		hits := map[Reason]int{}
+		for range 10000 {
+			cur, todo, ok := walkState(rng, g, 10+rng.Intn(7), rng.Intn(5))
+			if !ok {
+				continue
+			}
+			pruned, reason := p.ShouldPruneState(cur, todo)
+			if !pruned || (reason != Articulation && reason != ForcedChain) {
+				continue
+			}
+			hits[reason]++
+			assert.Zero(t, bruteH(g, cur, todo),
+				"size=%d L2 cut (%v) of a state with completions: cur=%d todo=%s",
+				size, reason, cur, todo.String())
+		}
+		assert.Positive(t, hits[Articulation], "articulation must fire on size %d sample", size)
+		assert.Positive(t, hits[ForcedChain], "forced chain must fire on size %d sample", size)
+	}
+}
+
+// Forced-chain forcing is only sound with a pinned end; states without a
+// unique degree-1 todo vertex must never be cut by it.
+func TestForcedChainCut_RequiresFixedEnd(t *testing.T) {
+	g := graph.New(6)
+	p := New(g)
+
+	rng := rand.New(rand.NewSource(9)) //nolint:gosec // deterministic test seed
+	for range 20000 {
+		cur, todo, ok := walkState(rng, g, 12+rng.Intn(7), rng.Intn(5))
+		if !ok {
+			continue
+		}
+		if !p.forcedChainCut(cur, todo) {
+			continue
+		}
+		h := todo | state.Bit(cur)
+		deg1 := 0
+		for v := range todo.AllVisited() {
+			if g.GetNeighborMask(v).Intersect(h).CountBits() == 1 {
+				deg1++
+			}
+		}
+		assert.Equal(t, 1, deg1, "cur=%d todo=%s", cur, todo.String())
+	}
+}
+
+// Shape-level feasibility filter (plan 02): table cases per check plus the
+// degenerate shapes; every cut must be a true zero of the brute-force oracle.
+func TestShapeFeasible_Reasons(t *testing.T) {
+	g := graph.New(6)
+	p := New(g)
+
+	star := state.NewState(14, 1, 3, 6) // K1,3 in the 6×6 knight graph (center 14)
+
+	tests := []struct {
+		name       string
+		end        int
+		shape      state.State
+		mask       L2Checks
+		wantReason Reason
+	}{
+		{"endpoint mismatch star center", 14, star, L2Endpoints, Endpoints},
+		{"star leaf articulation", 1, star, L2Articulation, Articulation},
+		{"forced chain shape", 29, state.State(0x311198260) | state.Bit(29), L2ForcedChain, ForcedChain},
+		{"articulation shape", 19, state.State(0x424318b64) | state.Bit(19), L2Articulation, Articulation},
+		{"single cell alive", 5, state.Bit(5), L2All | L2Endpoints, NoReason},
+		{"adjacent pair alive", 0, state.NewState(0, 8), L2All | L2Endpoints, NoReason},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pruned, reason := p.ShapeFeasible(tt.end, tt.shape, tt.mask)
+			assert.Equal(t, tt.wantReason != NoReason, pruned)
+			assert.Equal(t, tt.wantReason, reason)
+			if pruned {
+				assert.Zero(t, bruteH(g, tt.end, tt.shape.Unvisit(tt.end)),
+					"filter cut a shape with completions: end=%d shape=%s", tt.end, tt.shape.String())
+			}
+		})
+	}
+}
+
+// The filter must never cut an end that has completions — random states from
+// the DP-shaped walk generator verified against bruteH.
+func TestShapeFeasible_SoundOnRandom(t *testing.T) {
+	rng := rand.New(rand.NewSource(7)) //nolint:gosec // deterministic test seed
+	for _, size := range []int{5, 6} {
+		g := graph.New(size)
+		p := New(g)
+		killed := 0
+		for range 20000 {
+			cur, todo, ok := walkState(rng, g, 8+rng.Intn(14), rng.Intn(5))
+			if !ok {
+				continue
+			}
+			shape := todo | state.Bit(cur)
+			if pruned, _ := p.ShapeFeasible(cur, shape, L2All|L2Endpoints); pruned {
+				killed++
+				assert.Zero(t, bruteH(g, cur, todo),
+					"size=%d false cut: cur=%d shape=%s", size, cur, shape.String())
+			}
+		}
+		assert.Positive(t, killed, "filter must fire on the size %d sample", size)
+	}
+}

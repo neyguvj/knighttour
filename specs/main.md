@@ -10,28 +10,25 @@
 ```go
 size := fs.Int("size", 5, "Board size (5-8)")
 workers := fs.Int("workers", runtime.NumCPU(), "Number of workers for parallel search")
-precomputeDepth := fs.Int("precompute-depth", counter.DefaultPrecomputeDepth, "Root/subtask generation depth")
-oracleDepth := fs.Int("oracle-depth", 0, "Shape-oracle reversal mask size (0 = legacy prefix-cache reversal)")
+precomputeDepth := fs.Int("precompute-depth", 0, "Root/subtask generation depth (default: per board size)")
+tailMemo := fs.Int("tail-memo", 0, "Persistent per-worker tail memo in counting: max popcount(todo) stored (0 = off)")
 ```
 
 Валидация (`parseArgs`, табличные тесты в `main_test.go`):
 
 - `-size` — целое от 5 до 8;
 - `-workers` — не менее 1;
-- `-precompute-depth` — от 1 до `size*size/2`;
-- `-oracle-depth` — 0 (по умолчанию: legacy prefix-cache reversal при достижимом
-  уровне, как до появления oracle; без реверса иначе) или от 1 до
-  `size*size - precompute-depth`. Верхняя граница — из достижимости stop-level:
-  oracle прекращает спуск на уровне `totalCells − oracleDepth`, и этот уровень
-  должен быть не глубже корней подзадач (`precompute-depth`), иначе реверс молча
-  не сработает, а legacy-режим при `oracle-depth > 0` уже выключен — тихая
-  деградация до чистого DFS. Привязка `2·depth ≤ n²` снята (см. oracle.md);
+- `-precompute-depth` — от 1 до `size*size / 2` (meet-in-the-middle: разрез
+  глубже половины доски дуален обращению тура); если флаг не передан
+  (sentinel 0) — `counter.DefaultPrecomputeDepth(size)`; явный 0 → ошибка;
+- `-tail-memo` — ≥ 0 (0 — persistent tail-мемо финального прохода выключен,
+  см. shapecount.md/план 03; значение — максимум `popcount(todo)`, который
+  сохраняется в таблицу воркера);
 - неизвестные флаги → ошибка (`flag.ContinueOnError`, вывод в stderr).
 
-Смысл развязки глубин: `-precompute-depth` — корни подзадач (параллелизм и дедуп
-весов), `-oracle-depth` — размер множества в reversal-тождестве (определяет память
-и время deep-хвоста подсчёта). Пример экономии памяти на 8×8:
-`-precompute-depth 10 -oracle-depth 14`.
+Режим один (class mode, см. counter.md/shapecount.md), отдельных флагов нет.
+Глубина по умолчанию — таблица `{5: 6, 6: 10, 7: 20, 8: 14}` (эмпирика свипов;
+для 8×8 — осторожное значение, глубже аккумулятор M рискует не влезть в память).
 
 ## Структуры и функции
 
@@ -40,7 +37,6 @@ type appArgs struct {
     size            int
     workers         int
     precomputeDepth int
-    oracleDepth     int
 }
 
 func parseArgs(args []string) (*appArgs, error)

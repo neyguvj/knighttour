@@ -24,103 +24,180 @@ type Monitor interface {
 	ReportPathsFound(count int)
 	// ReportSubtask folds one finished subtask's statistics (cache writes,
 	// reversal hits/misses, pruning by reason) into the active phase.
-	ReportSubtask(r types.Result)
-	// ReportOracleStats publishes shape-oracle totals once after counting;
+	ReportSubtask(r *types.Result)
+	// ReportShapeStats publishes class-mode totals once after the final pass;
 	// zeros counts classes with no routes found (h == 0).
-	ReportOracleStats(lookups, computes, classes, zeros int)
+	ReportShapeStats(classes, shapes, zeroShapes int)
 }
 
 // phaseStats holds counters for a single execution phase (generation, counting).
 type phaseStats struct {
-	startTime       time.Time
-	endTime         time.Time
-	name            string
+	startTime time.Time
+	endTime   time.Time
+	name      string
+
 	tasks           atomic.Uint64
 	completed       atomic.Uint64
+	subtasks        atomic.Uint64 // folded ReportSubtask calls (never printed)
 	pathsFound      atomic.Uint64 // weighted paths (counting only)
-	cacheWrites     atomic.Uint64 // cache.Set calls (generation phases)
-	cacheHits       atomic.Uint64 // reversal-lookup hits (counting, legacy cache mode)
-	cacheMisses     atomic.Uint64 // reversal-lookup misses (counting, legacy cache mode)
+	cacheWrites     atomic.Uint64 // accumulator emissions (gen A / gen B)
 	prunedDeadEnd   atomic.Uint64
 	prunedNoCont    atomic.Uint64
 	prunedDisconn   atomic.Uint64
 	prunedEndpoints atomic.Uint64
+	prunedArtic     atomic.Uint64 // L2 articulation cuts (counting phase only)
+	prunedChain     atomic.Uint64 // L2 forced-chain cuts (counting phase only)
+
+	tailLookups atomic.Uint64 // persistent tail memo probes (counting, plan 03)
+	tailHits    atomic.Uint64 // persistent tail memo hits (counting, plan 03)
+
+	filteredShapes atomic.Uint64 // shapes killed by the pre-DP feasibility filter (counting, plan 02)
 }
 
 // prunedTotal is the sum of the per-reason pruning counters.
 func (ph *phaseStats) prunedTotal() uint64 {
 	return ph.prunedDeadEnd.Load() + ph.prunedNoCont.Load() +
-		ph.prunedDisconn.Load() + ph.prunedEndpoints.Load()
+		ph.prunedDisconn.Load() + ph.prunedEndpoints.Load() +
+		ph.prunedArtic.Load() + ph.prunedChain.Load()
 }
 
-// RealMonitor tracks per-phase progress with lock-free counters. BeginPhase is
-// called strictly between phases (workers of the previous phase are done), so
-// switching the active phase never races with worker reports.
-type RealMonitor struct {
-	startTime time.Time
-	active    atomic.Pointer[phaseStats]
-	phases    []*phaseStats
-	phasesMu  sync.Mutex
-	started   atomic.Bool
-
-	oracleSet      atomic.Bool
-	oracleLookups  atomic.Uint64
-	oracleComputes atomic.Uint64
-	oracleClasses  atomic.Uint64
-	oracleZeros    atomic.Uint64 // classes with h == 0 (no routes found)
+// duration is the phase wall time; zero while the phase is still open.
+func (ph *phaseStats) duration() time.Duration {
+	if ph.startTime.IsZero() || ph.endTime.IsZero() {
+		return 0
+	}
+	return ph.endTime.Sub(ph.startTime)
 }
 
-func NewMonitor() *RealMonitor {
-	return &RealMonitor{}
+// monitor is the shared implementation behind both Monitor implementations: it
+// tracks phases and counters once, and verbose decides whether the per-second
+// live line and the final report are printed. BeginPhase is called strictly
+// between phases (workers of the previous phase are done), so switching the
+// active phase never races with worker reports.
+type monitor struct {
+	startTime    time.Time
+	active       atomic.Pointer[phaseStats]
+	phases       []*phaseStats
+	shapeClasses atomic.Uint64
+	shapeShapes  atomic.Uint64
+	shapeZeros   atomic.Uint64
+	phasesMu     sync.Mutex
+	started      atomic.Bool
+	shapeSet     atomic.Bool
+	verbose      bool
 }
+
+// RealMonitor is the verbose monitor: live line every second plus final report.
+type RealMonitor struct{ monitor }
+
+// FakeMonitor records every report without any console output. Tests and
+// benchmarks read the accumulated statistics back via Phase/Totals/ShapeStats.
+// Like RealMonitor, reports arriving before the first BeginPhase are ignored
+// (no active phase).
+type FakeMonitor struct{ monitor }
+
+func NewMonitor() *RealMonitor { return &RealMonitor{monitor: monitor{verbose: true}} }
+
+func NewFakeMonitor() *FakeMonitor { return &FakeMonitor{} }
 
 var (
 	_ Monitor = (*RealMonitor)(nil)
 	_ Monitor = (*FakeMonitor)(nil)
 )
 
-// BeginPhase closes the previous phase and starts a new active one.
-func (m *RealMonitor) BeginPhase(name string) {
-	if prev := m.active.Load(); prev != nil {
-		prev.endTime = time.Now()
-	}
-	ph := &phaseStats{name: name, startTime: time.Now()}
+// BeginPhase closes the previous phase and starts a new active one. Repeating
+// the same name always appends a new phase rather than reusing the old one.
+func (m *monitor) BeginPhase(name string) {
+	now := time.Now()
+	ph := &phaseStats{name: name, startTime: now}
+
 	m.phasesMu.Lock()
+	if prev := m.active.Load(); prev != nil {
+		prev.endTime = now
+	}
 	m.phases = append(m.phases, ph)
 	m.phasesMu.Unlock()
+
 	m.active.Store(ph)
 }
 
-func (m *RealMonitor) AddTasks(count int) {
+func (m *monitor) AddTasks(count int) {
 	if ph := m.active.Load(); ph != nil {
 		ph.tasks.Add(uint64(count))
 	}
 }
 
-func (m *RealMonitor) Start(ctx context.Context) {
+func (m *monitor) ReportTaskCompleted() {
+	if ph := m.active.Load(); ph != nil {
+		ph.completed.Add(1)
+	}
+}
+
+func (m *monitor) ReportPathsFound(count int) {
+	if ph := m.active.Load(); ph != nil {
+		ph.pathsFound.Add(uint64(count))
+	}
+}
+
+// ReportSubtask folds a finished subtask's Result into the active phase.
+// TotalPathsFound is intentionally ignored: counting publishes weighted paths
+// via ReportPathsFound (Result.TotalPathsFound is unweighted).
+func (m *monitor) ReportSubtask(r *types.Result) {
+	ph := m.active.Load()
+	if ph == nil {
+		return
+	}
+	ph.subtasks.Add(1)
+	ph.cacheWrites.Add(uint64(r.CacheWrites))
+	ph.prunedDeadEnd.Add(uint64(r.PrunedDeadEnd))
+	ph.prunedNoCont.Add(uint64(r.PrunedNoCont))
+	ph.prunedDisconn.Add(uint64(r.PrunedDisconn))
+	ph.prunedEndpoints.Add(uint64(r.PrunedEndpoints))
+	ph.prunedArtic.Add(uint64(r.PrunedArticulation))
+	ph.prunedChain.Add(uint64(r.PrunedForcedChain))
+	ph.tailLookups.Add(uint64(r.TailLookups))
+	ph.tailHits.Add(uint64(r.TailHits))
+	ph.filteredShapes.Add(uint64(r.FilteredShapes))
+}
+
+func (m *monitor) ReportShapeStats(classes, shapes, zeroShapes int) {
+	m.shapeClasses.Store(uint64(classes))
+	m.shapeShapes.Store(uint64(shapes))
+	m.shapeZeros.Store(uint64(zeroShapes))
+	m.shapeSet.Store(true)
+}
+
+// Start always anchors the run clock; only the verbose monitor spawns the
+// per-second reporter goroutine.
+func (m *monitor) Start(ctx context.Context) {
 	m.startTime = time.Now()
 	m.started.Store(true)
-	go func() {
-		ticker := time.NewTicker(time.Second)
-		defer ticker.Stop()
+	if !m.verbose {
+		return
+	}
+	go m.loop(ctx)
+}
 
-		for {
-			select {
-			case <-ticker.C:
-				if !m.started.Load() {
-					return
-				}
-				m.report()
-			case <-ctx.Done():
-				// Finish() already printed the final report; only report here
-				// if it never ran (e.g. context cancelled mid-flight).
-				if m.started.Load() {
-					m.report()
-				}
+func (m *monitor) loop(ctx context.Context) {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if !m.started.Load() {
 				return
 			}
+			m.report()
+		case <-ctx.Done():
+			// Finish() already printed the final report; only report here
+			// if it never ran (e.g. context cancelled mid-flight).
+			if m.started.Load() {
+				m.report()
+			}
+			return
 		}
-	}()
+	}
 }
 
 // estimateRemaining is a linear ETA for the active phase based on its average
@@ -139,16 +216,14 @@ func estimateRemaining(elapsed time.Duration, completed, total uint64) (time.Dur
 // fmtDur formats a duration with millisecond precision (e.g. "1.234s").
 func fmtDur(d time.Duration) string { return d.Round(time.Millisecond).String() }
 
-// hitRate is the percentage of successful lookups; callers must guard against
-// a zero denominator (no lookups at all).
-func hitRate(hits, misses uint64) float64 {
-	return float64(hits) / float64(hits+misses) * 100
-}
-
 // report prints the active phase progress on a single line (\x1b[2K\r-overwritten).
 // Conditional segments keep the line free of zeros: Writes appears only when the
 // phase wrote cache entries, Hits/Misses only when reversal lookups happened.
-func (m *RealMonitor) report() {
+// The silent monitor never prints anything.
+func (m *monitor) report() {
+	if !m.verbose {
+		return
+	}
 	ph := m.active.Load()
 	if ph == nil {
 		return
@@ -176,10 +251,7 @@ func (m *RealMonitor) report() {
 	if w := ph.cacheWrites.Load(); w > 0 {
 		fmt.Fprintf(&b, " | Writes %d", w)
 	}
-	hits, misses := ph.cacheHits.Load(), ph.cacheMisses.Load()
-	if hits+misses > 0 {
-		fmt.Fprintf(&b, " | Hits %d (%.1f%%) Misses %d", hits, hitRate(hits, misses), misses)
-	}
+	b.WriteString(ph.tailSegment(false))
 	fmt.Fprintf(&b, " | Pruned %d | ETA %s", ph.prunedTotal(), eta)
 
 	fmt.Print(clearLine + b.String())
@@ -194,29 +266,50 @@ func (ph *phaseStats) summary() string {
 	if w := ph.cacheWrites.Load(); w > 0 {
 		fmt.Fprintf(&b, " | writes %d", w)
 	}
-	hits, misses := ph.cacheHits.Load(), ph.cacheMisses.Load()
-	if hits+misses > 0 {
-		fmt.Fprintf(&b, " | hits %d (%.1f%%) misses %d", hits, hitRate(hits, misses), misses)
+	b.WriteString(ph.tailSegment(true))
+	if f := ph.filteredShapes.Load(); f > 0 {
+		fmt.Fprintf(&b, " | filtered %d", f)
 	}
 	fmt.Fprintf(&b, " | pruned %d%s", ph.prunedTotal(), ph.pruneBreakdown())
 	return b.String()
 }
 
-// pruneBreakdown renders "(deadend N, nocont N, disconn N, endpoints N)" with
-// only non-zero parts; empty string when nothing was pruned.
+// tailSegment renders " | Tail hits/lookups (pct%)" once the phase probed the
+// persistent tail memo of the final pass (plan 03); empty otherwise, so the
+// live line stays free of zeros. lowercase picks the summary-line spelling.
+func (ph *phaseStats) tailSegment(lowercase bool) string {
+	lookups, hits := ph.tailLookups.Load(), ph.tailHits.Load()
+	if lookups == 0 {
+		return ""
+	}
+	name := "Tail"
+	if lowercase {
+		name = "tail"
+	}
+	return fmt.Sprintf(" | %s %d/%d (%d%%)", name, hits, lookups, hits*100/lookups)
+}
+
+// pruneBreakdown renders "(deadend N, nocont N, disconn N, endpoints N,
+// artic N, chain N)" with only non-zero parts in this fixed order; empty
+// string when nothing was pruned. artic/chain appear only in the counting
+// phase (L2 checks run inside the shapecount DP).
 func (ph *phaseStats) pruneBreakdown() string {
-	parts := make([]string, 0, 4)
-	if v := ph.prunedDeadEnd.Load(); v > 0 {
-		parts = append(parts, fmt.Sprintf("deadend %d", v))
+	counters := [...]struct {
+		name string
+		v    uint64
+	}{
+		{"deadend", ph.prunedDeadEnd.Load()},
+		{"nocont", ph.prunedNoCont.Load()},
+		{"disconn", ph.prunedDisconn.Load()},
+		{"endpoints", ph.prunedEndpoints.Load()},
+		{"artic", ph.prunedArtic.Load()},
+		{"chain", ph.prunedChain.Load()},
 	}
-	if v := ph.prunedNoCont.Load(); v > 0 {
-		parts = append(parts, fmt.Sprintf("nocont %d", v))
-	}
-	if v := ph.prunedDisconn.Load(); v > 0 {
-		parts = append(parts, fmt.Sprintf("disconn %d", v))
-	}
-	if v := ph.prunedEndpoints.Load(); v > 0 {
-		parts = append(parts, fmt.Sprintf("endpoints %d", v))
+	parts := make([]string, 0, len(counters))
+	for _, c := range counters {
+		if c.v > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", c.name, c.v))
+		}
 	}
 	if len(parts) == 0 {
 		return ""
@@ -224,13 +317,21 @@ func (ph *phaseStats) pruneBreakdown() string {
 	return " (" + strings.Join(parts, ", ") + ")"
 }
 
-func (m *RealMonitor) Finish() {
+// Finish closes the active phase for both monitors and prints the final report
+// only when verbose. Calling it without Start is a no-op.
+func (m *monitor) Finish() {
 	if !m.started.Swap(false) {
 		return
 	}
 	m.report()
-	if prev := m.active.Load(); prev != nil {
+
+	m.phasesMu.Lock()
+	defer m.phasesMu.Unlock()
+	if prev := m.active.Load(); prev != nil && prev.endTime.IsZero() {
 		prev.endTime = time.Now()
+	}
+	if !m.verbose {
+		return
 	}
 
 	fmt.Printf("\n=== Final ===\n")
@@ -238,65 +339,88 @@ func (m *RealMonitor) Finish() {
 
 	var totalPaths uint64
 	for _, ph := range m.phases {
-		fmt.Printf("Phase %s [%s]: %s\n", ph.name, ph.endTime.Sub(ph.startTime), ph.summary())
+		fmt.Printf("Phase %s [%s]: %s\n", ph.name, ph.duration(), ph.summary())
 		totalPaths += ph.pathsFound.Load()
 	}
-	if m.oracleSet.Load() {
-		fmt.Printf("Oracle: lookups=%d computes=%d classes=%d zeros=%d\n",
-			m.oracleLookups.Load(), m.oracleComputes.Load(),
-			m.oracleClasses.Load(), m.oracleZeros.Load())
+	if m.shapeSet.Load() {
+		fmt.Printf("Shapes: classes=%d shapes=%d zeros=%d\n",
+			m.shapeClasses.Load(), m.shapeShapes.Load(), m.shapeZeros.Load())
 	}
 	fmt.Printf("Total paths: %d\n", totalPaths)
 }
 
-func (m *RealMonitor) ReportTaskCompleted() {
-	if ph := m.active.Load(); ph != nil {
-		ph.completed.Add(1)
+// PhaseStats is a snapshot of the counters recorded for one phase.
+type PhaseStats struct {
+	Tasks       uint64
+	Completed   uint64
+	Subtasks    uint64
+	PathsFound  uint64
+	CacheWrites uint64
+
+	Pruned             uint64
+	PrunedDeadEnd      uint64
+	PrunedNoCont       uint64
+	PrunedDisconn      uint64
+	PrunedEndpoints    uint64
+	PrunedArticulation uint64 // L2 (counting phase only)
+	PrunedForcedChain  uint64 // L2 (counting phase only)
+
+	TailLookups uint64 // persistent tail memo probes (counting, plan 03)
+	TailHits    uint64 // persistent tail memo hits (counting, plan 03)
+
+	FilteredShapes uint64 // shapes killed by the pre-DP feasibility filter (counting, plan 02)
+
+	Duration time.Duration // zero while the phase is still open
+}
+
+// Phase returns the summed counters of every phase recorded under name; the
+// zero value means no such phase started.
+func (m *monitor) Phase(name string) PhaseStats {
+	m.phasesMu.Lock()
+	defer m.phasesMu.Unlock()
+
+	var sum PhaseStats
+	for _, ph := range m.phases {
+		if ph.name == name {
+			sum.add(ph)
+		}
 	}
+	return sum
 }
 
-func (m *RealMonitor) ReportPathsFound(count int) {
-	if ph := m.active.Load(); ph != nil {
-		ph.pathsFound.Add(uint64(count))
+// Totals sums the counters of every recorded phase.
+func (m *monitor) Totals() PhaseStats {
+	m.phasesMu.Lock()
+	defer m.phasesMu.Unlock()
+
+	var sum PhaseStats
+	for _, ph := range m.phases {
+		sum.add(ph)
 	}
+	return sum
 }
 
-// ReportSubtask folds a finished subtask's Result into the active phase.
-// TotalPathsFound is intentionally ignored: counting publishes weighted paths
-// via ReportPathsFound (Result.TotalPathsFound is unweighted).
-func (m *RealMonitor) ReportSubtask(r types.Result) {
-	ph := m.active.Load()
-	if ph == nil {
-		return
-	}
-	ph.cacheWrites.Add(uint64(r.CacheWrites))
-	ph.cacheHits.Add(uint64(r.CacheHits))
-	ph.cacheMisses.Add(uint64(r.CacheMisses))
-	ph.prunedDeadEnd.Add(uint64(r.PrunedDeadEnd))
-	ph.prunedNoCont.Add(uint64(r.PrunedNoCont))
-	ph.prunedDisconn.Add(uint64(r.PrunedDisconn))
-	ph.prunedEndpoints.Add(uint64(r.PrunedEndpoints))
+// ShapeStats returns the class-mode totals published by ReportShapeStats.
+func (m *monitor) ShapeStats() (classes, shapes, zeros uint64) {
+	return m.shapeClasses.Load(), m.shapeShapes.Load(), m.shapeZeros.Load()
 }
 
-func (m *RealMonitor) ReportOracleStats(lookups, computes, classes, zeros int) {
-	m.oracleLookups.Store(uint64(lookups))
-	m.oracleComputes.Store(uint64(computes))
-	m.oracleClasses.Store(uint64(classes))
-	m.oracleZeros.Store(uint64(zeros))
-	m.oracleSet.Store(true)
+// add folds one phase's live counters into a snapshot (used by Phase/Totals).
+func (a *PhaseStats) add(ph *phaseStats) {
+	a.Tasks += ph.tasks.Load()
+	a.Completed += ph.completed.Load()
+	a.Subtasks += ph.subtasks.Load()
+	a.PathsFound += ph.pathsFound.Load()
+	a.CacheWrites += ph.cacheWrites.Load()
+	a.Pruned += ph.prunedTotal()
+	a.PrunedDeadEnd += ph.prunedDeadEnd.Load()
+	a.PrunedNoCont += ph.prunedNoCont.Load()
+	a.PrunedDisconn += ph.prunedDisconn.Load()
+	a.PrunedEndpoints += ph.prunedEndpoints.Load()
+	a.PrunedArticulation += ph.prunedArtic.Load()
+	a.PrunedForcedChain += ph.prunedChain.Load()
+	a.TailLookups += ph.tailLookups.Load()
+	a.TailHits += ph.tailHits.Load()
+	a.FilteredShapes += ph.filteredShapes.Load()
+	a.Duration += ph.duration()
 }
-
-type FakeMonitor struct{}
-
-func NewFakeMonitor() *FakeMonitor {
-	return &FakeMonitor{}
-}
-
-func (*FakeMonitor) Start(ctx context.Context)                               {}
-func (*FakeMonitor) Finish()                                                 {}
-func (*FakeMonitor) BeginPhase(name string)                                  {}
-func (*FakeMonitor) AddTasks(count int)                                      {}
-func (*FakeMonitor) ReportTaskCompleted()                                    {}
-func (*FakeMonitor) ReportPathsFound(count int)                              {}
-func (*FakeMonitor) ReportSubtask(r types.Result)                            {}
-func (*FakeMonitor) ReportOracleStats(lookups, computes, classes, zeros int) {}

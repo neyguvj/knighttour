@@ -22,34 +22,28 @@ func TestParseArgs(t *testing.T) {
 		{
 			name:     "defaults",
 			args:     nil,
-			expected: &appArgs{size: 5, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth},
+			expected: &appArgs{size: 5, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(5)},
 		},
 		{
 			name:     "explicit flags",
 			args:     []string{"-size", "6", "-workers", "4", "-precompute-depth", "3"},
 			expected: &appArgs{size: 6, workers: 4, precomputeDepth: 3},
 		},
-		{name: "board 5", args: []string{"-size", "5"}, expected: &appArgs{size: 5, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth}},
-		{name: "board 6", args: []string{"-size", "6"}, expected: &appArgs{size: 6, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth}},
-		{name: "board 7", args: []string{"-size", "7"}, expected: &appArgs{size: 7, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth}},
+		{name: "board 5 default depth", args: []string{"-size", "5"}, expected: &appArgs{size: 5, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(5)}},
+		{name: "board 6 default depth", args: []string{"-size", "6"}, expected: &appArgs{size: 6, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(6)}},
+		{name: "board 7 default depth", args: []string{"-size", "7"}, expected: &appArgs{size: 7, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(7)}},
+		{name: "board 8 default depth", args: []string{"-size", "8"}, expected: &appArgs{size: 8, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(8)}},
 		{name: "board 8 max depth", args: []string{"-size", "8", "-precompute-depth", "32"}, expected: &appArgs{size: 8, workers: runtime.NumCPU(), precomputeDepth: 32}},
-		{
-			name:     "oracle depth set",
-			args:     []string{"-size", "8", "-precompute-depth", "10", "-oracle-depth", "14"},
-			expected: &appArgs{size: 8, workers: runtime.NumCPU(), precomputeDepth: 10, oracleDepth: 14},
-		},
-		{
-			name:     "oracle depth at reachability bound",
-			args:     []string{"-size", "5", "-precompute-depth", "12", "-oracle-depth", "13"},
-			expected: &appArgs{size: 5, workers: runtime.NumCPU(), precomputeDepth: 12, oracleDepth: 13},
-		},
-		{name: "oracle depth beyond stop level", args: []string{"-size", "5", "-precompute-depth", "12", "-oracle-depth", "14"}, wantErr: true},
-		{name: "oracle depth too large", args: []string{"-size", "5", "-oracle-depth", "25"}, wantErr: true},
-		{name: "oracle depth negative", args: []string{"-size", "5", "-oracle-depth", "-1"}, wantErr: true},
 		{name: "size too small", args: []string{"-size", "4"}, wantErr: true},
 		{name: "size too large", args: []string{"-size", "9"}, wantErr: true},
-		{name: "depth zero", args: []string{"-size", "5", "-precompute-depth", "0"}, wantErr: true},
-		{name: "depth above limit", args: []string{"-size", "5", "-precompute-depth", "13"}, wantErr: true},
+		{name: "depth zero explicit", args: []string{"-size", "5", "-precompute-depth", "0"}, wantErr: true},
+		{name: "depth above half board", args: []string{"-size", "5", "-precompute-depth", "13"}, wantErr: true},
+		{
+			name:     "tail memo explicit",
+			args:     []string{"-size", "6", "-tail-memo", "12"},
+			expected: &appArgs{size: 6, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(6), tailMemo: 12},
+		},
+		{name: "tail memo negative", args: []string{"-tail-memo", "-1"}, wantErr: true},
 		{name: "workers zero", args: []string{"-workers", "0"}, wantErr: true},
 		{name: "workers negative", args: []string{"-workers", "-1"}, wantErr: true},
 		{name: "unknown flag", args: []string{"-nope"}, wantErr: true},
@@ -69,7 +63,7 @@ func TestParseArgs(t *testing.T) {
 }
 
 func TestRunCountMatchesReference(t *testing.T) {
-	args := &appArgs{size: 5, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth}
+	args := &appArgs{size: 5, workers: runtime.NumCPU(), precomputeDepth: counter.DefaultPrecomputeDepth(5)}
 
 	count := run(context.Background(), monitoring.NewFakeMonitor(), args)
 

@@ -113,30 +113,47 @@ func (s *Symmetry) CanonicalFromStates(states [NumTransforms]state.State, end in
 выполняется `Canonicalize(g(st), g(end)) == Canonicalize(st, end)`, т.к. умножение
 на g — биекция множества 8 преобразований на себе (D4 — группа).
 
+### 5а. Канонизация класса формы (D4 ⋉ трансляции)
+
+Значения, зависящие только от индуцированного подграфа маски с отмеченным концом
+(h, W), инвариантны и к параллельным переносам. Нормализация — bbox к (0,0) +
+лексминимум пар `(shape, end_rel)` по 8 ориентациям (tie-break по end). Математика
+перенесена из удалённого oracle; обоснование — shapecount.md.
+
+```go
+// Амортизированный контекст: одна PrepareShape на маску, KeyFromPrepared на каждый конец.
+type ShapeCtx struct { ... } // 8 нормализованных масок + смещения bbox по ориентациям (стек, без аллокаций)
+
+func (s *Symmetry) PrepareShape(st state.State, sc *ShapeCtx)
+func (s *Symmetry) KeyFromPrepared(sc *ShapeCtx, end int) path.Path
+func (s *Symmetry) CanonicalizeShape(st state.State, end int) path.Path // обёртка Prepare+Key
+```
+
+Ключ класса — `path.Path` (пара «нормализованная маска, конец в нормализованных
+координатах»): отдельный тип `ShapeKey` удалён, он был структурным дубликатом.
+
+Размер bbox ≤ N×N ⇒ нормализованная маска помещается в uint64 при N ≤ 8.
+
 ## Использование в Counter
 
 ```go
 groups := symmetry.GetCanonicalGroups()
 for _, group := range groups {
     // Группа канонических позиций с размером орбиты group.OrbitSize
-    
-    cache := cache.NewCache(symmetry)
-    result := searcher.GenerateSubtasks(ctx, cache, group.Canonical, group.OrbitSize, depth)
-    
-    // Кэш содержит подзадачи с количеством решений
+
+    sink := intermediate.Local()
+    result := searcher.GenerateRoots(ctx, sink, group.Canonical, group.OrbitSize, depth)
+    sink.Flush()
+    // Аккумулятор содержит префиксы с агрегированным весом орбит
 }
 ```
 
-## Использование в Cache
+## Использование в генерации
 
 ```go
-// Кэш использует Canonicalize для объединения симметричных состояний:
-canonical := c.symmetry.Canonicalize(p.State(), p.End())
-shardIdx := c.getShardKey(canonical)
-
-if weight, found := c.shards[shardIdx].data[canonical]; found {
-    // кэш-попадание
-}
+// Фаза A канонизирует префиксы перед эмиссией в аккумулятор:
+canonical := s.sym.Canonicalize(st, end) // path.Path — ключ промежуточного аккумулятора
+sink.Add(canonical, orbitSize)
 ```
 
 ## Примеры размеров орбит

@@ -20,7 +20,7 @@ type appArgs struct {
 	size            int
 	workers         int
 	precomputeDepth int
-	oracleDepth     int
+	tailMemo        int
 }
 
 func parseArgs(args []string) (*appArgs, error) {
@@ -29,8 +29,8 @@ func parseArgs(args []string) (*appArgs, error) {
 
 	size := fs.Int("size", 5, "Board size (5-8)")
 	workers := fs.Int("workers", runtime.NumCPU(), "Number of workers for parallel search")
-	precomputeDepth := fs.Int("precompute-depth", counter.DefaultPrecomputeDepth, "Root/subtask generation depth")
-	oracleDepth := fs.Int("oracle-depth", 0, "Shape-oracle reversal mask size (0 = legacy prefix-cache reversal)")
+	precomputeDepth := fs.Int("precompute-depth", 0, "Root/subtask generation depth (default: per board size)")
+	tailMemo := fs.Int("tail-memo", 0, "Counting tail memo: persist f(cur,todo) with popcount(todo) ≤ N between shapes of one worker (0 = off)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, fmt.Errorf("parse flags: %w", err)
@@ -40,30 +40,43 @@ func parseArgs(args []string) (*appArgs, error) {
 		return nil, errors.New("size must be between 5 and 8")
 	}
 
-	maxDepth := (*size * *size) / 2
-	if *precomputeDepth < 1 || *precomputeDepth > maxDepth {
-		return nil, fmt.Errorf("-precompute-depth should be between 1 and %d", maxDepth)
+	depth := *precomputeDepth
+	if depth == 0 && !isFlagSet(fs, "precompute-depth") {
+		depth = counter.DefaultPrecomputeDepth(*size)
 	}
 
-	// The oracle stops at level size*size - oracleDepth; that level must be
-	// reachable from the generated roots, otherwise reversal silently never
-	// fires while the legacy mode is already off for oracleDepth > 0.
-	maxOracleDepth := *size**size - *precomputeDepth
-	if *oracleDepth < 0 || *oracleDepth > maxOracleDepth {
-		return nil, fmt.Errorf("-oracle-depth should be between 0 and %d for -precompute-depth %d (0 = legacy prefix-cache reversal)", maxOracleDepth, *precomputeDepth)
+	maxDepth := *size * *size / 2 // meet-in-the-middle: deeper cuts are the reversed tour's dual
+	if depth < 1 || depth > maxDepth {
+		return nil, fmt.Errorf("-precompute-depth should be between 1 and %d", maxDepth)
 	}
 
 	if *workers < 1 {
 		return nil, errors.New("-workers must be at least 1")
 	}
 
-	return &appArgs{size: *size, workers: *workers, precomputeDepth: *precomputeDepth, oracleDepth: *oracleDepth}, nil
+	if *tailMemo < 0 {
+		return nil, errors.New("-tail-memo must be non-negative (0 = off)")
+	}
+
+	return &appArgs{size: *size, workers: *workers, precomputeDepth: depth, tailMemo: *tailMemo}, nil
+}
+
+// isFlagSet reports whether the flag was explicitly provided on the command line.
+func isFlagSet(fs *flag.FlagSet, name string) bool {
+	found := false
+	fs.Visit(func(f *flag.Flag) {
+		if f.Name == name {
+			found = true
+		}
+	})
+	return found
 }
 
 func run(ctx context.Context, monitor monitoring.Monitor, args *appArgs) uint64 {
 	g := graph.New(args.size)
 	c := counter.NewCounter(g)
-	return c.ParallelCountWithDepth(ctx, monitor, args.workers, args.precomputeDepth, args.oracleDepth)
+	c.SetTailMemo(args.tailMemo, 0)
+	return c.ParallelCountWithDepth(ctx, monitor, args.workers, args.precomputeDepth)
 }
 
 func main() {

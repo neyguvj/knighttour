@@ -9,7 +9,6 @@ import (
 	"knighttour/cache"
 	"knighttour/graph"
 	"knighttour/monitoring"
-	"knighttour/path"
 )
 
 func TestSequentalCount(t *testing.T) {
@@ -35,10 +34,39 @@ func TestParallelCountWithDepth(t *testing.T) {
 	g := graph.New(size)
 	counter := NewCounter(g)
 
-	for depth := range size * size {
-		count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 8, depth, 0)
-		assert.Equal(t, uint64(1728), count, "Expected %d count for 5x5 board, got %d", 1728, count)
+	for depth := 1; depth <= size*size/2; depth++ { // full meet-in-the-middle range
+		count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 8, depth)
+		assert.Equal(t, uint64(1728), count, "Expected %d count for 5x5 board at depth %d", 1728, depth)
 	}
+}
+
+// Every run publishes shape stats: the class pipeline is the only mode.
+func TestShapeStatsAlwaysPublished(t *testing.T) {
+	g := graph.New(5)
+	counter := NewCounter(g)
+
+	fm := monitoring.NewFakeMonitor()
+	assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), fm, 8, 6))
+	classes, shapes, _ := fm.ShapeStats()
+	assert.Positive(t, classes, "run must accumulate shape classes")
+	assert.Positive(t, shapes, "run must publish final-pass shapes")
+}
+
+// The final-pass DP pruner must surface its statistics into the counting
+// phase as well (ReportSubtask), not only the generation phases.
+func TestCountingPhaseReportsPruning(t *testing.T) {
+	g := graph.New(5)
+	counter := NewCounter(g)
+
+	fm := monitoring.NewFakeMonitor()
+	assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), fm, 8, 6))
+
+	counting := fm.Phase("counting")
+	assert.Positive(t, counting.Pruned, "final-pass DP pruning must be reported")
+	assert.Equal(t,
+		counting.PrunedDeadEnd+counting.PrunedNoCont+counting.PrunedDisconn+counting.PrunedEndpoints+
+			counting.PrunedArticulation+counting.PrunedForcedChain,
+		counting.Pruned, "pruned total equals the per-reason breakdown")
 }
 
 func TestParallelCountWithDepthMatchesReference(t *testing.T) {
@@ -48,8 +76,9 @@ func TestParallelCountWithDepthMatchesReference(t *testing.T) {
 		size     int
 		expected uint64
 	}{
-		{name: "5x5 depths 1-4", size: 5, expected: 1728, depths: []int{1, 2, 3, 4}},
-		{name: "6x6 depths 1-10", size: 6, expected: 6_637_920, depths: []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}},
+		{name: "5x5 depths 1-12", size: 5, expected: 1728, depths: []int{1, 2, 3, 4, 6, 9, 12}},
+		// 6×6 sweeps are slow; sample shallow + the default-ish middle.
+		{name: "6x6 sampled depths", size: 6, expected: 6_637_920, depths: []int{1, 5, 8, 14}},
 	}
 
 	for _, tt := range tests {
@@ -58,113 +87,106 @@ func TestParallelCountWithDepthMatchesReference(t *testing.T) {
 			counter := NewCounter(g)
 
 			for _, depth := range tt.depths {
-				count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 4, depth, 0)
+				count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 4, depth)
 				assert.Equal(t, tt.expected, count, "size=%d depth=%d", tt.size, depth)
 			}
 		})
 	}
 }
 
-// Root and oracle depths are independent knobs; every combination must yield
-// the same total, including pairings impossible before the shape oracle
-// (small roots with deep reversal levels).
-func TestSplitOracleDepthGrid(t *testing.T) {
-	const size = 6
+// Results must be deterministic in the worker count (work-stealing order).
+func TestWorkerInvariance(t *testing.T) {
+	const size = 5
 	g := graph.New(size)
 	counter := NewCounter(g)
 
-	for _, root := range []int{4, 5, 7} {
-		for _, oracleD := range []int{1, 8, 10, 14, 20} {
-			count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 4, root, oracleD)
-			assert.Equal(t, uint64(6_637_920), count, "root=%d oracle=%d", root, oracleD)
+	for _, depth := range []int{3, 6, 12} {
+		countSeq := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 1, depth)
+		assert.Equal(t, uint64(1728), countSeq, "depth=%d", depth)
+		for _, workers := range []int{3, 8} {
+			count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), workers, depth)
+			assert.Equal(t, countSeq, count, "depth=%d: result must not depend on worker count", depth)
 		}
 	}
 }
 
-func TestGenerateSubTasksWeightsMatchOrbits(t *testing.T) {
+// Forcing the persistent tail memo on must not change the total (values are
+// pure functions of (todo, cur), so cross-shape reuse is exact) and must
+// actually exercise the level; results stay worker-invariant because every
+// worker owns its table.
+func TestTailMemoMatchesReference(t *testing.T) {
+	for _, workers := range []int{1, 4} {
+		g := graph.New(5)
+		counter := NewCounter(g)
+		counter.SetTailMemo(49, 0)
+
+		fm := monitoring.NewFakeMonitor()
+		assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), fm, workers, 6),
+			"workers=%d", workers)
+
+		counting := fm.Phase("counting")
+		assert.Positive(t, counting.TailLookups, "forced tail level must be probed")
+	}
+}
+
+func TestGenerateIntermediateWeightsMatchOrbits(t *testing.T) {
 	g := graph.New(5)
 	counter := NewCounter(g)
+	ctx := context.Background()
 
-	// Per group: every raw prefix contributes its orbit size to the cache,
+	const base = 2
+
+	// Per group: every raw prefix contributes its orbit size to the table,
 	// so total weight must equal CacheWrites * OrbitSize regardless of merging.
-	for _, group := range counter.symmetry.GetCanonicalGroups() {
-		if g.SholdSkip(group.Canonical) {
-			continue
-		}
-
-		groupCache := cache.NewCache(counter.symmetry)
-		result := counter.searcher.GenerateSubtasks(context.Background(), groupCache, group.Canonical, group.OrbitSize, 2)
-
-		totalWeight := 0
-		groupCache.Each(context.Background(), 1, func(_ context.Context, _ path.Path, weight int) error {
-			assert.Positive(t, weight, "weight must be positive")
-			totalWeight += weight
-			return nil
-		})
-
-		assert.Equal(t, result.CacheWrites*group.OrbitSize, totalWeight,
-			"group %d: total weight equals prefixes * orbit size", group.Canonical)
-	}
-
-	// Merging across groups conserves the total weight and never increases entry count.
-	fullCache := counter.generateSubTasks(context.Background(), monitoring.NewFakeMonitor(), 4, 2)
-	fullWeight := 0
-	fullCache.Each(context.Background(), 1, func(_ context.Context, _ path.Path, weight int) error {
-		fullWeight += weight
-		return nil
-	})
-
 	expectedWeight := 0
 	for _, group := range counter.symmetry.GetCanonicalGroups() {
 		if g.SholdSkip(group.Canonical) {
 			continue
 		}
-		groupCache := cache.NewCache(counter.symmetry)
-		result := counter.searcher.GenerateSubtasks(context.Background(), groupCache, group.Canonical, group.OrbitSize, 2)
-		expectedWeight += result.CacheWrites * group.OrbitSize
+
+		groupAcc := cache.NewAccumulator()
+		sink := groupAcc.Local()
+		result := counter.searcher.GenerateRoots(ctx, sink, group.Canonical, uint64(group.OrbitSize), base)
+		sink.Flush()
+
+		totalWeight := uint64(0)
+		for _, e := range groupAcc.Drain() {
+			assert.Positive(t, e.Weight, "weight must be positive")
+			totalWeight += e.Weight
+		}
+
+		assert.Equal(t, uint64(result.CacheWrites)*uint64(group.OrbitSize), totalWeight,
+			"group %d: total weight equals prefixes * orbit size", group.Canonical)
+		expectedWeight += int(totalWeight)
 	}
 
-	assert.Equal(t, expectedWeight, fullWeight, "cross-group merging conserves total weight")
+	// Merging across groups conserves the total weight.
+	entries := counter.generateIntermediate(ctx, monitoring.NewFakeMonitor(), 4, base)
+	fullWeight := uint64(0)
+	for _, e := range entries {
+		fullWeight += e.Weight
+	}
+
+	assert.Equal(t, uint64(expectedWeight), fullWeight, "cross-group merging conserves total weight")
 }
 
-func TestCounterFromPosition(t *testing.T) {
+// Phase A must stop at min(depth, TwoPhaseBaseDepth): with a deeper target
+// every intermediate entry sits exactly at the base depth.
+func TestGenerateIntermediateStopsAtBaseDepth(t *testing.T) {
 	g := graph.New(5)
 	counter := NewCounter(g)
 
-	count := counter.CountFromPosition(context.Background(), 0)
-
-	assert.Positive(t, count, "Should find paths from valid starting position")
-}
-
-func TestTwoPhaseMatchesSinglePhase(t *testing.T) {
-	g := graph.New(5)
-	counter := NewCounter(g)
-	ctx := context.Background()
-
-	const depth = 7 // > TwoPhaseBaseDepth: generateSubTasks must go two-phase
-
-	direct := cache.NewCache(counter.symmetry)
-	for _, group := range counter.symmetry.GetCanonicalGroups() {
-		counter.searcher.GenerateSubtasks(ctx, direct, group.Canonical, group.OrbitSize, depth)
-	}
-
-	twoPhase := counter.generateSubTasks(ctx, monitoring.NewFakeMonitor(), 8, depth)
-
-	assert.Equal(t, direct.ItemsCount(), twoPhase.ItemsCount(), "Two-phase cache has the same key set")
-	for _, e := range direct.Entries() {
-		weight, ok := twoPhase.GetCanonical(e.Path)
-		assert.True(t, ok, "Key %v present in two-phase cache", e.Path)
-		assert.Equal(t, e.Weight, weight, "Weight of key %v matches single phase", e.Path)
+	entries := counter.generateIntermediate(context.Background(), monitoring.NewFakeMonitor(), 8, 7)
+	assert.NotEmpty(t, entries)
+	for _, e := range entries {
+		assert.Equal(t, TwoPhaseBaseDepth, e.Path.State().CountBits())
 	}
 }
 
-func TestTwoPhaseParallelMatchesSequential(t *testing.T) {
-	g := graph.New(5)
-	counter := NewCounter(g)
-
-	countSeq := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 1, 6, 0)
-	countPar := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 8, 7, 0)
-
-	assert.Equal(t, uint64(1728), countSeq)
-	assert.Equal(t, countSeq, countPar, "Two-phase results must not depend on worker count or depth")
+func TestDefaultPrecomputeDepth(t *testing.T) {
+	assert.Equal(t, 6, DefaultPrecomputeDepth(5))
+	assert.Equal(t, 10, DefaultPrecomputeDepth(6))
+	assert.Equal(t, 20, DefaultPrecomputeDepth(7))
+	assert.Equal(t, 14, DefaultPrecomputeDepth(8))
+	assert.Equal(t, TwoPhaseBaseDepth+1, DefaultPrecomputeDepth(9))
 }

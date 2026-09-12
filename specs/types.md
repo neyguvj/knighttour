@@ -11,11 +11,7 @@
 
 ```go
 type Result struct {
-    TotalPathsFound int // количество найденных путей в поддереве
-
-    // Кэш префиксов (reversal-lookup'ы считаются у места вызова GetCanonical)
-    CacheHits   int // попадания в кэш на уровнях досрочного завершения
-    CacheMisses int // промахи (нет записи → h = 0 для этого конца)
+    TotalPathsFound int // количество найденных путей в поддереве (сейчас никто не заполняет)
 
     // Прунинг по видам (значения pruner.Reason); Pruned == сумма по видам
     // (пересчитывается методом Finalize на выходе публичных методов searcher)
@@ -24,11 +20,22 @@ type Result struct {
     PrunedNoCont     int // у last нет непосещённых соседей (нет продолжения)
     PrunedDisconn    int // G[unvisited] несвязен
     PrunedEndpoints  int // эвристика концов (degree-1 вершины)
+    PrunedArticulation int // L2: сочленения графа состояния (только shapecount DP)
+    PrunedForcedChain  int // L2: противоречие обязательных цепочек (только shapecount DP)
 
-    CacheWrites int // число записей в кэш (вызовов cache.Set, включая обновление существующих ключей)
+    CacheWrites int // число эмиссий в аккумуляторы (sink.Add, включая слияние в существующий ключ)
+
+    DPStates int // заполняет shapecount: состояний DP, промахнувшихся по memo
+                 // (метрика «узлов DP» для этапа 0 плана 04; searcher не ведёт)
+
+    TailLookups int // shapecount only: обращений к persistent tail-мемо (план 03)
+    TailHits    int // shapecount only: попаданий в tail-мемо (hit-rate = hits/lookups)
+
+    FilteredShapes int // shapecount only: форм, убитых shape-фильтром до DP (план 02);
+                       // отдельно от pruned* — исторические метрики прунинга не смешиваются
 }
 
-func (r *Result) Add(other Result)
+func (r *Result) Add(other *Result)
 // Суммирует поля result и other покомпонентно
 
 func (r *Result) CountPrune(reason pruner.Reason)
@@ -43,22 +50,20 @@ func (r *Result) Finalize()
 Историческая справка: поле `CachedPaths` называло счётчик `Set()` «закэшированными
 путями», хотя это именно **записи в кэш** (одно и то же состояние может быть
 записано многократно из разных префиксов) — переименовано в `CacheWrites`.
+Поля `CacheHits/CacheMisses` удалены вместе с legacy prefix-cache reversal.
 
-Замечание об учёте hits/misses: счётчики ведутся **локально у вызывающего**
-(`Reversal.Completions`), а не внутри `Cache`: воркеры фазы counting работают
-конкурентно, и глобальные атомики кэша нельзя корректно разложить по подзадачам
-(окна снапшотов пересекаются). Локальный аккумулятор `*Result` прокидывается
-через DFS без атомиков и contention.
+Замечание об учёте статистики: счётчики ведутся **локально у вызывающего** —
+локальный аккумулятор `*Result` прокидывается через DFS без атомиков и
+contention; конкурентные воркеры не делят общих счётчиков.
 
 ## Использование
 
 ```go
-// В Searcher:
-result := searcher.CountPaths(ctx, start)
-fmt.Printf("Found %d paths\n", result.TotalPathsFound)
+// В Searcher (фазы генерации):
+result := searcher.GenerateRoots(ctx, sink, start, orbitSize, depth)
+fmt.Printf("Cache writes %d, pruned %d\n", result.CacheWrites, result.Pruned)
 
-result2 := searcher.GenerateSubtasks(ctx, cache, start, orbitSize, depth)
-fmt.Printf("Cache writes %d, pruned %d\n", result2.CacheWrites, result2.Pruned)
+result2 := searcher.ExtendToClasses(ctx, sink, p, weight, depth)
 ```
 
 ## Ограничения

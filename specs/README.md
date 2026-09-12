@@ -30,8 +30,8 @@ $ go run main.go -size 8 -workers 8
 | State | state/state.go | Битовая маска посещенных клеток (uint64) |
 | Symmetry | symmetry/symmetry.go | Работа с симметриями доски и канонизация путей |
 | DeadEndPruner | pruner/deadend.go | Отсечение тупиковых ветвей поиска |
-| Cache | cache/cache.go | Мемоизация промежуточных результатов с шардингом (64 шарда) |
-| Oracle | oracle/oracle.go | Мемоизация h(U,u) по классам форм (D4 ⋉ трансляции), см. `specs/oracle.md` |
+| Accumulator | cache/accumulator.go | Аддитивная таблица «ключ → Σ весов» (64 шарда, LocalSink-писатели); единое хранилище gen A и M, см. `specs/cache.md` |
+| Shapecount | shapecount/shapecount.go | DP вычисление h(shape,ends) по классу формы, см. `specs/shapecount.md` |
 | Searcher | searcher/searcher.go | DFS backtracking алгоритм |
 | Counter | counter/counter.go | Агрегация и подсчет маршрутов с учетом симметрий |
 | Monitor | monitoring/monitor.go | Отображение прогресса поиска в реальном времени |
@@ -173,48 +173,21 @@ type DeadEndPruner struct {
 ---
 
 ### cache/cache.go
-**Ответственность:** Мемоизация промежуточных результатов для избежания повторных вычислений
+**Ответственность:** Единое хранилище «ключ → агрегированный вес» (см. cache.md)
 
-**Структура:**
 ```go
-type shard struct {
-    sync.RWMutex
-    data map[path.Path]int  // canonical path → countOfSolutions
-}
-
-type Cache struct {
-    shards   [64]shard      // шардинг для параллельного доступа
-    symmetry *Symmetry       // для канонизации путей
-}
+type Accumulator struct{ ... } // 128 шардов map[path.Path]uint64 под мьютексами, хэш только State
+func NewAccumulator() *Accumulator
+func (a *Accumulator) Add(p path.Path, weight uint64)
+func (a *Accumulator) DrainShard(i int) []Entry // отдаёт и освобождает шард (чтение после записи)
+func (a *Accumulator) Drain() []Entry           // worklist следующей фазы (маленькие таблицы)
+func (a *Accumulator) Local() *LocalSink // буфер писателя (Flush пачками)
 ```
 
-**Методы:**
-- `NewCache(sym *Symmetry) *Cache` — создание кэша с 64 шардами
-- `Get(path path.Path) (int, bool)` — получить результат для канонического пути
-- `Set(path path.Path, val int)` — сохранить результат (суммирует при совпадении)
-- `Has(path path.Path) bool` — проверка наличия записи
-- `Delete(path path.Path)` — удаление записи
-- `Clear()` — очистка всех шардов
-- `ItemsCount() int` — количество записей в кэше
-- `Each(ctx context.Context, workers int, f func(ctx context.Context, p path.Path, count int))` — параллельная итерация по всем записям (errgroup)
+Прежний `Cache` (Get/Set/Each + RWMutex) удалён: после отказа от legacy
+prefix-cache reversal чтение возможно только снапшотом между фазами.
 
-**Хэширование:**
-- Мультипликативный хэш без аллокаций (умножение на константы золотого сечения)
-- Индекс шарда = старшие 6 бит хэша (numShards = 64)
-
-**Использование:**
-- При рекурсивном вызове сначала проверить кэш
-- После подсчета всех путей сохранить в кэш
-- Канонизация путей объединяет симметричные состояния
-
-**Ограничения:**
-- Для 8×8 количество возможных состояний огромно (2^64)
-- Эффективен для поддеревьев с малым числом непосещенных клеток
-
-**Тесты:**
-- Проверка Get/Set корректности
-- Параллельный доступ (мультипоточный test)
-- Hit/miss ratio для известных паттернов
+**Хэширование:** мультипликативный хэш без аллокаций, индекс шарда = старшие 6 бит.
 
 ### searcher/searcher.go
 **Ответственность:** Основной алгоритм поиска с использованием всех оптимизаций
@@ -228,52 +201,27 @@ type Searcher struct {
 }
 ```
 
-**Методы:**
+**Методы:** (подробно — searcher.md)
 
-1. `CountPaths(ctx context.Context, start int) types.Result`
-   - Создает начальный путь с посещенной стартовой клеткой
-   - Вызывает CountPathsDFS для рекурсивного поиска
-   - Возвращает types.Result с TotalPathsFound
+1. `GenerateRoots(ctx, sink *cache.LocalSink, start int, orbitSize uint64, depth int) types.Result`
+   - Фаза A: префиксы глубины depth из канонического старта, эмиссия
+     `Canonicalize(state,end)` с весом орбиты; `SholdSkip` → пустой результат
 
-2. `CountPathsDFS(ctx context.Context, p path.Path) types.Result`
-   - Считает полные маршруты из состояния p; если состояние уже полное — возвращает 1
-   - Внутри — горячий рекурсивный метод `dfs` по битовым маскам с prune через
-     `deadend.ShouldPruneAfterVisit`
+2. `ExtendToClasses(ctx, sink *cache.LocalSink, p path.Path, weight uint64, depth int) types.Result`
+   - Фаза B: спуск до depth; на листьях — эмиссия классов дополнений
+     `KeyFromPrepared(U,u)` в аккумулятор M (shapecount.md)
 
-3. `GenerateSubtasks(ctx context.Context, c *cache.Cache, start int, orbitSize int, depth int) types.Result`
-   - Генерирует префиксы глубины depth из стартовой позиции и сохраняет их в кэш
-   - Позиции, пропускаемые по цветовому правилу (`SholdSkip`), дают пустой результат
-   - Возвращает types.Result с CacheWrites (число записей в кэш) и Pruned (отсечённые ветви)
+(публичные `CountPaths*`, legacy `Reversal` и внутренний DFS полного счёта
+удалены; полный счёт в тестах — brute-force и мелкий прогон фаз, см. searcher.md)
 
-4. `dfs(ctx context.Context, st state.State, start, end, depth int, c *cache.Cache, stats *dfsStats, rev *Reversal) int`
-   - Единый внутренний горячий DFS: используется и для полных маршрутов
-     (`depth = totalCells`, `c = nil`), и для генерации префиксов
-     (`depth = precomputeDepth`, `c != nil`)
-
-**Алгоритм:**
+**Алгоритм спуска (общий для всех):**
 ```
-dfs(state, end, depth, cache, weight, stats, rev):
+dfs(state, end):
     if ctx.Err() != nil: return 0
-
-    if CountBits(state) >= depth:          // достигнута глубина префикса
-        if cache != nil:
-            cache.Set(Path(state, end), weight)
-            stats.cacheWrites++
-        return 1
-
     unvisited = Invert(state)
-    count = 0
     for n in NeighborMask(end) & unvisited:   // итератор AllVisited()
-        newUnvisited = unvisited - {n}
-
-        if !newUnvisited.IsEmpty() && deadend.ShouldPruneAfterVisit(n, newUnvisited):
-            stats.pruned++
-            continue
-
-        count += dfs(state.Visit(n), n, depth, cache, weight, stats, rev)
-
-    return count
-```
+        if !unvisited-{n}.IsEmpty() && pruner.ShouldPruneAfterVisit(n, ...): prune++
+        recurse
 
 **Типы данных:**
 ```go
@@ -319,36 +267,25 @@ type Counter struct {
 ```
 
 **Константы:**
-- `DefaultPrecomputeDepth = 1` — глубина предварительного разбиения по умолчанию
+- `TwoPhaseBaseDepth = 5` — глубина промежуточного аккумулятора фазы A
+- `DefaultPrecomputeDepth(size)` — глубина по умолчанию: таблица `{5:6, 6:14, 7:20, 8:14}`
 
 **Методы:**
 
 1. `NewCounter(graph *Graph) *Counter`
    - Создает симметрии и searcher для заданной доски
 
-2. `CountFromPosition(ctx context.Context, start int) int`
-   - Подсчет маршрутов из конкретной стартовой позиции
-   - Используется для отладки и проверки отдельных позиций
+2. `ParallelCount(ctx context.Context, monitor monitoring.Monitor, workers int) uint64`
+   - Параллельный подсчет с глубиной по умолчанию для размера доски
 
-3. `ParallelCount(ctx context.Context, monitor monitoring.Monitor, workers int) uint64`
-   - Параллельный подсчет с использованием канонических групп
-   - Вызов `ParallelCountWithDepth` с глубиной по умолчанию
-
-4. `ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers int, precomputeDepth int) uint64`
-   - Параллельный подсчет с предварительным разбиением задач
-   - Алгоритм:
-     ```go
-     1. generateSubTasks: для каждой канонической группы (параллельно через errgroup
-        с SetLimit(workers)) вызвать searcher.GenerateSubtasks(...) и сохранить
-        префиксы в кэш; добавить len(groups) задач в мониторинг
-     2. Добавить taskCache.ItemsCount() задач в мониторинг
-     3. Пройтись по кэшу через Each(ctx, workers, ...):
-        - Вызвать CountPathsDFS для каждой записи
-        - Умножить результат на count * symmetry.GetOrbitSize(p.Start())
-        - Регистрировать завершение в мониторинге
-     4. Суммировать все результаты через atomic.Uint64 без блокировок
+3. `ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor, workers int, precomputeDepth int) uint64`
+   - Единый class-mode пайплайн (подробно — counter.md):
      ```
-   - Использует `atomic.Uint64` для суммирования без блокировок
+     gen A: группы стартов → GenerateRoots в промежуточный аккумулятор (LocalSink'и)
+     gen B: снапшот → чанк-воркеры ExtendToClasses в аккумулятор M (LocalSink'и)
+     counting: снапшот M по формам → shapecount.CountShape, total += Σ h·M
+     ```
+   - Суммирование через `atomic.Uint64` без блокировок
 
 **Использование:**
 ```go
@@ -360,17 +297,17 @@ fmt.Printf("Total tours: %d\n", count)
 ```
 
 **Мониторинг:**
-- `monitor.BeginPhase(name)` — начать новую фазу (`generation` / `gen A` / `gen B` / `counting`)
+- `monitor.BeginPhase(name)` — начать новую фазу (`gen A` / `gen B` / `counting`)
 - `monitor.AddTasks(count int)` — увеличить количество задач активной фазы
 - `monitor.Start(ctx)` — запустить периодический вывод прогресса (каждую секунду)
-- `monitor.ReportPathsFound(count)` / `monitor.ReportCacheWrites(count)` / `monitor.ReportPruned(count)` — зарегистрировать метрики активной фазы
+- `monitor.ReportPathsFound(count)` / `monitor.ReportSubtask(result)` — метрики активной фазы
 - `monitor.ReportTaskCompleted()` — зарегистрировать завершение одной задачи
+- `monitor.ReportShapeStats(classes, shapes, zeros)` — итоги форм (один раз)
 - `monitor.Finish()` — финальный отчет по фазам
 
 **Тесты:**
-- Проверка что сумма (count × orbit_size) дает полный результат
+- Итог на всех допустимых глубинах == эталон доски (1728 / 6 637 920)
 - Сравнение sequential vs parallelCount (должны совпасть)
-- Для 5×5: проверить что результат соответствует известному значению
 
 ---
 
@@ -456,21 +393,20 @@ defer monitor.Finish()
 
 count := c.ParallelCountWithDepth(ctx, monitor, workers, depth)
 
-// В worker'ах (для кэширования подзадач):
-result := searcher.GenerateSubtasks(ctx, cache, p, orbitSize, depth)
-monitor.ReportCacheWrites(result.CacheWrites)
-monitor.ReportPruned(result.Pruned)
+// Внутри фаз генерации (каждая задача — эмиссия через LocalSink):
+result := searcher.GenerateRoots(ctx, sink, p, orbitSize, baseDepth)    // gen A
+result := searcher.ExtendToClasses(ctx, sink, e.Path, e.Weight, depth)  // gen B
+monitor.ReportSubtask(result)
 monitor.ReportTaskCompleted()
 
-// При параллельном подсчете из кэша:
-taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, count int) {
-    result := c.searcher.CountPathsDFS(ctx, p)
-    orbits := c.symmetry.GetOrbitSize(p.Start())
-
-    total.Add(uint64(result.TotalPathsFound * count * orbits))
-    monitor.ReportPathsFound(result.TotalPathsFound * count * orbits)
-    monitor.ReportTaskCompleted()
-})
+// Финальный проход по формам:
+var stats types.Result
+hs := sc.CountShape(shape, ends, &stats) // прунинг DP — в stats
+contribution := Σ hs[j]·snapshot[j].Weight
+totalPaths.Add(contribution)
+monitor.ReportPathsFound(int(contribution))
+monitor.ReportSubtask(stats)
+monitor.ReportTaskCompleted()
 ```
 
 ## План реализации
