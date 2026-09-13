@@ -38,9 +38,11 @@ Rules, table procedure (`make bench-table`) and freshness stamp: skill `readme-w
 - `/task`  – lightweight spec-first in one context (specs updated before code).
 - `/feature` – full pipeline: interview (skills) → specs/plan updated → **coder ⇄ reviewer loop**
   until `VERDICT: APPROVED` (max 5 iters, sessions resumed by task_id) → `benchmarker` writes ADR
-  measurements for hot-path changes. Subagents: `coder` (implements to green `make check`),
+  measurements for hot-path changes → commit on explicit user confirmation → handoff notes in
+  `.opencode/handoff/<slug>.md` (git-ignored) + printed `opencode run --command …`; one session =
+  one feature, continuation happens in that new session only. Subagents: `coder` (implements to green `make check`),
   `reviewer` (read-only, severity BLOCKER/MAJOR/MINOR + `SPEC_OK`), `benchmarker`
-  (WIN/REGRESSION/NOISE, records numbers in ADR). Restart opencode after editing agent/skill files.
+  (WIN/REGRESSION/NOISE, records numbers in ADR). Restart opencode after editing agent/skill/command files.
 
 ## Quick Start
 

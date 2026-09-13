@@ -30,3 +30,6 @@ go.work.sum
 # Editor/IDE
 # .idea/
 # .vscode/
+
+# feature handoff notes (next-steps for the follow-up session)
+.opencode/handoff/
