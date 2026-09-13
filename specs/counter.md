@@ -62,11 +62,12 @@ mode игнорируются.
 2. **gen B** — чанк-воркеры тянут worklist gen A и зовут `searcher.ExtendTask(...)` с
    записью напрямую в `cache.Cache` task-cache (без LocalSink). Фаза вырождается так же,
    через запись самой записи.
-3. **counting** — без полного снапшота таблицы (ADR-012): воркеры по атомарному курсору
-   берут индексы шардов task-cache, делают `SnapshotShard(i)` и выполняют все задачи шарда
-   `searcher.CountPathsWithCacheReversal(ctx, task, taskCache, precomputeDepth)` сами,
-   добавляя `w · paths` в общий `atomic.Uint64`. Доп. память фазы — O(workers×шард);
-   таблица до конца фазы только читается (`Get`).
+3. **counting** — прямой обход task-cache без копирования (ADR-013): `taskCache.Each`
+   с `workers` параллельными горутинами на шарды; колбэк для каждой записи `(task, w)` —
+   `searcher.CountPathsWithCacheReversal(ctx, task, taskCache, precomputeDepth)`,
+   `w · paths` складывается в общий `atomic.Uint64`. Диспатч не аллоцирует; колбэк
+   работает под RLock шарда при отсутствии писателей (контракт `cache.Each`). Отмена ctx
+   проверяется перед каждым шардом и каждой задачей.
 
 ## Инварианты и корректность
 
@@ -99,5 +100,5 @@ ReportShapeStats.
 
 ## Связанные
 
-ADR-001, ADR-010; `specs/searcher.md`, `specs/cache.md`, `specs/shapecount.md`,
+ADR-001, ADR-010, ADR-013; `specs/searcher.md`, `specs/cache.md`, `specs/shapecount.md`,
 `specs/monitoring.md`. Методология замеров — `specs/benchmarks.md`.

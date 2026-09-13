@@ -101,4 +101,5 @@ GC-headroom над ней: totalAlloc 32.8 ГБ аллокационного ш�
 ## Ссылки
 
 Код: `cache/cache.go`, `counter/counter.go`. Спеки: cache, counter. Планы: 08.
-Смежные ADR: 011 (порт reversal), 004 (drain без снимка — та же идея памяти).
+Смежные ADR: 011 (порт reversal), 004 (drain без снимка — та же идея памяти),
+013 (замена per-shard снимков прямым обходом `Each`; контроль-числа ADR-012 — там).

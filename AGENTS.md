@@ -141,8 +141,8 @@ make bench            # Benchmarks (counter/)
   - `Accumulator` keyed by `path.Path` (`Add()`, `DrainShard(i)`, `Drain()`, `ItemsCount()`);
     writers use `Local()` → `LocalSink` (per-goroutine buffer, threshold `Flush`) to avoid
     lock churn. Reading is per-shard drain (no copying Snapshot — it doubled peak memory).
-  - `Cache` – reversal-mode task cache (`Set()`, concurrent `Get()`, lazy `NumShards()`/
-    `SnapshotShard(i)` dispatch); lives until the end of the count phase, never drained per shard.
+  - `Cache` – reversal-mode task cache (`Set()`, concurrent `Get()`, count-phase `Each()`
+    direct-shard walk under RLock); lives until the end of the count phase, never drained per shard.
 - **shapecount/** – DP h(shape,ends) per translation+D4 shape class, no memo table (class mode final pass)
   - Methods: `CountShape(shape, ends)` (shared memo across ends of one shape),
     `CountShapeWithTail(..., tail)` + `NewTail()`/`SetTailMemo(k, slots)` – optional

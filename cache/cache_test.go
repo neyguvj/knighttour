@@ -1,10 +1,15 @@
 package cache
 
 import (
+	"context"
+	"errors"
+	"fmt"
 	"sync"
+	"sync/atomic"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"knighttour/path"
 	"knighttour/state"
@@ -71,72 +76,156 @@ func TestCacheSetGetAndZeroWeight(t *testing.T) {
 	}
 }
 
-// SnapshotShard across NumShards covers the table exactly once and leaves it
-// alive: every record stays readable via Get, a repeated union is identical,
-// and no key is emitted by two shards (specs/cache.md).
-func TestCacheSnapshotShardCoversTable(t *testing.T) {
-	c := NewCache()
+// eachUnion walks c once via Each and folds the delivered records into a map,
+// asserting on the way that every record the callback sees is exactly what Get
+// returns for its key (specs/cache.md).
+func eachUnion(t *testing.T, c *Cache, workers int) map[path.Path]uint64 {
+	t.Helper()
+	m := make(map[path.Path]uint64)
+	var mu sync.Mutex
+	err := c.Each(context.Background(), workers, func(_ context.Context, p path.Path, w uint64) error {
+		stored, found := c.Get(p) // shared RLock: Get works from inside the walk
+		assert.Truef(t, found, "Get lost record %v", p)
+		assert.Equal(t, w, stored)
+		mu.Lock()
+		defer mu.Unlock()
+		_, dup := m[p]
+		assert.False(t, dup, "key emitted by two shards")
+		m[p] = w
+		return nil
+	})
+	require.NoError(t, err)
+	return m
+}
+
+// Each covers the whole table exactly once — no duplicates, no losses — with
+// workers clamped (0), a single worker and many, and leaves every record in
+// place: Get still sees it and a repeated walk is identical (specs/cache.md).
+func TestCacheEachCoversTable(t *testing.T) {
 	const n = 500
-	for i := range n {
-		c.Set(path.New(state.State(i), i%17), uint64(i+1))
+	tests := []struct {
+		name    string
+		workers int
+	}{
+		{name: "zero workers clamped", workers: 0},
+		{name: "single worker", workers: 1},
+		{name: "many workers", workers: 8},
 	}
 
-	union := func() map[path.Path]uint64 {
-		m := make(map[path.Path]uint64, n)
-		for i := range c.NumShards() {
-			for _, e := range c.SnapshotShard(i) {
-				_, dup := m[e.Path]
-				assert.False(t, dup, "key emitted by two shards")
-				m[e.Path] = e.Weight
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewCache()
+			for i := range n {
+				c.Set(path.New(state.State(i), i%17), uint64(i+1))
 			}
-		}
-		return m
-	}
 
-	first := union()
-	assert.Len(t, first, n, "shard snapshots cover the table once")
-	assert.Equal(t, n, c.ItemsCount(), "SnapshotShard must not drain the table")
-	assert.Equal(t, first, union(), "repeated snapshot is identical (data stays)")
-
-	for i := range n {
-		weight, found := c.Get(path.New(state.State(i), i%17))
-		assert.True(t, found, "Get sees the record after its shard was snapshotted")
-		assert.Equal(t, uint64(i+1), weight)
+			first := eachUnion(t, c, tt.workers)
+			assert.Len(t, first, n, "Each covers the table once")
+			assert.Equal(t, n, c.ItemsCount(), "Each must not drain the table")
+			assert.Equal(t, first, eachUnion(t, c, tt.workers), "repeated walk is identical (data stays)")
+		})
 	}
 }
 
-// Concurrent Get and SnapshotShard of one shard under -race: readers share the
-// RLock (no writers in the count phase), so every snapshot is consistent with
-// the live table and nothing is mutated.
-func TestCacheConcurrentGetAndSnapshotShard(t *testing.T) {
+// Cancelling ctx stops the walk before the next shard: with a single worker at
+// most the shard in flight finishes, so strictly less than the full table is
+// delivered and Each returns ctx.Err() (specs/cache.md).
+func TestCacheEachCtxCancelStopsWalk(t *testing.T) {
 	c := NewCache()
 	const n = 2000
 	for i := range n {
 		c.Set(path.New(state.State(i), 0), uint64(i+1))
 	}
-	shard := shardIndex(path.New(state.State(0), 0))
 
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	var seen int
+	err := c.Each(ctx, 1, func(_ context.Context, _ path.Path, _ uint64) error {
+		seen++
+		if seen == 1 {
+			cancel()
+		}
+		return nil
+	})
+	require.ErrorIs(t, err, context.Canceled)
+	assert.Positive(t, seen, "the shard in flight still delivers its records")
+	assert.Less(t, seen, n, "cancelled walk stops before the whole table")
+}
+
+// The first error from f is returned by Each and stops scheduling new shards:
+// with a single worker the walk ends at exactly that record (specs/cache.md).
+func TestCacheEachStopsOnFirstError(t *testing.T) {
+	c := NewCache()
+	const n = 100
+	for i := range n {
+		c.Set(path.New(state.State(i), 0), uint64(i+1))
+	}
+
+	wantErr := errors.New("callback failed")
+	var seen int
+	err := c.Each(context.Background(), 1, func(_ context.Context, _ path.Path, _ uint64) error {
+		seen++
+		return wantErr
+	})
+	require.ErrorIs(t, err, wantErr)
+	assert.Equal(t, 1, seen, "the first error stops the walk")
+}
+
+// walkOnce runs one full Each walk of c and reports how many records of st it
+// delivered plus the first callback error. A weight mismatch is surfaced as an
+// error so Each aborts that shard — safe because every reader drives its own
+// walk with a fresh context.
+func walkOnce(c *Cache, st state.State) (int, error) {
+	seen := 0
+	err := c.Each(context.Background(), 4, func(_ context.Context, p path.Path, w uint64) error {
+		if p.State() != st {
+			return nil
+		}
+		if want := uint64(p.End() + 1); w != want {
+			return fmt.Errorf("weight for end %d: got %d want %d", p.End(), w, want)
+		}
+		seen++
+		return nil
+	})
+	return seen, err
+}
+
+// Concurrent Get and Each of one shard under -race: readers share the RLock
+// (no writers in the count phase), so every walk is consistent with the live
+// table and nothing is mutated. All keys share one State → one shard: walks
+// and Gets contend on exactly one read lock (specs/cache.md). n = 256 is the
+// whole uint8 end range — the distinct keys one State can hold.
+func TestCacheConcurrentGetAndEach(t *testing.T) {
+	c := NewCache()
+	const n = 256
+	const st = state.State(0x5F00FF00)
+	for e := range n {
+		c.Set(path.New(st, e), uint64(e+1))
+	}
+
+	var missing, badWalks atomic.Int64
 	var wg sync.WaitGroup
 	for range 4 {
 		wg.Go(func() {
 			for i := range n {
-				if _, found := c.Get(path.New(state.State(i), 0)); !found {
-					t.Error("record missing during concurrent snapshot")
-					return
+				if _, found := c.Get(path.New(st, i)); !found {
+					missing.Add(1)
 				}
 			}
 		})
 		wg.Go(func() {
 			for range 50 {
-				if len(c.SnapshotShard(shard)) == 0 {
-					t.Error("shard snapshot empty while the table is populated")
-					return
+				seen, err := walkOnce(c, st)
+				if err != nil || seen != n {
+					badWalks.Add(1)
 				}
 			}
 		})
 	}
 	wg.Wait()
 
+	assert.Zero(t, missing.Load(), "Get never loses a record during concurrent walks")
+	assert.Zero(t, badWalks.Load(), "every walk sees all records with correct weights")
 	assert.Equal(t, n, c.ItemsCount(), "readers must not mutate the table")
 }
 

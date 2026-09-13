@@ -253,13 +253,17 @@ func buildTaskCache(g *graph.Graph, searcher *Searcher, d int) *cache.Cache {
 	return c
 }
 
-// allTasks flattens every shard snapshot of a task-cache into one slice — the
-// per-shard iteration the count phase uses after ADR-012 removed Cache.Entries.
-func allTasks(c *cache.Cache) []cache.Entry {
+// allTasks flattens a task-cache into one slice via Each — the direct shard
+// walk the count phase uses after plan 09 removed the Cache snapshots. One
+// worker keeps the append race-free without an extra lock.
+func allTasks(tb testing.TB, c *cache.Cache) []cache.Entry {
+	tb.Helper()
 	out := make([]cache.Entry, 0, c.ItemsCount())
-	for i := range c.NumShards() {
-		out = append(out, c.SnapshotShard(i)...)
-	}
+	err := c.Each(context.Background(), 1, func(_ context.Context, p path.Path, w uint64) error {
+		out = append(out, cache.Entry{Path: p, Weight: w})
+		return nil
+	})
+	require.NoError(tb, err)
 	return out
 }
 
@@ -282,7 +286,7 @@ func TestReversalMatchesBruteForceAllDepths(t *testing.T) {
 			require.Positive(t, taskCache.ItemsCount())
 
 			var sum uint64
-			for i, e := range allTasks(taskCache) {
+			for i, e := range allTasks(t, taskCache) {
 				res := searcher.CountPathsWithCacheReversal(context.Background(), e.Path, taskCache, d)
 				sum += e.Weight * uint64(res.TotalPathsFound)
 

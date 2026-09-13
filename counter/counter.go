@@ -3,6 +3,7 @@ package counter
 import (
 	"cmp"
 	"context"
+	"errors"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -12,6 +13,7 @@ import (
 	"knighttour/cache"
 	"knighttour/graph"
 	"knighttour/monitoring"
+	"knighttour/path"
 	"knighttour/pruner"
 	"knighttour/searcher"
 	"knighttour/shapecount"
@@ -170,8 +172,8 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 // ADR-011): gen A is identical to class mode; gen B chunk workers extend each
 // intermediate entry into the live task-cache (direct Set — no LocalSink: the
 // record profile differs from M's and hits are read in the same run they are
-// written); counting walks the task-cache shard by shard (SnapshotShard) with
-// the early-stop count-DFS, no full snapshot (ADR-012).
+// written); counting walks the task-cache directly under shard read locks
+// (Cache.Each) with the early-stop count-DFS — no snapshots at all (plan 09).
 // Class-mode properties (shapeFilter, tailMemo, shapeDump) do not apply and
 // ReportShapeStats is never published here.
 func (c *Counter) parallelCountReversal(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) uint64 {
@@ -209,55 +211,40 @@ func (c *Counter) parallelCountReversal(ctx context.Context, monitor monitoring.
 	return c.countTasks(ctx, monitor, workers, taskCache, precomputeDepth)
 }
 
-// countTasks is the reversal counting phase (specs/counter.md, ADR-012): no
-// full snapshot of the task-cache. Workers pull shard indices from an atomic
-// cursor, take SnapshotShard(i) — one shard of memory, data left in place — and
-// run every task of that shard through the early-stop count-DFS themselves,
-// adding w · f(task) into the shared total. The cache stays alive and read-only
-// until the phase ends; it is never drained (specs/cache.md).
+// countTasks is the reversal counting phase (specs/counter.md, plan 09): a
+// direct Cache.Each walk of the task-cache — zero-allocation dispatch, no
+// snapshots. The callback runs the early-stop count-DFS for every task under
+// its shard's read lock (no writers after the generation barrier) and adds
+// w · f(task) into the shared total. The cache stays alive and read-only until
+// the phase ends; it is never drained (specs/cache.md).
 func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, workers int, taskCache *cache.Cache, precomputeDepth int) uint64 {
 	monitor.BeginPhase("counting")
 	monitor.AddTasks(taskCache.ItemsCount())
 
 	var total atomic.Uint64
-	var nextShard atomic.Int64
-	g, gctx := errgroup.WithContext(ctx)
-	for range min(workers, taskCache.NumShards()) {
-		g.Go(func() error {
-			c.countShard(gctx, monitor, taskCache, precomputeDepth, &nextShard, &total)
-			return nil
-		})
+	// Cancellation just leaves the partial total — the same semantics as the
+	// shard-cursor loop this walk replaced. Any other error is unreachable per
+	// contract (the callback never fails, specs/cache.md): it would mean a bug
+	// in Each, so fail loudly instead of returning a silently partial result.
+	if err := taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, weight uint64) error {
+		c.countOneTask(ctx, monitor, taskCache, precomputeDepth, p, weight, &total)
+		return nil
+	}); err != nil && !errors.Is(err, context.Canceled) {
+		panic("counter: unexpected Cache.Each error: " + err.Error())
 	}
-	_ = g.Wait()
 
 	return total.Load()
 }
 
-// countShard drains the shared shard-index cursor: each claimed shard is
-// snapshotted once and all of its tasks are counted on this worker. Empty
-// shards are skipped; ctx is checked between shards (and, via countOneTask,
-// between tasks). Returns when the cursor is exhausted or ctx is done.
-func (c *Counter) countShard(ctx context.Context, monitor monitoring.Monitor, taskCache *cache.Cache, precomputeDepth int, nextShard *atomic.Int64, total *atomic.Uint64) {
-	numShards := taskCache.NumShards()
-	for ctx.Err() == nil {
-		i := int(nextShard.Add(1)) - 1
-		if i >= numShards {
-			return
-		}
-		for _, e := range taskCache.SnapshotShard(i) {
-			c.countOneTask(ctx, monitor, taskCache, precomputeDepth, e, total)
-		}
-	}
-}
-
 // countOneTask runs the early-stop count-DFS for a single task and folds its
-// weighted path count and per-task statistics into the shared counters.
-func (c *Counter) countOneTask(ctx context.Context, monitor monitoring.Monitor, taskCache *cache.Cache, precomputeDepth int, e cache.Entry, total *atomic.Uint64) {
+// weighted path count and per-task statistics into the shared counters. It is
+// invoked from Cache.Each under the task's shard read lock.
+func (c *Counter) countOneTask(ctx context.Context, monitor monitoring.Monitor, taskCache *cache.Cache, precomputeDepth int, p path.Path, weight uint64, total *atomic.Uint64) {
 	if ctx.Err() != nil {
 		return
 	}
-	result := c.searcher.CountPathsWithCacheReversal(ctx, e.Path, taskCache, precomputeDepth)
-	paths := uint64(result.TotalPathsFound) * e.Weight
+	result := c.searcher.CountPathsWithCacheReversal(ctx, p, taskCache, precomputeDepth)
+	paths := uint64(result.TotalPathsFound) * weight
 	total.Add(paths)
 	monitor.ReportPathsFound(int(paths))
 	monitor.ReportSubtask(&result)

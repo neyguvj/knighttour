@@ -1,7 +1,10 @@
 package cache
 
 import (
+	"context"
 	"sync"
+
+	"golang.org/x/sync/errgroup"
 
 	"knighttour/path"
 )
@@ -19,7 +22,7 @@ type cacheShard struct {
 // written. Keys are D4-canonical prefixes (state, end); the writer canonicalizes —
 // this type knows nothing about symmetries. Zeros are never stored: Set with a
 // zero weight is a no-op. Unlike the Accumulator it is never drained per shard;
-// the count phase reads it lazily via NumShards/SnapshotShard (ADR-012).
+// the count phase walks it directly under shard read locks via Each (plan 09).
 type Cache struct {
 	shards [numShards]cacheShard
 }
@@ -70,24 +73,47 @@ func (c *Cache) ItemsCount() int {
 	return total
 }
 
-// NumShards returns the number of independently snapshot-able shards (the same
-// count as the Accumulator's), bounding the shard-index cursor of the count
-// phase (specs/cache.md, ADR-012).
-func (c *Cache) NumShards() int { return numShards }
+// Each dispatches the count phase over every stored record without copying the
+// table (specs/cache.md, plan 09): one goroutine per shard, at most workers at
+// a time; workers < 1 clamps to the shard count (full parallelism — there is
+// never more to run). Per shard: ctx check → RLock → f for each record →
+// RUnlock. Data is NOT drained — Get keeps seeing every shard through the
+// whole walk, and dispatch allocates nothing (peak is the worker stacks). f
+// runs under the shard's read lock, legal only while no writer exists (phase
+// invariant); the shared RLock stays concurrent with Get of any shard,
+// including its own. The first error from f stops scheduling new shards and is
+// returned; a cancelled ctx ends the walk before the next shard and Each
+// returns ctx.Err().
+func (c *Cache) Each(ctx context.Context, workers int, f func(ctx context.Context, p path.Path, weight uint64) error) error {
+	// SetLimit(0) parks the first Go forever (zero-capacity semaphore); only
+	// negative limits are unbounded in errgroup. Clamp explicitly instead —
+	// more than one goroutine per shard would idle anyway.
+	if workers < 1 {
+		workers = numShards
+	}
+	g, gctx := errgroup.WithContext(ctx)
+	g.SetLimit(workers)
+	for i := range c.shards {
+		sh := &c.shards[i]
+		g.Go(func() error {
+			if err := gctx.Err(); err != nil {
+				return err
+			}
+			return eachShard(sh, gctx, f)
+		})
+	}
+	return g.Wait()
+}
 
-// SnapshotShard copies shard i under a read lock and releases it before
-// returning. Unlike Accumulator.DrainShard the data stays in place: Get must
-// still see every shard through the whole count phase, so a repeated snapshot
-// of the same shard is legal and concurrent with Get (shared RLock — there are
-// no writers after the generation barrier). Dispatch peak memory is one shard
-// per worker, not the whole table.
-func (c *Cache) SnapshotShard(i int) []Entry {
-	sh := &c.shards[i]
+// eachShard calls f for every record of one shard under its read lock; the
+// first non-nil f result aborts the rest of that shard.
+func eachShard(sh *cacheShard, ctx context.Context, f func(ctx context.Context, p path.Path, weight uint64) error) error {
 	sh.mu.RLock()
 	defer sh.mu.RUnlock()
-	out := make([]Entry, 0, len(sh.data))
 	for p, w := range sh.data {
-		out = append(out, Entry{Path: p, Weight: w})
+		if err := f(ctx, p, w); err != nil {
+			return err
+		}
 	}
-	return out
+	return nil
 }
