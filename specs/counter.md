@@ -5,7 +5,8 @@
 Высокоуровневый контур подсчёта двух режимов (ADR-001, ADR-011): **class mode** — генерация
 префиксов двумя фазами и финальный DP-проход по классам форм; **reversal mode** — та же
 двухфазная генерация в task-cache и count-фаза с ранним стопом через мемо по точному
-состоянию. Режим — переключатель контура, параллелизм/мониторинг общие.
+состоянию. Режим — переключатель контура, параллелизм/мониторинг общие. Дефолт —
+reversal (ADR-011).
 
 ## Публичный API
 
@@ -17,8 +18,8 @@ func DefaultPrecomputeDepth(size int) int   // {5:6, 6:10, 7:20, 8:14}; fallback
 
 type Mode int                               // режим подсчёта
 const (
-    ModeClass     Mode = iota               // pipeline по классам форм (дефолт)
-    ModeReversal                            // task-cache + count-DFS с обращениями
+    ModeClass     Mode = iota               // pipeline по классам форм
+    ModeReversal                            // task-cache + count-DFS с обращениями (дефолт)
 )
 
 func NewCounter(g *graph.Graph) *Counter
@@ -32,7 +33,7 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 func (c *Counter) ParallelCount(ctx context.Context, monitor monitoring.Monitor, workers int) uint64
 
 // Диагностика/эксперименты:
-func (c *Counter) SetMode(m Mode)                       // режим; по умолчанию ModeClass
+func (c *Counter) SetMode(m Mode)                       // режим; свежий NewCounter — ModeReversal
 func (c *Counter) SetGCPercent(p int)                   // GOGC на время reversal-конвейера (ADR-014);
                                                         // p > 0 — debug.SetGCPercent(p) на входе и
                                                         // восстановление прежнего при выходе;
@@ -108,7 +109,10 @@ headroom над ней дорог. Class mode GC не трогает.
 воркеров; `TestDefaultPrecomputeDepth`; веса промежуточных записей кратны орбите и
 останавливаются на base-глубине; tail-мемо == эталон; counting class mode публикует прунинг
 и shape-статы; reversal публикует hits/misses в счётчики фазы `counting` и не вызывает
-ReportShapeStats. GC-ручка (ADR-014): итог reversal не зависит от `SetGCPercent(0|40)`;
+ReportShapeStats. Дефолт конвейера — reversal: тесты class-mode специфики (shape-статы,
+tail-мемо, DP-прунинг) обязаны звать `SetMode(ModeClass)` явно; поведение свежего `NewCounter`
+без `SetMode` закрепляется как reversal (итог == эталон, shape-статы не публикуются).
+GC-ручка (ADR-014): итог reversal не зависит от `SetGCPercent(0|40)`;
 после завершения конвейера процент рантайма восстановлен (значения до/после в тесте);
 class mode не меняет процент.
 

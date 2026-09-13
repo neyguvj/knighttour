@@ -142,7 +142,7 @@ make bench            # Benchmarks (counter/)
 - **main.go** – Entry point, CLI flags: `-size` (5–8), `-workers`, `-precompute-depth`
   (default per board size via `counter.DefaultPrecomputeDepth`; validated `[1, size²/2]`),
   `-tail-memo` (counting tail memo threshold K, 0 = off), `-mode` (`class|reversal`, default
-  `class`), `-gc-percent` (GOGC for the reversal pipeline duration, default
+  `reversal`), `-gc-percent` (GOGC for the reversal pipeline duration, default
   `counter.DefaultGCPercentReversal`, 0 = leave runtime GC untouched)
 - **graph/** – `Graph` struct with precomputed knight moves on an N×N board
   - Neighbors in fixed possibleMoves order (no special sorting)
@@ -162,7 +162,7 @@ make bench            # Benchmarks (counter/)
 - **counter/** – High-level counting orchestrator, two modes behind `SetMode`
   - Methods: `ParallelCount()`, `ParallelCountWithDepth()` (gen A over start groups →
     gen B chunk workers → final pass; class: `total = Σ h(C)·M(C)`, reversal:
-    `total = Σ W(task)·f(task)` via task-cache); `ModeClass` default, `ModeReversal`
+    `total = Σ W(task)·f(task)` via task-cache); `ModeReversal` default, `ModeClass`
   - `DefaultPrecomputeDepth(size)` – per-board default split depth
   - `SetGCPercent(p)` – GOGC for the reversal pipeline duration (ADR-014); applied on
     entry to the reversal pipeline and restored on exit; class mode ignores it

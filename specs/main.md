@@ -13,7 +13,7 @@
 | `-workers` | ≥ 1 | `runtime.NumCPU()` |
 | `-precompute-depth` | 1 … `size²/2` (sentinel 0 → авто) | `counter.DefaultPrecomputeDepth(size)` |
 | `-tail-memo` | ≥ 0 (0 — выключен) | 0 |
-| `-mode` | `class` \| `reversal` | `class` |
+| `-mode` | `class` \| `reversal` | `reversal` |
 | `-gc-percent` | ≥ 0 (0 — не трогать GC рантайма) | 40 (`counter.DefaultGCPercentReversal`) |
 
 Валидация (`parseArgs`): явный 0 у `-precompute-depth` → ошибка; неизвестный `-mode` →
@@ -50,14 +50,17 @@ func run(ctx context.Context, monitor monitoring.Monitor, args *appArgs) uint64 
 
 ## Ограничения и edge cases
 
-- Режим подсчёта выбирается флагом `-mode` (ADR-011); дефолт — `class`.
+- Режим подсчёта выбирается флагом `-mode` (ADR-011); дефолт — `reversal` (свод ADR-011,
+  шаг 7 плана 06). Значит, `-gc-percent` по умолчанию эффективен: штатный прогон идёт
+  reversal-конвейером с пониженным GOGC (ADR-014).
 - Обработка сигналов проверяется вручную (`kill -INT <pid>` → частичный отчёт без паники).
 
 ## Тесты
 
 `main_test.go`: `TestParseArgs` — табличные кейсы валидации всех флагов и границ, включая
-неизвестный `-mode` и отрицательный `-gc-percent`; `TestRunCountMatchesReference` — `run`
-с FakeMonitor для 5×5 == 1728 в обоих режимах.
+неизвестный `-mode` и отрицательный `-gc-percent`; дефолтные кейсы таблицы закрепляют
+`-mode reversal` (явный `-mode class` проверяется отдельным кейсом);
+`TestRunCountMatchesReference` — `run` с FakeMonitor для 5×5 == 1728 в обоих режимах.
 
 ## Связанные
 

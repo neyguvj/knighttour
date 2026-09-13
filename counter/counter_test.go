@@ -41,16 +41,32 @@ func TestParallelCountWithDepth(t *testing.T) {
 	}
 }
 
-// Every class-mode run publishes shape stats (the reversal mode does not).
+// Every class-mode run publishes shape stats (specs/counter.md pins the
+// default pipeline as reversal, so the mode is set explicitly here).
 func TestShapeStatsAlwaysPublished(t *testing.T) {
 	g := graph.New(5)
 	counter := NewCounter(g)
+	counter.SetMode(ModeClass)
 
 	fm := monitoring.NewFakeMonitor()
 	assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), fm, 8, 6))
 	classes, shapes, _ := fm.ShapeStats()
 	assert.Positive(t, classes, "run must accumulate shape classes")
 	assert.Positive(t, shapes, "run must publish final-pass shapes")
+}
+
+// A fresh NewCounter without SetMode counts with the reversal pipeline
+// (specs/counter.md): reference total, no class-mode shape stats published.
+func TestDefaultModeIsReversal(t *testing.T) {
+	counter := NewCounter(graph.New(5))
+
+	fm := monitoring.NewFakeMonitor()
+	assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), fm, 8, 6))
+
+	classes, shapes, zeros := fm.ShapeStats()
+	assert.Zero(t, classes, "the default pipeline must not publish shape classes")
+	assert.Zero(t, shapes, "the default pipeline must not publish final-pass shapes")
+	assert.Zero(t, zeros)
 }
 
 // Both counting modes must reproduce the tour-count invariant at every split
@@ -112,11 +128,12 @@ func TestReversalCountingPublishesHitsNotShapeStats(t *testing.T) {
 	assert.Zero(t, zeros)
 }
 
-// The final-pass DP pruner must surface its statistics into the counting
-// phase as well (ReportSubtask), not only the generation phases.
+// The class-mode final-pass DP pruner must surface its statistics into the
+// counting phase as well (ReportSubtask), not only the generation phases.
 func TestCountingPhaseReportsPruning(t *testing.T) {
 	g := graph.New(5)
 	counter := NewCounter(g)
+	counter.SetMode(ModeClass)
 
 	fm := monitoring.NewFakeMonitor()
 	assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), fm, 8, 6))
@@ -178,6 +195,7 @@ func TestTailMemoMatchesReference(t *testing.T) {
 	for _, workers := range []int{1, 4} {
 		g := graph.New(5)
 		counter := NewCounter(g)
+		counter.SetMode(ModeClass) // tail memo is class-mode-only (specs/counter.md)
 		counter.SetTailMemo(49, 0)
 
 		fm := monitoring.NewFakeMonitor()
@@ -316,6 +334,7 @@ func TestGCPercentClassModeUntouched(t *testing.T) {
 	before := gcPercentNow()
 
 	counter := NewCounter(graph.New(5))
+	counter.SetMode(ModeClass)
 	counter.SetGCPercent(DefaultGCPercentReversal)
 
 	spy := &gcSpyMonitor{FakeMonitor: monitoring.NewFakeMonitor()}

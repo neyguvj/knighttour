@@ -42,7 +42,7 @@ func parseArgs(args []string) (*appArgs, error) {
 	workers := fs.Int("workers", runtime.NumCPU(), "Number of workers for parallel search")
 	precomputeDepth := fs.Int("precompute-depth", 0, "Root/subtask generation depth (default: per board size)")
 	tailMemo := fs.Int("tail-memo", 0, "Counting tail memo: persist f(cur,todo) with popcount(todo) ≤ N between shapes of one worker (0 = off)")
-	mode := fs.String("mode", modeClass, "Counting mode: class | reversal")
+	mode := fs.String("mode", modeReversal, "Counting mode: class | reversal")
 	gcPercent := fs.Int("gc-percent", counter.DefaultGCPercentReversal, "GOGC applied for the duration of the reversal pipeline (0 = leave the runtime GC untouched)")
 
 	if err := fs.Parse(args); err != nil {

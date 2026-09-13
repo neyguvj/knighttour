@@ -60,10 +60,13 @@ const (
 	ModeClass Mode = iota
 	// ModeReversal counts via the shared task-cache: generation writes raw
 	// canonical prefixes into cache.Cache and a count-DFS with early stop at
-	// level totalCells−d answers Σ W(task)·f(task) (ADR-011).
+	// level totalCells−d answers Σ W(task)·f(task) (ADR-011, the default).
 	ModeReversal
 )
 
+// Counter orchestrates counting runs over one graph: each ParallelCount* call
+// executes the selected pipeline (specs/counter.md), and class-mode-only knobs
+// are ignored while ModeReversal is active.
 type Counter struct {
 	graph       *graph.Graph
 	symmetry    *symmetry.Symmetry
@@ -83,9 +86,9 @@ type Counter struct {
 // value. Default DefaultGCPercentReversal. Call before counting.
 func (c *Counter) SetGCPercent(p int) { c.gcPercent = p }
 
-// SetMode selects the counting pipeline (default ModeClass). Class-mode
-// properties (SetShapeFilter, SetTailMemo, SetShapeDump) are ignored in
-// ModeReversal. Call before counting.
+// SetMode selects the counting pipeline; a fresh NewCounter already starts in
+// ModeReversal (ADR-011). Class-mode properties (SetShapeFilter, SetTailMemo,
+// SetShapeDump) are ignored in ModeReversal. Call before counting.
 func (c *Counter) SetMode(m Mode) { c.mode = m }
 
 // SetShapeFilter configures the final pass pre-DP shape feasibility filter
@@ -117,6 +120,9 @@ func (c *Counter) SetTailMemo(k, slots int) {
 	}
 }
 
+// NewCounter returns a counter for g starting in the default pipeline
+// ModeReversal (ADR-011). The mode default lives here, not in the Mode zero
+// value — the iota order is historical and must not be renumbered.
 func NewCounter(g *graph.Graph) *Counter {
 	size := g.Size()
 	sym := symmetry.NewSymmetry(size)
@@ -127,6 +133,7 @@ func NewCounter(g *graph.Graph) *Counter {
 		searcher:    searcherObj,
 		gcPercent:   DefaultGCPercentReversal,
 		shapeFilter: shapecount.DefaultShapeFilter,
+		mode:        ModeReversal,
 	}
 }
 

@@ -51,6 +51,7 @@ func TestDumpZeroShapes(t *testing.T) {
 		seen int64
 	)
 	c := NewCounter(graph.New(size))
+	c.SetMode(ModeClass) // the dump feeds the class-mode final pass (specs/counter.md)
 	c.SetShapeDump(func(shape state.State, ends []int, allZero bool) {
 		if !allZero {
 			return
