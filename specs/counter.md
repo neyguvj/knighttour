@@ -11,6 +11,7 @@
 
 ```go
 const TwoPhaseBaseDepth = 5                 // глубина промежуточного аккумулятора фазы A
+const DefaultGCPercentReversal = 40         // GOGC на время reversal-конвейера (ADR-014)
 
 func DefaultPrecomputeDepth(size int) int   // {5:6, 6:10, 7:20, 8:14}; fallback TwoPhaseBaseDepth+1
 
@@ -32,6 +33,12 @@ func (c *Counter) ParallelCount(ctx context.Context, monitor monitoring.Monitor,
 
 // Диагностика/эксперименты:
 func (c *Counter) SetMode(m Mode)                       // режим; по умолчанию ModeClass
+func (c *Counter) SetGCPercent(p int)                   // GOGC на время reversal-конвейера (ADR-014);
+                                                        // p > 0 — debug.SetGCPercent(p) на входе и
+                                                        // восстановление прежнего при выходе;
+                                                        // p == 0 — не трогать. Значение по умолчанию
+                                                        // конвейера — DefaultGCPercentReversal;
+                                                        // class mode значение игнорирует
 func (c *Counter) SetShapeFilter(mask pruner.L2Checks)  // pre-DP фильтр class mode (ADR-008)
 func (c *Counter) SetTailMemo(k, slots int)             // tail-мемо counting class mode (план 03)
 func (c *Counter) SetL2(mask pruner.L2Checks, minTodo int)
@@ -69,6 +76,10 @@ mode игнорируются.
    работает под RLock шарда при отсутствии писателей (контракт `cache.Each`). Отмена ctx
    проверяется перед каждым шардом и каждой задачей.
 
+Весь конвейер reversal работает под пониженным GOGC (`SetGCPercent`, ADR-014): значение
+применяется на входе и восстанавливается при выходе — пик фазы это живая task-cache,
+headroom над ней дорог. Class mode GC не трогает.
+
 ## Инварианты и корректность
 
 - Каждая запись глубины `a` проходит ровно через один канонический ключ (D4-эквивариантность
@@ -86,6 +97,9 @@ mode игнорируются.
   Подробности — ADR-003/004/010.
 - Память reversal mode: task-cache живёт до конца count-фазы и не дренируется по шардам;
   на низких глубинах (большое q) он дороже M — точка OOM фиксируется как результат A/B.
+  Пониженный GOGC на время конвейера — штатное поведение по умолчанию (ADR-014).
+- Две конкурентные reversal-трубы в одном процессе восстанавливают GC-процент в порядке
+  «последний пишет» — значение глобально для рантайма; тесты последовательны.
 - Метрики форм (`monitor.ReportShapeStats`) публикует только class mode.
 
 ## Тесты
@@ -95,7 +109,9 @@ mode игнорируются.
 воркеров; `TestDefaultPrecomputeDepth`; веса промежуточных записей кратны орбите и
 останавливаются на base-глубине; tail-мемо == эталон; counting class mode публикует прунинг
 и shape-статы; reversal публикует hits/misses в счётчики фазы `counting` и не вызывает
-ReportShapeStats.
+ReportShapeStats. GC-ручка (ADR-014): итог reversal не зависит от `SetGCPercent(0|40)`;
+после завершения конвейера процент рантайма восстановлен (значения до/после в тесте);
+class mode не меняет процент.
 
 
 ## Связанные

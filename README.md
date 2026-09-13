@@ -28,6 +28,7 @@ go run main.go -size 6 -workers 14 -precompute-depth 12
 | `-precompute-depth` | `int` | по размеру доски: `{5: 6, 6: 10, 7: 20, 8: 14}` | Глубина meet-in-the-middle разреза (от 1 до size²/2; глубже — дуал разреза обращённого тура) |
 | `-tail-memo` | `int` | `0` (выключено) | Хвостовое мемо фазы счёта: хранить `f(cur,todo)` между формами одного воркера при `popcount(todo) ≤ K` |
 | `-mode` | `string` | `class` | Режим подсчёта: `class` (ДП по классам форм) или `reversal` (task-cache + count-DFS с обращениями); победитель A/B-свода определит дефолт |
+| `-gc-percent` | `int` | `40` | GOGC на время reversal-конвейера: пониженный GC держит пик task-cache ниже (`0` — не трогать GC рантайма); class mode значение игнорирует (ADR-014) |
 
 ## Сборка и проверка
 

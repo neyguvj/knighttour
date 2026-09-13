@@ -14,7 +14,7 @@
 make bench                 # свип 5×5/6×6 (7×7/8×8 — SKIP), -benchtime=10x
 make bench-deep            # + 7×7 целиком (часы): BENCH_DEEP=1, -timeout=48h
 make bench-size N=7 [DEPTHS=20,22]   # один размер ОТДЕЛЬНЫМ процессом
-make bench-8x8 DEPTHS=32             # точечный прогон 8×8 (-timeout=24h)
+make bench-8x8 DEPTHS=32             # точечный прогон 8×8, только reversal (-timeout=24h, ADR-015)
 make bench-table LOG=bench.log       # рендер markdown-таблиц (tools/bench_table.py)
 
 # напрямую:
@@ -27,7 +27,7 @@ go test -v -run='^$' -bench=. -benchmem ./counter/
 |----------|-----------|
 | 5×5, 6×6 | гоняются всегда |
 | 7×7 | за `BENCH_DEEP=1`; иначе подтест `size7` → SKIP |
-| 8×8 | за `BENCH_8X8=1`; иначе SKIP |
+| 8×8 | за `BENCH_8X8=1`, **только reversal-режим**: цель `bench-8x8` фиксирует `BENCH_MODE=reversal`, в class-режиме подтест `size8` → SKIP с пояснением (ADR-015) |
 | `depthFloors` (`{7:6}`) | пол глубины свипа; ниже неинформативно/небезопасно (см. ниже) |
 | `sweepDefaults` (`{8:{32,30}}`) | без `BENCH_DEPTHS` у 8×8 гоняется только этот cap |
 | `BENCH_DEPTHS=a,b` | точечный набор вместо свипа; вне `[floor, size²/2]` — отбрасывается; если для размера не осталось ни одной — SKIP (переменная не ломает остальные размеры) |
@@ -77,6 +77,9 @@ SKIP'а gated-размера.
 
 ## Дисциплина замеров
 
+- Reversal-прогоны штатно работают с GOGC 40 — процент понижает сам конвейер (ADR-014),
+  внешний env `GOGC` в reversal-режиме кодом **перезаписывается**. Контрольный прогон
+  без понижения GC — явно `SetGCPercent(0)`/`-gc-percent 0`, не env. Class mode GC не трогает.
 - Любое изменение hot-path обязано прикладывать before/after числа (`make bench` /
   `make bench-size`) — нельзя заявлять выигрыш без измерения.
 - Числа решения попадают в ADR (навсегда), сюда — только изменения методологии.

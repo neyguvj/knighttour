@@ -31,6 +31,7 @@ type appArgs struct {
 	workers         int
 	precomputeDepth int
 	tailMemo        int
+	gcPercent       int
 }
 
 func parseArgs(args []string) (*appArgs, error) {
@@ -42,6 +43,7 @@ func parseArgs(args []string) (*appArgs, error) {
 	precomputeDepth := fs.Int("precompute-depth", 0, "Root/subtask generation depth (default: per board size)")
 	tailMemo := fs.Int("tail-memo", 0, "Counting tail memo: persist f(cur,todo) with popcount(todo) ≤ N between shapes of one worker (0 = off)")
 	mode := fs.String("mode", modeClass, "Counting mode: class | reversal")
+	gcPercent := fs.Int("gc-percent", counter.DefaultGCPercentReversal, "GOGC applied for the duration of the reversal pipeline (0 = leave the runtime GC untouched)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, fmt.Errorf("parse flags: %w", err)
@@ -73,7 +75,11 @@ func parseArgs(args []string) (*appArgs, error) {
 		return nil, fmt.Errorf("-mode must be one of %q or %q, got %q", modeClass, modeReversal, *mode)
 	}
 
-	return &appArgs{size: *size, workers: *workers, precomputeDepth: depth, tailMemo: *tailMemo, mode: *mode}, nil
+	if *gcPercent < 0 {
+		return nil, errors.New("-gc-percent must be non-negative (0 = leave the runtime GC untouched)")
+	}
+
+	return &appArgs{size: *size, workers: *workers, precomputeDepth: depth, tailMemo: *tailMemo, mode: *mode, gcPercent: *gcPercent}, nil
 }
 
 // isFlagSet reports whether the flag was explicitly provided on the command line.
@@ -101,6 +107,7 @@ func run(ctx context.Context, monitor monitoring.Monitor, args *appArgs) uint64 
 	c := counter.NewCounter(g)
 	c.SetTailMemo(args.tailMemo, 0)
 	c.SetMode(counterMode(args.mode))
+	c.SetGCPercent(args.gcPercent) // effective in reversal mode only (ADR-014)
 	return c.ParallelCountWithDepth(ctx, monitor, args.workers, args.precomputeDepth)
 }
 

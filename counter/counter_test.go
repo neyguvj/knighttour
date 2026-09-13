@@ -2,6 +2,7 @@ package counter
 
 import (
 	"context"
+	"runtime/metrics"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -248,4 +249,82 @@ func TestDefaultPrecomputeDepth(t *testing.T) {
 	assert.Equal(t, 20, DefaultPrecomputeDepth(7))
 	assert.Equal(t, 14, DefaultPrecomputeDepth(8))
 	assert.Equal(t, TwoPhaseBaseDepth+1, DefaultPrecomputeDepth(9))
+}
+
+// gcPercentNow reports the GC percent currently in effect in this process
+// (the read-only view of debug.SetGCPercent / GOGC).
+func gcPercentNow() int {
+	s := []metrics.Sample{{Name: "/gc/gogc:percent"}}
+	metrics.Read(s)
+	return int(int64(s[0].Value.Uint64()))
+}
+
+// gcSpyMonitor records the effective GC percent at every BeginPhase so tests
+// can observe what a running pipeline applied (BeginPhase is called strictly
+// between phases, never concurrently with itself).
+type gcSpyMonitor struct {
+	*monitoring.FakeMonitor
+	phasePercents []int
+}
+
+// BeginPhase samples the runtime GC percent, then delegates to the fake.
+func (m *gcSpyMonitor) BeginPhase(name string) {
+	m.phasePercents = append(m.phasePercents, gcPercentNow())
+	m.FakeMonitor.BeginPhase(name)
+}
+
+// ADR-014: the reversal pipeline runs entirely under the configured GC percent
+// and restores the previous one on exit; the total is invariant to the knob.
+func TestGCPercentReversalAppliesAndRestores(t *testing.T) {
+	tests := []struct {
+		name      string
+		gcPercent int
+	}{
+		{name: "knob at default 40", gcPercent: DefaultGCPercentReversal},
+		{name: "knob off", gcPercent: 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := gcPercentNow()
+			wantDuring := before // p == 0 must leave the runtime percent alone
+			if tt.gcPercent > 0 {
+				wantDuring = tt.gcPercent
+			}
+
+			counter := NewCounter(graph.New(5))
+			counter.SetMode(ModeReversal)
+			counter.SetGCPercent(tt.gcPercent)
+
+			spy := &gcSpyMonitor{FakeMonitor: monitoring.NewFakeMonitor()}
+			count := counter.ParallelCountWithDepth(context.Background(), spy, 4, 6)
+
+			assert.Equal(t, uint64(1728), count, "total must not depend on the GC knob")
+			if assert.NotEmpty(t, spy.phasePercents, "pipeline must report phases") {
+				for _, got := range spy.phasePercents {
+					assert.Equal(t, wantDuring, got, "every phase runs under the configured percent")
+				}
+			}
+			assert.Equal(t, before, gcPercentNow(), "runtime percent must be restored after the pipeline")
+		})
+	}
+}
+
+// Class mode never touches the runtime GC percent, whatever the knob says
+// (ADR-014): its peak is the M accumulator, not count-phase headroom.
+func TestGCPercentClassModeUntouched(t *testing.T) {
+	before := gcPercentNow()
+
+	counter := NewCounter(graph.New(5))
+	counter.SetGCPercent(DefaultGCPercentReversal)
+
+	spy := &gcSpyMonitor{FakeMonitor: monitoring.NewFakeMonitor()}
+	assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), spy, 4, 6))
+
+	if assert.NotEmpty(t, spy.phasePercents) {
+		for _, got := range spy.phasePercents {
+			assert.Equal(t, before, got, "class mode must not change the percent while running")
+		}
+	}
+	assert.Equal(t, before, gcPercentNow(), "class mode must not change the percent at all")
 }

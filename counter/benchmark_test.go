@@ -84,13 +84,17 @@ var toursExpected = map[int]uint64{
 // generation footprint (writes/pruned of gen A and gen B), final-pass totals
 // (classes/shapes/zeros; reversal counting: cacheHits/cacheMisses) and memory
 // (peakRSS_MB/op, totalAllocMB/op). BENCH_MODE selects the pipeline
-// (class|reversal, default class — plan 06 A/B).
+// (class|reversal, default class — plan 06 A/B); 8×8 is measured in reversal
+// mode only, its class subtests skip (ADR-015).
 //
 // peakRSS is a process-wide maximum: run one board size per process
 // (`make bench-size N=…`), otherwise it reflects the most hungry subtest.
 func BenchmarkCountAllToursClass(b *testing.B) {
 	for _, size := range benchmarkSizes {
 		b.Run("size"+strconv.Itoa(size), func(b *testing.B) {
+			if size == 8 && benchMode(b) == ModeClass {
+				b.Skip("class mode on 8x8 is not measured (ADR-015): it cannot fit in memory; use BENCH_MODE=reversal")
+			}
 			if gate := gateVar(size); gatedSizes[size] && os.Getenv(gate) != "1" {
 				b.Skipf("set %s=1: one %d×%d measurement costs ~9 min..hours", gate, size, size)
 			}

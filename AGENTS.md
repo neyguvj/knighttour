@@ -142,7 +142,8 @@ make bench            # Benchmarks (counter/)
 - **main.go** – Entry point, CLI flags: `-size` (5–8), `-workers`, `-precompute-depth`
   (default per board size via `counter.DefaultPrecomputeDepth`; validated `[1, size²/2]`),
   `-tail-memo` (counting tail memo threshold K, 0 = off), `-mode` (`class|reversal`, default
-  `class`)
+  `class`), `-gc-percent` (GOGC for the reversal pipeline duration, default
+  `counter.DefaultGCPercentReversal`, 0 = leave runtime GC untouched)
 - **graph/** – `Graph` struct with precomputed knight moves on an N×N board
   - Neighbors in fixed possibleMoves order (no special sorting)
   - Methods: `GetNeighbors()`, `GetDegree()`, `GetNeighborMask()`, `SholdSkip()` (color parity skip for odd boards)
@@ -163,6 +164,8 @@ make bench            # Benchmarks (counter/)
     gen B chunk workers → final pass; class: `total = Σ h(C)·M(C)`, reversal:
     `total = Σ W(task)·f(task)` via task-cache); `ModeClass` default, `ModeReversal`
   - `DefaultPrecomputeDepth(size)` – per-board default split depth
+  - `SetGCPercent(p)` – GOGC for the reversal pipeline duration (ADR-014); applied on
+    entry to the reversal pipeline and restored on exit; class mode ignores it
 - **pruner/** – Pruning strategies:
   - `DeadEndPruner` – `ShouldPruneAfterVisit()` (hot O(deg) check)
 - **cache/** – Two sharded weight tables (128 shards, hashed by State only):
@@ -196,7 +199,7 @@ go test -v -bench=. -run=^$ -benchmem ./counter/
 make bench-deep
 # one board size in its own process (required for meaningful peakRSS — it is a
 # per-process maximum): make bench-size N=7 [DEPTHS=20,22]
-# gated 8×8 point run (hours/depth): make bench-8x8 DEPTHS=32
+# gated 8×8 point run (reversal-only, hours/depth): make bench-8x8 DEPTHS=32
 # render markdown tables from a benchmark log: make bench-table LOG=bench.log
 ```
 
@@ -209,4 +212,5 @@ Available benchmarks in `counter/benchmark_test.go`:
   `totalAllocMB/op` — per-iteration allocation delta)
 - sizes 5/6 always run; size 7 is gated by `BENCH_DEEP=1` (`make bench-deep`) and
   stops at depth 6 (`depthFloors`) — below depth 10 measurements take hours, depth 6 OOMs;
-  size 8 is gated by `BENCH_8X8=1`. `BENCH_DEPTHS=a,b` overrides the swept depths
+  size 8 is gated by `BENCH_8X8=1` and measured in reversal mode only (class-size8
+  subtests SKIP, ADR-015). `BENCH_DEPTHS=a,b` overrides the swept depths

@@ -4,6 +4,7 @@ import (
 	"cmp"
 	"context"
 	"errors"
+	"runtime/debug"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -29,6 +30,11 @@ import (
 // precomputeDepth ≤ it, phase B degenerates: class weights are emitted from
 // the intermediate entries themselves.
 const TwoPhaseBaseDepth = 5
+
+// DefaultGCPercentReversal is the GOGC the reversal pipeline runs under for its
+// whole duration (ADR-014): the task-cache peak is the process high-water mark
+// and headroom above it is expensive — measured on 7×7 d22 (specs/decisions).
+const DefaultGCPercentReversal = 40
 
 // defaultPrecomputeDepths is the per-board default split depth: measured
 // optima on 5×5/6×6 sweeps, a sweep-tuned value on 7×7 and a conservative one
@@ -65,9 +71,17 @@ type Counter struct {
 	shapeDump   func(shape state.State, ends []int, allZero bool)
 	tailK       int
 	tailSlots   int
+	gcPercent   int // GOGC for the reversal pipeline duration (ADR-014); 0 = untouched
 	shapeFilter pruner.L2Checks
 	mode        Mode
 }
+
+// SetGCPercent sets the GC percent applied for the duration of the reversal
+// pipeline (ADR-014): p > 0 calls debug.SetGCPercent on entry and restores the
+// previous value on exit; p <= 0 leaves the runtime GC untouched (the CLI
+// rejects negatives, so only 0 means "don't touch"). Class mode ignores the
+// value. Default DefaultGCPercentReversal. Call before counting.
+func (c *Counter) SetGCPercent(p int) { c.gcPercent = p }
 
 // SetMode selects the counting pipeline (default ModeClass). Class-mode
 // properties (SetShapeFilter, SetTailMemo, SetShapeDump) are ignored in
@@ -111,6 +125,7 @@ func NewCounter(g *graph.Graph) *Counter {
 		graph:       g,
 		symmetry:    sym,
 		searcher:    searcherObj,
+		gcPercent:   DefaultGCPercentReversal,
 		shapeFilter: shapecount.DefaultShapeFilter,
 	}
 }
@@ -175,8 +190,18 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 // written); counting walks the task-cache directly under shard read locks
 // (Cache.Each) with the early-stop count-DFS — no snapshots at all (plan 09).
 // Class-mode properties (shapeFilter, tailMemo, shapeDump) do not apply and
-// ReportShapeStats is never published here.
+// ReportShapeStats is never published here. The whole run executes under the
+// configured GC percent (SetGCPercent, ADR-014).
 func (c *Counter) parallelCountReversal(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) uint64 {
+	// Lower GOGC for the entire pipeline (ADR-014): gen B already feeds the
+	// task-cache that forms the process peak, so scoping to the count phase
+	// would miss it; restore the previous percent on exit. Two concurrent
+	// reversal pipelines restore last-writer-wins (specs/counter.md).
+	if c.gcPercent > 0 {
+		prev := debug.SetGCPercent(c.gcPercent)
+		defer debug.SetGCPercent(prev)
+	}
+
 	intermediate := c.generateIntermediate(ctx, monitor, workers, precomputeDepth)
 
 	monitor.BeginPhase("gen B")

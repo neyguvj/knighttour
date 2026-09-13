@@ -41,10 +41,10 @@ bench-size:
 		BENCH_DEPTHS="$(DEPTHS)" \
 		go test -v -run='^$$' -bench=CountAllToursClass/size$(N) -benchmem -benchtime=1x -timeout=48h ./counter/
 
-# Gated 8x8 point run (hours per depth): pass DEPTHS explicitly, e.g.
-# make bench-8x8 DEPTHS=32
+# Gated 8x8 point run (hours per depth), reversal mode only (ADR-015): pass
+# DEPTHS explicitly, e.g. make bench-8x8 DEPTHS=32
 bench-8x8:
-	BENCH_8X8=1 BENCH_DEPTHS="$(DEPTHS)" go test -v -run='^$$' \
+	BENCH_8X8=1 BENCH_MODE=reversal BENCH_DEPTHS="$(DEPTHS)" go test -v -run='^$$' \
 		-bench=CountAllToursClass/size8 -benchmem -benchtime=1x -timeout=24h ./counter/
 
 # Render a markdown table from a benchmark log: make bench-table LOG=bench.log
