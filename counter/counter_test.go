@@ -41,108 +41,32 @@ func TestParallelCountWithDepth(t *testing.T) {
 	}
 }
 
-// Every class-mode run publishes shape stats (specs/counter.md pins the
-// default pipeline as reversal, so the mode is set explicitly here).
-func TestShapeStatsAlwaysPublished(t *testing.T) {
+// The counting phase publishes task-cache hits/misses into its own counters
+// (specs/counter.md): the reversal stop level must answer from the cache.
+func TestCountingPublishesHitsMisses(t *testing.T) {
 	g := graph.New(5)
 	counter := NewCounter(g)
-	counter.SetMode(ModeClass)
-
-	fm := monitoring.NewFakeMonitor()
-	assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), fm, 8, 6))
-	classes, shapes, _ := fm.ShapeStats()
-	assert.Positive(t, classes, "run must accumulate shape classes")
-	assert.Positive(t, shapes, "run must publish final-pass shapes")
-}
-
-// A fresh NewCounter without SetMode counts with the reversal pipeline
-// (specs/counter.md): reference total, no class-mode shape stats published.
-func TestDefaultModeIsReversal(t *testing.T) {
-	counter := NewCounter(graph.New(5))
-
-	fm := monitoring.NewFakeMonitor()
-	assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), fm, 8, 6))
-
-	classes, shapes, zeros := fm.ShapeStats()
-	assert.Zero(t, classes, "the default pipeline must not publish shape classes")
-	assert.Zero(t, shapes, "the default pipeline must not publish final-pass shapes")
-	assert.Zero(t, zeros)
-}
-
-// Both counting modes must reproduce the tour-count invariant at every split
-// depth they cover (specs/counter.md): reversal shares the generation phases
-// and only replaces the final pass.
-func TestModesMatchReference(t *testing.T) {
-	tests := []struct {
-		name     string
-		depths   []int
-		size     int
-		expected uint64
-	}{
-		{name: "5x5 all depths", size: 5, expected: 1_728, depths: []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12}},
-		// 6×6 sweeps are slow; sample shallow + the default-ish middle.
-		{name: "6x6 sampled depths", size: 6, expected: 6_637_920, depths: []int{1, 5, 8, 14}},
-	}
-	modes := []struct {
-		name string
-		mode Mode
-	}{
-		{name: "class", mode: ModeClass},
-		{name: "reversal", mode: ModeReversal},
-	}
-
-	for _, tt := range tests {
-		for _, m := range modes {
-			t.Run(tt.name+"/"+m.name, func(t *testing.T) {
-				g := graph.New(tt.size)
-				counter := NewCounter(g)
-				counter.SetMode(m.mode)
-
-				for _, depth := range tt.depths {
-					count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 4, depth)
-					assert.Equal(t, tt.expected, count, "mode=%s depth=%d", m.name, depth)
-				}
-			})
-		}
-	}
-}
-
-// Reversal publishes task-cache hits/misses into the counting phase and never
-// calls ReportShapeStats; class-mode tail memo stays silent too
-// (specs/counter.md, specs/monitoring.md).
-func TestReversalCountingPublishesHitsNotShapeStats(t *testing.T) {
-	g := graph.New(5)
-	counter := NewCounter(g)
-	counter.SetMode(ModeReversal)
 
 	fm := monitoring.NewFakeMonitor()
 	assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), fm, 8, 6))
 
 	counting := fm.Phase("counting")
 	assert.Positive(t, counting.CacheHits, "the stop level must hit the task cache")
-	assert.Zero(t, counting.TailLookups, "class-mode tail memo is ignored in reversal")
-
-	classes, shapes, zeros := fm.ShapeStats()
-	assert.Zero(t, classes, "reversal does not publish shape classes")
-	assert.Zero(t, shapes, "reversal does not publish final-pass shapes")
-	assert.Zero(t, zeros)
 }
 
-// The class-mode final-pass DP pruner must surface its statistics into the
-// counting phase as well (ReportSubtask), not only the generation phases.
+// The count-DFS prunes while descending to the stop level and reports those
+// cuts through ReportSubtask into the counting phase (specs/counter.md).
 func TestCountingPhaseReportsPruning(t *testing.T) {
 	g := graph.New(5)
 	counter := NewCounter(g)
-	counter.SetMode(ModeClass)
 
 	fm := monitoring.NewFakeMonitor()
 	assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), fm, 8, 6))
 
 	counting := fm.Phase("counting")
-	assert.Positive(t, counting.Pruned, "final-pass DP pruning must be reported")
+	assert.Positive(t, counting.Pruned, "count-DFS pruning must be reported")
 	assert.Equal(t,
-		counting.PrunedDeadEnd+counting.PrunedNoCont+counting.PrunedDisconn+counting.PrunedEndpoints+
-			counting.PrunedArticulation+counting.PrunedForcedChain,
+		counting.PrunedDeadEnd+counting.PrunedNoCont+counting.PrunedDisconn+counting.PrunedEndpoints,
 		counting.Pruned, "pruned total equals the per-reason breakdown")
 }
 
@@ -184,26 +108,6 @@ func TestWorkerInvariance(t *testing.T) {
 			count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), workers, depth)
 			assert.Equal(t, countSeq, count, "depth=%d: result must not depend on worker count", depth)
 		}
-	}
-}
-
-// Forcing the persistent tail memo on must not change the total (values are
-// pure functions of (todo, cur), so cross-shape reuse is exact) and must
-// actually exercise the level; results stay worker-invariant because every
-// worker owns its table.
-func TestTailMemoMatchesReference(t *testing.T) {
-	for _, workers := range []int{1, 4} {
-		g := graph.New(5)
-		counter := NewCounter(g)
-		counter.SetMode(ModeClass) // tail memo is class-mode-only (specs/counter.md)
-		counter.SetTailMemo(49, 0)
-
-		fm := monitoring.NewFakeMonitor()
-		assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), fm, workers, 6),
-			"workers=%d", workers)
-
-		counting := fm.Phase("counting")
-		assert.Positive(t, counting.TailLookups, "forced tail level must be probed")
 	}
 }
 
@@ -291,9 +195,9 @@ func (m *gcSpyMonitor) BeginPhase(name string) {
 	m.FakeMonitor.BeginPhase(name)
 }
 
-// ADR-014: the reversal pipeline runs entirely under the configured GC percent
-// and restores the previous one on exit; the total is invariant to the knob.
-func TestGCPercentReversalAppliesAndRestores(t *testing.T) {
+// ADR-014: the pipeline runs entirely under the configured GC percent and
+// restores the previous one on exit; the total is invariant to the knob.
+func TestGCPercentAppliesAndRestores(t *testing.T) {
 	tests := []struct {
 		name      string
 		gcPercent int
@@ -311,7 +215,6 @@ func TestGCPercentReversalAppliesAndRestores(t *testing.T) {
 			}
 
 			counter := NewCounter(graph.New(5))
-			counter.SetMode(ModeReversal)
 			counter.SetGCPercent(tt.gcPercent)
 
 			spy := &gcSpyMonitor{FakeMonitor: monitoring.NewFakeMonitor()}
@@ -326,24 +229,4 @@ func TestGCPercentReversalAppliesAndRestores(t *testing.T) {
 			assert.Equal(t, before, gcPercentNow(), "runtime percent must be restored after the pipeline")
 		})
 	}
-}
-
-// Class mode never touches the runtime GC percent, whatever the knob says
-// (ADR-014): its peak is the M accumulator, not count-phase headroom.
-func TestGCPercentClassModeUntouched(t *testing.T) {
-	before := gcPercentNow()
-
-	counter := NewCounter(graph.New(5))
-	counter.SetMode(ModeClass)
-	counter.SetGCPercent(DefaultGCPercentReversal)
-
-	spy := &gcSpyMonitor{FakeMonitor: monitoring.NewFakeMonitor()}
-	assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), spy, 4, 6))
-
-	if assert.NotEmpty(t, spy.phasePercents) {
-		for _, got := range spy.phasePercents {
-			assert.Equal(t, before, got, "class mode must not change the percent while running")
-		}
-	}
-	assert.Equal(t, before, gcPercentNow(), "class mode must not change the percent at all")
 }

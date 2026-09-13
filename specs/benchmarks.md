@@ -1,6 +1,6 @@
 # Методология бенчмарков
 
-Единый бенчмарк `BenchmarkCountAllToursClass` (`counter/benchmark_test.go`) — полный
+Единый бенчмарк `BenchmarkCountAllTours` (`counter/benchmark_test.go`) — полный
 свип глубин meet-in-the-middle разреза **по убыванию** (`size²/2 .. floor`) для каждого
 размера доски. Убывающий порядок: на больших досках дорогие (глубокие) разрезы
 интереснее и именно они упираются в таймеры — свип отдаёт их первыми.
@@ -14,7 +14,7 @@
 make bench                 # свип 5×5/6×6 (7×7/8×8 — SKIP), -benchtime=10x
 make bench-deep            # + 7×7 целиком (часы): BENCH_DEEP=1, -timeout=48h
 make bench-size N=7 [DEPTHS=20,22]   # один размер ОТДЕЛЬНЫМ процессом
-make bench-8x8 DEPTHS=32             # точечный прогон 8×8, только reversal (-timeout=24h, ADR-015)
+make bench-8x8 DEPTHS=32             # точечный прогон 8×8 (-timeout=24h)
 make bench-table LOG=bench.log       # рендер markdown-таблиц (tools/bench_table.py)
 
 # напрямую:
@@ -27,34 +27,29 @@ go test -v -run='^$' -bench=. -benchmem ./counter/
 |----------|-----------|
 | 5×5, 6×6 | гоняются всегда |
 | 7×7 | за `BENCH_DEEP=1`; иначе подтест `size7` → SKIP |
-| 8×8 | за `BENCH_8X8=1`, **только reversal-режим**: цель `bench-8x8` фиксирует `BENCH_MODE=reversal`, в class-режиме подтест `size8` → SKIP с пояснением (ADR-015) |
+| 8×8 | за `BENCH_8X8=1` (цель `bench-8x8`); часы на точку, ADR-015 |
 | `depthFloors` (`{7:6}`) | пол глубины свипа; ниже неинформативно/небезопасно (см. ниже) |
 | `sweepDefaults` (`{8:{32,30}}`) | без `BENCH_DEPTHS` у 8×8 гоняется только этот cap |
 | `BENCH_DEPTHS=a,b` | точечный набор вместо свипа; вне `[floor, size²/2]` — отбрасывается; если для размера не осталось ни одной — SKIP (переменная не ломает остальные размеры) |
-| `BENCH_MODE=class\|reversal` | режим подсчёта (`counter.SetMode`), по умолчанию `class`; неизвестное значение → `b.Fatalf`. A/B-свод планов 06 (ADR-011): одним бенчмарком гоняется любой из двух конвейеров |
 
 Подтесты именуются `size{N}/depth{D}`; родительский уровень `size{N}` нужен ровно для
 SKIP'а gated-размера.
 
-Пол глубины 7×7 = 6: по замерам ниже десятки время уходит в часы (глубина 9 ≈ 8.8 ч
-против 22 мин на 10), а глубина 6 не завершилась — аккумулятор M не влез в память.
+Пол глубины 7×7 = 6: по замерам ниже десятки время уходит в часы, а глубина 6 не
+завершилась.
 
 ## Публикуемые метрики (`b.ReportMetric`)
 
-Читаются из `FakeMonitor`-снимков **по фазам** (`Phase("gen A"/"gen B"/"counting")`,
-`ShapeStats()`). Каждая итерация `b.Loop()` создаёт **новый** FakeMonitor (снимки
-аддитивны) и оборачивает прогон в `Start(ctx)`/`Finish()` (без `Finish` длительность
-последней фазы не фиксируется).
+Читаются из `FakeMonitor`-снимков **по фазам** (`Phase("gen A"/"gen B"/"counting")`).
+Каждая итерация `b.Loop()` создаёт **новый** FakeMonitor (снимки аддитивны) и оборачивает
+прогон в `Start(ctx)`/`Finish()` (без `Finish` длительность последней фазы не фиксируется).
 
 | Метрика | Смысл |
 |---------|-------|
 | `genA_ms/op`, `genB_ms/op`, `cnt_ms/op` | тайминг фаз |
-| `writesA/op`, `writesB/op` | эмиссии в аккумуляторы (не уникальные ключи) |
+| `writesA/op`, `writesB/op` | эмиссии в аккумулятор/task-cache (не уникальные ключи) |
 | `prunedA/op`, `prunedB/op` | отсечено прунером в генерации |
-| `prunedDP_artic/op`, `prunedDP_chain/op` | L2-прунинг DP (только counting) |
-| `filtered/op` | форм, убитых pre-DP фильтром (ADR-008); A/B свип — env `SHAPE_FILTER=off` |
-| `classes/op`, `shapes/op`, `zeros/op` | записи M / различные формы / формы с h≡0 (class mode) |
-| `cacheHits/op`, `cacheMisses/op` | lookup'ы task-cache на уровне стопа в counting (reversal mode; в class — нули) |
+| `cacheHits/op`, `cacheMisses/op` | lookup'ы task-cache на уровне стопа в counting |
 | `peakRSS_MB/op` | **максимум резидента процесса** (`syscall.Getrusage`) |
 | `totalAllocMB/op` | дельта `runtime.MemStats.TotalAlloc` вокруг итерации |
 
@@ -77,9 +72,9 @@ SKIP'а gated-размера.
 
 ## Дисциплина замеров
 
-- Reversal-прогоны штатно работают с GOGC 40 — процент понижает сам конвейер (ADR-014),
-  внешний env `GOGC` в reversal-режиме кодом **перезаписывается**. Контрольный прогон
-  без понижения GC — явно `SetGCPercent(0)`/`-gc-percent 0`, не env. Class mode GC не трогает.
+- Прогоны штатно работают с GOGC 40 — процент понижает сам конвейер (ADR-014), внешний
+  env `GOGC` кодом **перезаписывается**. Контрольный прогон без понижения GC — явно
+  `SetGCPercent(0)`/`-gc-percent 0`, не env.
 - Любое изменение hot-path обязано прикладывать before/after числа (`make bench` /
   `make bench-size`) — нельзя заявлять выигрыш без измерения.
 - Числа решения попадают в ADR (навсегда), сюда — только изменения методологии.

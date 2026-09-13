@@ -141,48 +141,39 @@ make bench            # Benchmarks (counter/)
 
 - **main.go** – Entry point, CLI flags: `-size` (5–8), `-workers`, `-precompute-depth`
   (default per board size via `counter.DefaultPrecomputeDepth`; validated `[1, size²/2]`),
-  `-tail-memo` (counting tail memo threshold K, 0 = off), `-mode` (`class|reversal`, default
-  `reversal`), `-gc-percent` (GOGC for the reversal pipeline duration, default
+  `-gc-percent` (GOGC for the counting pipeline duration, default
   `counter.DefaultGCPercentReversal`, 0 = leave runtime GC untouched)
 - **graph/** – `Graph` struct with precomputed knight moves on an N×N board
   - Neighbors in fixed possibleMoves order (no special sorting)
   - Methods: `GetNeighbors()`, `GetDegree()`, `GetNeighborMask()`, `SholdSkip()` (color parity skip for odd boards)
 - **state/** – `State` type (uint64 bitboard) tracking visited positions
   - Bit manipulation operations: Visit, Unvisit, IsVisited, CountBits, Intersect, Union, Invert, AllVisited
-- **path/** – `Path` value type (state + end); the single key of every accumulator
-  (D4-canonical placements in gen A, shape classes in M)
-- **types/** – Shared `Result` struct (TotalPathsFound, CacheWrites, Pruned breakdown)
+- **path/** – `Path` value type (state + end); the single key of every table
+  (D4-canonical placements in gen A and in the task cache)
+- **types/** – Shared `Result` struct (TotalPathsFound, CacheWrites, CacheHits/Misses, Pruned breakdown)
 - **searcher/** – DFS over bitmasks with dead-end pruning; no memo tables of its own
   - Methods: `GenerateRoots()` (phase A prefix emission into a LocalSink),
-    `ExtendToClasses()` (phase B complement-class emission into the M accumulator);
-    reversal mode: `GenerateTasks()`/`ExtendTask()` (task-cache generation),
+    `GenerateTasks()`/`ExtendTask()` (task-cache generation),
     `CountPathsWithCacheReversal()` (count-DFS with early stop in the task cache);
-    no public counting entry points — correctness is pinned by the brute-force
-    and shallow phase-B oracles in searcher_test.go
-- **counter/** – High-level counting orchestrator, two modes behind `SetMode`
+    no public counting entry points — correctness is pinned by the brute-force oracle
+    and the reversal identity tests in searcher_test.go
+- **counter/** – High-level counting orchestrator, single pipeline (ADR-016)
   - Methods: `ParallelCount()`, `ParallelCountWithDepth()` (gen A over start groups →
-    gen B chunk workers → final pass; class: `total = Σ h(C)·M(C)`, reversal:
-    `total = Σ W(task)·f(task)` via task-cache); `ModeReversal` default, `ModeClass`
+    gen B chunk workers into the task cache → count phase; `total = Σ W(task)·f(task)`)
   - `DefaultPrecomputeDepth(size)` – per-board default split depth
-  - `SetGCPercent(p)` – GOGC for the reversal pipeline duration (ADR-014); applied on
-    entry to the reversal pipeline and restored on exit; class mode ignores it
-- **pruner/** – Pruning strategies:
-  - `DeadEndPruner` – `ShouldPruneAfterVisit()` (hot O(deg) check)
+  - `SetGCPercent(p)` – GOGC for the counting pipeline duration (ADR-014); applied on
+    entry and restored on exit
+- **pruner/** – Stateless necessary-condition pruning (L0 local dead-end + L1 global checks):
+  - `Pruner` – `ShouldPruneAfterVisit()` (hot O(deg) check, returns first prune Reason)
 - **cache/** – Two sharded weight tables (128 shards, hashed by State only):
-  - `Accumulator` keyed by `path.Path` (`Add()`, `DrainShard(i)`, `Drain()`, `ItemsCount()`);
+  - `Accumulator` keyed by `path.Path` (`Add()`, `Drain()`, `ItemsCount()`);
     writers use `Local()` → `LocalSink` (per-goroutine buffer, threshold `Flush`) to avoid
-    lock churn. Reading is per-shard drain (no copying Snapshot — it doubled peak memory).
-  - `Cache` – reversal-mode task cache (`Set()`, concurrent `Get()`, count-phase `Each()`
+    lock churn. Reading is drain-only (no copying Snapshot — it doubled peak memory).
+  - `Cache` – task cache (`Set()`, concurrent `Get()`, count-phase `Each()`
     direct-shard walk under RLock); lives until the end of the count phase, never drained per shard.
-- **shapecount/** – DP h(shape,ends) per translation+D4 shape class, no memo table (class mode final pass)
-  - Methods: `CountShape(shape, ends)` (shared memo across ends of one shape),
-    `CountShapeWithTail(..., tail)` + `NewTail()`/`SetTailMemo(k, slots)` – optional
-    persistent per-worker tail memo f(cur,todo), popcount(todo) ≤ K (plan 03 variant B)
 - **symmetry/** – Exploits board symmetries to reduce search space
   - 8 symmetries: rotations and reflections
   - Methods: `GetCanonicalPosition()`, `GetOrbitSize()`, `GetCanonicalGroups()`, `Canonicalize()`
-  - Shape classes (D4 + translations): `CanonicalizeShape()`, `PrepareShape()`/`KeyFromPrepared()`
-    returning `path.Path` (the separate `ShapeKey` type was removed)
 - **monitoring/** – Progress reporting (`Monitor` interface, `RealMonitor`, `FakeMonitor`)
 
 
@@ -199,18 +190,17 @@ go test -v -bench=. -run=^$ -benchmem ./counter/
 make bench-deep
 # one board size in its own process (required for meaningful peakRSS — it is a
 # per-process maximum): make bench-size N=7 [DEPTHS=20,22]
-# gated 8×8 point run (reversal-only, hours/depth): make bench-8x8 DEPTHS=32
+# gated 8×8 point run (hours/depth): make bench-8x8 DEPTHS=32
 # render markdown tables from a benchmark log: make bench-table LOG=bench.log
 ```
 
 Available benchmarks in `counter/benchmark_test.go`:
-- `BenchmarkCountAllToursClass` – `-precompute-depth` sweep (`size²/2..floor`,
+- `BenchmarkCountAllTours` – `-precompute-depth` sweep (`size²/2..floor`,
   descending) per board under subtests `size{N}/depth{D}`; publishes per-phase
   FakeMonitor counters as extra metrics (`genA_ms/op`, `genB_ms/op`, `cnt_ms/op`,
-  `writesA/op`, `writesB/op`, `prunedA/op`, `prunedB/op`, `classes/op`,
-  `shapes/op`, `zeros/op`) plus memory (`peakRSS_MB/op` — per-process max RSS,
+  `writesA/op`, `writesB/op`, `prunedA/op`, `prunedB/op`, `cacheHits/op`,
+  `cacheMisses/op`) plus memory (`peakRSS_MB/op` — per-process max RSS,
   `totalAllocMB/op` — per-iteration allocation delta)
 - sizes 5/6 always run; size 7 is gated by `BENCH_DEEP=1` (`make bench-deep`) and
   stops at depth 6 (`depthFloors`) — below depth 10 measurements take hours, depth 6 OOMs;
-  size 8 is gated by `BENCH_8X8=1` and measured in reversal mode only (class-size8
-  subtests SKIP, ADR-015). `BENCH_DEPTHS=a,b` overrides the swept depths
+  size 8 is gated by `BENCH_8X8=1` (ADR-015). `BENCH_DEPTHS=a,b` overrides the swept depths

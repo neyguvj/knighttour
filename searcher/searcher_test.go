@@ -11,7 +11,6 @@ import (
 	"knighttour/cache"
 	"knighttour/graph"
 	"knighttour/path"
-	"knighttour/shapecount"
 	"knighttour/state"
 	"knighttour/symmetry"
 )
@@ -81,28 +80,6 @@ func TestFullCountViaGenerateRootsMatchesKnownTotal(t *testing.T) {
 	assert.Equal(t, int64(1728), total, "Σ orbit weights over full-depth leaves == plain count")
 }
 
-// shallowOracle counts full extensions of p through phase B at depth total-1:
-// each complete path emits exactly one singleton complement class and
-// h({u}, u) == 1, so Σ weight·h(C) is the exact plain count.
-func shallowOracle(t *testing.T, g *graph.Graph, searcher *Searcher, p path.Path, weight uint64) int64 {
-	t.Helper()
-
-	acc := cache.NewAccumulator()
-	sink := acc.Local()
-	searcher.ExtendToClasses(context.Background(), sink, p, weight, g.GetTotalCells()-1)
-	sink.Flush()
-
-	sc := shapecount.New(g)
-	var total int64
-	for _, e := range acc.Drain() {
-		assert.Equal(t, 1, e.Path.State().CountBits(), "shallow complement must be a single cell")
-		h := sc.CountShape(e.Path.State(), []int{e.Path.End()}, nil)[0]
-		assert.Equal(t, uint64(1), h, "singleton shape has exactly one covering path")
-		total += int64(h) * int64(e.Weight)
-	}
-	return total
-}
-
 func TestGenerateRootsEmitsCanonicalPrefixes(t *testing.T) {
 	g := graph.New(5)
 	sym := symmetry.NewSymmetry(5)
@@ -157,90 +134,7 @@ func TestGenerateRootsSkipsWrongColor(t *testing.T) {
 	assert.Zero(t, acc.ItemsCount())
 }
 
-// The class-mode identity: Σ h(C)·M(C) over the emitted accumulator must
-// reproduce the plain full count from the same roots. The reference is the
-// shallow phase-B oracle (depth = totalCells-1, singleton complements with
-// h == 1), cross-checked against the naive brute force on a small sample.
-func TestExtendToClassesMatchesFullCount(t *testing.T) {
-	const baseDepth = 5
-	const naiveSampleSize = 8
-
-	tests := []struct {
-		size  int
-		depth int // target depth; complement size total-depth must stay DP-cheap
-	}{
-		{size: 5, depth: 13}, // mid roots, medium complements (q=12)
-		{size: 5, depth: 20}, // deep roots, small complements (q=5)
-	}
-
-	for _, tt := range tests {
-		t.Run("size"+strconv.Itoa(tt.size)+"/depth"+strconv.Itoa(tt.depth), func(t *testing.T) {
-			g := graph.New(tt.size)
-			sym := symmetry.NewSymmetry(tt.size)
-			searcher := NewSearcher(g, sym)
-
-			intermediate := cache.NewAccumulator()
-			for _, group := range sym.GetCanonicalGroups() {
-				sink := intermediate.Local()
-				searcher.GenerateRoots(context.Background(), sink, group.Canonical, uint64(group.OrbitSize), baseDepth)
-				sink.Flush()
-			}
-
-			entries := intermediate.Drain()
-
-			acc := cache.NewAccumulator()
-			sink := acc.Local()
-			var fullTotal int64
-			for i, e := range entries {
-				searcher.ExtendToClasses(context.Background(), sink, e.Path, e.Weight, tt.depth)
-				fullTotal += shallowOracle(t, g, searcher, e.Path, e.Weight)
-
-				if i < naiveSampleSize {
-					ref := int64(naiveCountFrom(g, e.Path.State(), e.Path.End())) * int64(e.Weight)
-					assert.Equal(t, ref, shallowOracle(t, g, searcher, e.Path, e.Weight),
-						"shallow oracle must match the naive brute force (entry %d)", i)
-				}
-			}
-			sink.Flush()
-
-			sc := shapecount.New(g)
-			var classTotal int64
-			for _, ce := range acc.Drain() {
-				h := sc.CountShape(ce.Path.State(), []int{ce.Path.End()}, nil)[0]
-				classTotal += int64(h) * int64(ce.Weight)
-			}
-
-			assert.Positive(t, fullTotal)
-			assert.Equal(t, fullTotal, classTotal, "Σ h(C)·M(C) must equal the plain count")
-		})
-	}
-}
-
-// Degenerate split (entry already at target depth): ExtendToClasses emits the
-// complement classes of the entry itself instead of descending.
-func TestExtendToClassesEmitsAtEntryDepth(t *testing.T) {
-	g := graph.New(5)
-	sym := symmetry.NewSymmetry(5)
-	searcher := NewSearcher(g, sym)
-
-	st := state.State(0).Visit(0).Visit(6)
-	p := path.New(st, 6)
-
-	acc := cache.NewAccumulator()
-	sink := acc.Local()
-	result := searcher.ExtendToClasses(context.Background(), sink, p, 3, 2)
-	sink.Flush()
-
-	assert.Positive(t, result.CacheWrites, "entry at target depth emits immediately")
-	var total uint64
-	for _, e := range acc.Drain() {
-		total += e.Weight
-	}
-	cand := g.GetNeighborMask(6).Intersect(st.Invert(g.GetTotalCells()))
-	assert.Equal(t, uint64(cand.CountBits())*3, total, "each neighbor end gets the entry weight")
-}
-
-// --- reversal mode (specs/searcher.md, ADR-011) -----------------------------
+// --- task-cache generation and reversal count (specs/searcher.md, ADR-011) --
 
 // buildTaskCache fills a task cache at depth d from every canonical group,
 // mirroring what the counter's generation phases do.
@@ -269,9 +163,8 @@ func allTasks(tb testing.TB, c *cache.Cache) []cache.Entry {
 
 // The reversal identity Σ_tasks W·f == plain count, pinned per split depth
 // against the naive brute-force total (1728). A sample of tasks is checked
-// task-by-task with shallowOracle (phase B at totalCells−1, itself pinned to
-// naiveCountFrom in TestExtendToClassesMatchesFullCount): f(task) must equal
-// the plain completions of (state, end), not merely sum up right.
+// task-by-task with naiveCountFrom: f(task) must equal the plain completions
+// of (state, end), not merely sum up right.
 func TestReversalMatchesBruteForceAllDepths(t *testing.T) {
 	const size = 5
 	const naiveSample = 8
@@ -291,8 +184,8 @@ func TestReversalMatchesBruteForceAllDepths(t *testing.T) {
 				sum += e.Weight * uint64(res.TotalPathsFound)
 
 				if i < naiveSample {
-					ref := shallowOracle(t, g, searcher, e.Path, 1)
-					assert.Equal(t, uint64(ref), uint64(res.TotalPathsFound), "task %d: f must match the oracle", i)
+					ref := naiveCountFrom(g, e.Path.State(), e.Path.End())
+					assert.Equal(t, uint64(ref), uint64(res.TotalPathsFound), "task %d: f must match the brute force", i)
 				}
 			}
 			assert.Equal(t, uint64(1728), sum, "Σ W·f == plain count at depth %d", d)

@@ -10,7 +10,7 @@ import (
 
 func TestResultAdd(t *testing.T) {
 	r := Result{TotalPathsFound: 5, CacheWrites: 3, CacheHits: 4, PrunedDeadEnd: 4}
-	other := Result{TotalPathsFound: 7, CacheWrites: 1, CacheHits: 2, CacheMisses: 6, PrunedDisconn: 6, FilteredShapes: 2}
+	other := Result{TotalPathsFound: 7, CacheWrites: 1, CacheHits: 2, CacheMisses: 6, PrunedDisconn: 6, PrunedEndpoints: 2}
 
 	r.Add(&other)
 
@@ -21,7 +21,7 @@ func TestResultAdd(t *testing.T) {
 		CacheMisses:     6,
 		PrunedDeadEnd:   4,
 		PrunedDisconn:   6,
-		FilteredShapes:  2,
+		PrunedEndpoints: 2,
 	}, r)
 }
 

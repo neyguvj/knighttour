@@ -12,12 +12,17 @@ import (
 	"knighttour/types"
 )
 
+// Searcher is the pure traversal layer (specs/searcher.md): DFS backtracking
+// over bitmasks with pruning plus the generation phases and the reversal
+// count-DFS. It owns no memo tables — the caches belong to the calling loop.
 type Searcher struct {
 	graph  *graph.Graph
 	sym    *symmetry.Symmetry
 	pruner *pruner.Pruner
 }
 
+// NewSearcher returns a searcher for g with D4 canonicalization by sym and the
+// stateless L0/L1 pruner attached.
 func NewSearcher(g *graph.Graph, sym *symmetry.Symmetry) *Searcher {
 	return &Searcher{
 		graph:  g,
@@ -36,21 +41,6 @@ func (s *Searcher) GenerateRoots(ctx context.Context, sink *cache.LocalSink, sta
 		return result
 	}
 	s.dfsGen(ctx, state.NewState(start), start, depth, orbitSize, sink, &result)
-	result.Finalize()
-	return result
-}
-
-// ExtendToClasses is phase B of the class-mode pipeline (specs/shapecount.md):
-// it extends an intermediate entry to the target depth like a prefix run, but
-// on each leaf emits complement shape classes into sink instead of a prefix
-// record. For leaf (T,t) with U = full \ T and every u ∈ N(t) ∩ U:
-// M[class(U,u)] += weight — the exact regrouping of Σ W·f over the reversal
-// identity, so Σ_C h(C)·M(C) equals the plain count. An entry already at the
-// target depth (precomputeDepth ≤ base depth) emits immediately from itself.
-// Statistics reuse the cache-shaped fields: CacheWrites counts emitted class
-// contributions.
-func (s *Searcher) ExtendToClasses(ctx context.Context, sink *cache.LocalSink, p path.Path, weight uint64, depth int) (result types.Result) {
-	s.dfsEmit(ctx, p.State(), p.End(), depth, weight, sink, &result)
 	result.Finalize()
 	return result
 }
@@ -85,44 +75,7 @@ func (s *Searcher) dfsGen(ctx context.Context, st state.State, end, depth int, w
 	}
 }
 
-// dfsEmit is the phase-B descent: same traversal and pruning as dfsGen, but a
-// leaf contributes its complement instead of itself. For leaf (T,t) with
-// U = full \ T it normalizes U once (PrepareShape) and emits one class key per
-// u ∈ N(t) ∩ U, all with the same incoming weight — hence up to deg(t) emissions
-// per leaf, and zero when cand is empty (such a tail closes no tour, so its
-// contribution to M is legitimately nil). unvisited/cand are computed before the
-// depth check because the base case needs both.
-func (s *Searcher) dfsEmit(ctx context.Context, st state.State, end, depth int, weight uint64, sink *cache.LocalSink, res *types.Result) {
-	if ctx.Err() != nil {
-		return
-	}
-
-	unvisited := st.Invert(s.graph.GetTotalCells())
-	cand := s.graph.GetNeighborMask(end).Intersect(unvisited)
-
-	if st.CountBits() >= depth {
-		var sc symmetry.ShapeCtx
-		s.sym.PrepareShape(unvisited, &sc)
-		for u := range cand.AllVisited() {
-			sink.Add(s.sym.KeyFromPrepared(&sc, int(u)), weight)
-			res.CacheWrites++
-		}
-		return
-	}
-
-	for n := range cand.AllVisited() {
-		newUnvisited := unvisited.Unvisit(n)
-		if !newUnvisited.IsEmpty() {
-			if pruned, reason := s.pruner.ShouldPruneAfterVisit(n, newUnvisited); pruned {
-				res.CountPrune(reason)
-				continue
-			}
-		}
-		s.dfsEmit(ctx, st.Visit(n), n, depth, weight, sink, res)
-	}
-}
-
-// GenerateTasks is phase A of reversal-mode generation (specs/counter.md):
+// GenerateTasks writes task-cache records straight from a start (specs/counter.md):
 // the same descent as dfsGen, but each leaf prefix is written directly into
 // the shared task-cache as its D4-canonical placement with the group's orbit
 // weight (no LocalSink: cache.Set is the write path, ADR-011). SholdSkip
@@ -136,7 +89,7 @@ func (s *Searcher) GenerateTasks(ctx context.Context, c *cache.Cache, start int,
 	return result
 }
 
-// ExtendTask is phase B of reversal-mode generation: it continues the task
+// ExtendTask is phase B of task-cache generation: it continues the task
 // descent from an already canonical entry p with its aggregated weight down
 // to the target depth. An entry at or beyond the depth (degenerate split,
 // precomputeDepth ≤ base) writes itself as-is — descending further would
@@ -171,10 +124,10 @@ func (s *Searcher) CountPathsWithCacheReversal(ctx context.Context, p path.Path,
 	return result
 }
 
-// dfsTask is the task-cache descent of reversal-mode generation: same walk
-// and pruning as dfsGen, but the leaf writes its canonical placement into the
-// shared cache. Duplicated rather than callback-unified with dfsGen for the
-// hot-path reason documented in specs/searcher.md.
+// dfsTask is the task-cache descent shared by GenerateTasks and ExtendTask:
+// same walk and pruning as dfsGen, but the leaf writes its canonical
+// placement into the shared cache. Duplicated rather than callback-unified
+// with dfsGen for the hot-path reason documented in specs/searcher.md.
 func (s *Searcher) dfsTask(ctx context.Context, st state.State, end, depth int, weight uint64, c *cache.Cache, res *types.Result) {
 	if ctx.Err() != nil {
 		return

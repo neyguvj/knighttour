@@ -1,4 +1,4 @@
-package cache_test
+package cache
 
 import (
 	"sync"
@@ -6,13 +6,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"knighttour/cache"
 	"knighttour/path"
 	"knighttour/state"
 )
 
 func TestAccumulatorAddAndDrain(t *testing.T) {
-	acc := cache.NewAccumulator()
+	acc := NewAccumulator()
 	k1 := path.New(state.State(0b101), 1)
 	k2 := path.New(state.State(0b101), 2)
 
@@ -31,36 +30,35 @@ func TestAccumulatorAddAndDrain(t *testing.T) {
 	assert.Zero(t, acc.ItemsCount(), "drain must empty the table")
 }
 
-// DrainShard must return exactly one shard's records and release its map;
-// the union over all shards equals the full table.
-func TestDrainShardPartitionsTable(t *testing.T) {
-	acc := cache.NewAccumulator()
+// Drain returns the full table exactly once: every record appears with its
+// summed weight and a second drain (or ItemsCount) sees nothing (specs/cache.md).
+func TestAccumulatorDrainReturnsTableOnce(t *testing.T) {
+	acc := NewAccumulator()
 	const n = 3000
 	for i := range n {
 		acc.Add(path.New(state.State(i), i%17), uint64(i))
 	}
 
-	var total, sum uint64
-	for i := range acc.NumShards() {
-		entries := acc.DrainShard(i)
-		total += uint64(len(entries))
-		for _, e := range entries {
-			sum += e.Weight
-		}
+	drained := acc.Drain()
+	assert.Len(t, drained, n, "Drain returns every record once")
+	var sum uint64
+	for _, e := range drained {
+		sum += e.Weight
 	}
-	assert.Equal(t, uint64(n), total)
 	var want uint64
 	for i := range n {
 		want += uint64(i)
 	}
 	assert.Equal(t, want, sum)
-	assert.Zero(t, acc.ItemsCount())
+
+	assert.Zero(t, acc.ItemsCount(), "drained table is empty")
+	assert.Empty(t, acc.Drain(), "a second drain returns nothing")
 }
 
 // Sharding invariant (specs/cache.md): every end of one State lives in the
-// same shard, so per-shard grouping by shape is correct.
+// same shard — internal drainShard mechanics must never split a mask.
 func TestSameStateSharesOneShard(t *testing.T) {
-	acc := cache.NewAccumulator()
+	acc := NewAccumulator()
 	states := []state.State{0b1, 0b1001, 0xFF00FF, 0x123456789ABCDEF}
 	const ends = 8
 	for _, st := range states {
@@ -70,8 +68,8 @@ func TestSameStateSharesOneShard(t *testing.T) {
 	}
 
 	shardOf := make(map[state.State]map[int]bool, len(states))
-	for i := range acc.NumShards() {
-		for _, e := range acc.DrainShard(i) {
+	for i := range acc.shards {
+		for _, e := range acc.drainShard(i) {
 			st := e.Path.State()
 			if shardOf[st] == nil {
 				shardOf[st] = make(map[int]bool)
@@ -88,8 +86,8 @@ func TestSameStateSharesOneShard(t *testing.T) {
 // threshold flushes and explicit Flush conserve the total per key.
 func TestLocalSinkMatchesDirectAdd(t *testing.T) {
 	const n = 5000 // > localFlushLimit several times over
-	direct := cache.NewAccumulator()
-	buffered := cache.NewAccumulator()
+	direct := NewAccumulator()
+	buffered := NewAccumulator()
 
 	sink := buffered.Local()
 	for i := range n {
@@ -118,7 +116,7 @@ func TestLocalSinkConcurrent(t *testing.T) {
 	const writers = 8
 	const perWriter = 4000
 
-	acc := cache.NewAccumulator()
+	acc := NewAccumulator()
 	var wg sync.WaitGroup
 	for w := range writers {
 		wg.Go(func() {

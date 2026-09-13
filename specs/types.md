@@ -2,20 +2,20 @@
 
 ## Ответственность
 
-`Result` — широкий блок счётчиков одной подзадачи, собираемый локально у вызывающего
-(searcher/shapecount) по ходу горячего DFS/DP и один раз репортимый контуром в
-мониторинг по завершении. Единый формат пер-подзадачной статистики.
+`Result` — блок счётчиков одной подзадачи, собираемый локально у вызывающего (searcher) по
+ходу горячего DFS и один раз репортимый контуром в мониторинг по завершении. Единый формат
+пер-подзадачной статистики.
 
 ## Публичный API
 
 ```go
 type Result struct {
-    TotalPathsFound int   // reversal count-DFS: число дополнений подзадачи; class mode
-                          // не заполняет (counting публикует взвешенные пути через ReportPathsFound)
+    TotalPathsFound int   // reversal count-DFS: число дополнений подзадачи; генерация
+                          // не заполняет (пути публикует контур через ReportPathsFound)
 
-    CacheWrites int       // эмиссии в аккумуляторы/task-cache (sink.Add, Set)
+    CacheWrites int       // эмиссии в аккумулятор/task-cache (sink.Add, Set)
 
-    // Reversal mode: попадания/промахи lookup'ов в task-cache на уровне стопа.
+    // Попадания/промахи lookup'ов в task-cache на уровне стопа count-фазы.
     CacheHits   int
     CacheMisses int
 
@@ -25,13 +25,6 @@ type Result struct {
     PrunedNoCont      int
     PrunedDisconn     int
     PrunedEndpoints   int
-    PrunedArticulation int // L2, только shapecount DP
-    PrunedForcedChain  int // L2, только shapecount DP
-
-    DPStates      int // shapecount: вычисленные состояния DP (промахи memo)
-    TailLookups   int // shapecount: обращения к persistent tail-мемо
-    TailHits      int // shapecount: попадания tail-мемо
-    FilteredShapes int // shapecount: форм, убитых pre-DP фильтром (отдельно от pruned*)
 }
 
 func (r *Result) Add(other *Result)         // покомпонентное сложение (pointer — wide block)
@@ -46,15 +39,12 @@ func (r *Result) Finalize()                 // Pruned = Σ видов; один 
 - `CountPrune` не трогает агрегат `Pruned` (лишний store на каждом prune); сводку
   считает `Finalize` на выходе публичных методов.
 - `NoReason` в `CountPrune` игнорируется (означает «не отсечено»).
-- `FilteredShapes` держится отдельно от `Pruned*`, чтобы исторические метрики прунинга
-  оставались сопоставимы (ADR-008).
 
 ## Ограничения и edge cases
 
 - Все поля экспортированы; логика минимальна (сложение/инкремент).
-- `TotalPathsFound` заполняет только reversal count-DFS; мониторинг его игнорирует
-  (пути публикует контур через `ReportPathsFound`). `CacheHits/CacheMisses` заполняет
-  тоже только reversal.
+- `TotalPathsFound`, `CacheHits/CacheMisses` заполняет только count-фаза (reversal
+  count-DFS); генерационные методы их не касаются.
 
 ## Тесты
 

@@ -4,7 +4,7 @@
 Usage: make bench-table LOG=bench.log  (or: python3 tools/bench_table.py bench.log)
 
 Parses lines like:
-    BenchmarkCountAllToursClass/size6/depth13-14   10   68600000 ns/op   22.1 cnt_ms/op ...
+    BenchmarkCountAllTours/size6/depth13-14   10   68600000 ns/op   22.1 cnt_ms/op ...
 Groups by `size{N}`, sorts depths descending, and prints a markdown table with
 counters humanized to K/M/G and times/durations in readable units.
 """

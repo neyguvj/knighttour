@@ -11,7 +11,6 @@ import (
 
 	"knighttour/graph"
 	"knighttour/monitoring"
-	"knighttour/pruner"
 )
 
 // benchmarkSizes are the boards the depth sweep covers, biggest cut first.
@@ -36,32 +35,14 @@ func gateVar(size int) string {
 	return deepEnvVar
 }
 
-// depthFloors is the lowest split depth per board size (default 1). Below depth
-// 10 on 7×7 the final DP over huge complements runs hours (depth 9 ≈ 8.8h vs 22min
-// at 10) and depth 6 was OOM-killed, so the sweep stops there.
+// depthFloors is the lowest swept depth per board size (default 1). Below depth
+// 10 on 7×7 measurements run into hours and depth 6 was OOM-killed, so the
+// sweep stops there.
 var depthFloors = map[int]int{7: 6}
 
 // benchDepthsEnv overrides the swept depths (comma separated, e.g. "30,32") for
 // point measurements of hour-long cuts; values outside [floor, size²/2] are dropped.
 const benchDepthsEnv = "BENCH_DEPTHS"
-
-// benchModeEnv selects the counting mode ("class" | "reversal", default
-// class) so one benchmark measures either pipeline for the A/B sweep (plan 06).
-const benchModeEnv = "BENCH_MODE"
-
-// benchMode resolves the counting mode from the environment; unknown values
-// fail fast instead of silently measuring the wrong pipeline.
-func benchMode(b *testing.B) Mode {
-	switch v := os.Getenv(benchModeEnv); v {
-	case "", "class":
-		return ModeClass
-	case "reversal":
-		return ModeReversal
-	default:
-		b.Fatalf("%s: unknown mode %q (want class|reversal)", benchModeEnv, v)
-		return ModeClass
-	}
-}
 
 // sweepDefaults caps the 8×8 default sweep: a full descent from depth 32 is many
 // hours per point, so without BENCH_DEPTHS only these run until the first real
@@ -77,24 +58,19 @@ var toursExpected = map[int]uint64{
 	7: 165_575_218_320,
 }
 
-// BenchmarkCountAllToursClass sweeps every meet-in-the-middle split root per
-// board size, descending (size²/2..floor): deep cuts are the expensive and the
+// BenchmarkCountAllTours sweeps every meet-in-the-middle split root per board
+// size, descending (size²/2..floor): deep cuts are the expensive and the
 // interesting ones on big boards, so they run first. Metrics are published next
 // to ns/op and split by phase — per-phase wall time (genA/genB/cnt ms),
-// generation footprint (writes/pruned of gen A and gen B), final-pass totals
-// (classes/shapes/zeros; reversal counting: cacheHits/cacheMisses) and memory
-// (peakRSS_MB/op, totalAllocMB/op). BENCH_MODE selects the pipeline
-// (class|reversal, default class — plan 06 A/B); 8×8 is measured in reversal
-// mode only, its class subtests skip (ADR-015).
+// generation footprint (writes/pruned of gen A and gen B), task-cache lookups
+// of counting (cacheHits/cacheMisses) and memory (peakRSS_MB/op,
+// totalAllocMB/op).
 //
 // peakRSS is a process-wide maximum: run one board size per process
 // (`make bench-size N=…`), otherwise it reflects the most hungry subtest.
-func BenchmarkCountAllToursClass(b *testing.B) {
+func BenchmarkCountAllTours(b *testing.B) {
 	for _, size := range benchmarkSizes {
 		b.Run("size"+strconv.Itoa(size), func(b *testing.B) {
-			if size == 8 && benchMode(b) == ModeClass {
-				b.Skip("class mode on 8x8 is not measured (ADR-015): it cannot fit in memory; use BENCH_MODE=reversal")
-			}
 			if gate := gateVar(size); gatedSizes[size] && os.Getenv(gate) != "1" {
 				b.Skipf("set %s=1: one %d×%d measurement costs ~9 min..hours", gate, size, size)
 			}
@@ -134,10 +110,6 @@ func sweepDepths(b *testing.B, size int) []int {
 func runDepths(b *testing.B, size int, depths []int) {
 	workers := runtime.NumCPU()
 	c := NewCounter(graph.New(size))
-	c.SetMode(benchMode(b)) // BENCH_MODE=class|reversal (default class)
-	if os.Getenv("SHAPE_FILTER") == "off" {
-		c.SetShapeFilter(pruner.L2None) // A/B measurement of the plan-02 filter
-	}
 	want, verify := toursExpected[size]
 
 	for _, depth := range depths {
@@ -185,23 +157,16 @@ func depthFloor(size int) int {
 func reportBenchMetrics(b *testing.B, m *monitoring.FakeMonitor) {
 	genA := m.Phase("gen A")
 	genB := m.Phase("gen B")
-	classes, shapes, zeros := m.ShapeStats()
+	counting := m.Phase("counting")
 
-	b.ReportMetric(float64(m.Phase("counting").Duration.Microseconds())/1e3, "cnt_ms/op")
+	b.ReportMetric(float64(counting.Duration.Microseconds())/1e3, "cnt_ms/op")
 	b.ReportMetric(ms(genA.Duration), "genA_ms/op")
 	b.ReportMetric(ms(genB.Duration), "genB_ms/op")
-	b.ReportMetric(float64(classes), "classes/op")
-	b.ReportMetric(float64(shapes), "shapes/op")
-	b.ReportMetric(float64(zeros), "zeros/op")
 	b.ReportMetric(float64(genA.CacheWrites), "writesA/op")
 	b.ReportMetric(float64(genB.CacheWrites), "writesB/op")
 	b.ReportMetric(float64(genA.Pruned), "prunedA/op")
 	b.ReportMetric(float64(genB.Pruned), "prunedB/op")
-	counting := m.Phase("counting")
-	b.ReportMetric(float64(counting.PrunedArticulation), "prunedDP_artic/op")
-	b.ReportMetric(float64(counting.PrunedForcedChain), "prunedDP_chain/op")
-	b.ReportMetric(float64(counting.FilteredShapes), "filtered/op")
-	// Reversal task-cache lookups of the counting phase (zero in class mode).
+	// Task-cache lookups of the counting phase at the reversal stop level.
 	b.ReportMetric(float64(counting.CacheHits), "cacheHits/op")
 	b.ReportMetric(float64(counting.CacheMisses), "cacheMisses/op")
 }

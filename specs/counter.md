@@ -2,73 +2,55 @@
 
 ## Ответственность
 
-Высокоуровневый контур подсчёта двух режимов (ADR-001, ADR-011): **class mode** — генерация
-префиксов двумя фазами и финальный DP-проход по классам форм; **reversal mode** — та же
-двухфазная генерация в task-cache и count-фаза с ранним стопом через мемо по точному
-состоянию. Режим — переключатель контура, параллелизм/мониторинг общие. Дефолт —
-reversal (ADR-011).
+Высокоуровневый контур подсчёта: двухфазная генерация префиксов в task-cache и count-фаза
+с ранним стопом через мемо по точному состоянию (ADR-011, единственный конвейер — ADR-016).
+Параллелизм, симметрии стартов и мониторинг — общие для фаз.
 
 ## Публичный API
 
 ```go
 const TwoPhaseBaseDepth = 5                 // глубина промежуточного аккумулятора фазы A
-const DefaultGCPercentReversal = 40         // GOGC на время reversal-конвейера (ADR-014)
+const DefaultGCPercentReversal = 40         // GOGC на время конвейера (ADR-014)
 
-func DefaultPrecomputeDepth(size int) int   // {5:6, 6:10, 7:20, 8:14}; fallback TwoPhaseBaseDepth+1
-
-type Mode int                               // режим подсчёта
-const (
-    ModeClass     Mode = iota               // pipeline по классам форм
-    ModeReversal                            // task-cache + count-DFS с обращениями (дефолт)
-)
+func DefaultPrecomputeDepth(size int) int   // контрактные значения таблицы ниже;
+                                            // fallback TwoPhaseBaseDepth+1 для неизвестных досок
 
 func NewCounter(g *graph.Graph) *Counter
 
-// Параллельный подсчёт всех открытых туров активным режимом; разрез meet-in-the-middle
-// на precomputeDepth (валидируется в main.go в [1, size²/2]). Суммирование — atomic.Uint64.
+// Параллельный подсчёт всех открытых туров; разрез meet-in-the-middle на precomputeDepth
+// (валидируется в main.go в [1, size²/2]). Суммирование — atomic.Uint64.
 func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring.Monitor,
     workers, precomputeDepth int) uint64
 
 // Обёртка: глубина по умолчанию для текущей доски.
 func (c *Counter) ParallelCount(ctx context.Context, monitor monitoring.Monitor, workers int) uint64
 
-// Диагностика/эксперименты:
-func (c *Counter) SetMode(m Mode)                       // режим; свежий NewCounter — ModeReversal
-func (c *Counter) SetGCPercent(p int)                   // GOGC на время reversal-конвейера (ADR-014);
-                                                        // p > 0 — debug.SetGCPercent(p) на входе и
-                                                        // восстановление прежнего при выходе;
-                                                        // p == 0 — не трогать. Значение по умолчанию
-                                                        // конвейера — DefaultGCPercentReversal;
-                                                        // class mode значение игнорирует
-func (c *Counter) SetShapeFilter(mask pruner.L2Checks)  // pre-DP фильтр class mode (ADR-008)
-func (c *Counter) SetTailMemo(k, slots int)             // tail-мемо counting class mode (план 03)
-func (c *Counter) SetShapeDump(fn func(shape state.State, ends []int, allZero bool))
+// Диагностика:
+func (c *Counter) SetGCPercent(p int)       // GOGC на время конвейера (ADR-014);
+                                            // p > 0 — debug.SetGCPercent(p) на входе и
+                                            // восстановление прежнего при выходе;
+                                            // p == 0 — не трогать. Значение по умолчанию —
+                                            // DefaultGCPercentReversal
 ```
 
-Сеттеры class-mode-специфики (`SetShapeFilter`, `SetTailMemo`, `SetShapeDump`) в reversal
-mode игнорируются.
+Контрактные значения `DefaultPrecomputeDepth` (держатся числовыми до пересъёмки под
+reversal — ADR-016):
 
-## Алгоритм class mode (три фазы)
+| size | 5 | 6 | 7 | 8 |
+|---|---|---|---|---|
+| depth | 6 | 10 | 20 | 14 |
+
+## Алгоритм (три фазы)
 
 1. **gen A** — параллельно по каноническим стартовым группам (`errgroup` + `SetLimit(workers)`):
    `searcher.GenerateRoots(ctx, sink, canonical, orbitSize, a)`, где
    `a = min(precomputeDepth, TwoPhaseBaseDepth)`; воркеры пишут через свои `LocalSink`.
    `Drain()` — worklist фазы B (тысячи задач вместо ~10 групп → полная утилизация).
 2. **gen B** — чанк-воркеры (`min(len(entries), workers)`, задачи тянутся атомарным
-   индексом), каждая задача — `searcher.ExtendToClasses(...)` в аккумулятор M через LocalSink.
-3. **counting** — два stage'а per-shard без общего снимка M (ADR-010): grouping шардов →
-   LPT-стек job'ов → dispatch батчами; для формы — `shapecount.CountShapeWithTail`,
-   `total += Σ_end h·M`.
-
-При `precomputeDepth ≤ TwoPhaseBaseDepth` фаза B вырождается (эмиссия из промежуточных
-записей), но остаётся.
-
-## Алгоритм reversal mode (те же фазы, другой финал)
-
-1. **gen A** — идентичен class mode (промежуточный аккумулятор тех же ключей/весов).
-2. **gen B** — чанк-воркеры тянут worklist gen A и зовут `searcher.ExtendTask(...)` с
-   записью напрямую в `cache.Cache` task-cache (без LocalSink). Фаза вырождается так же,
-   через запись самой записи.
+   индексом), каждая задача — `searcher.ExtendTask(...)` с записью напрямую в `cache.Cache`
+   task-cache (без LocalSink: профиль записей иной, hit'ы читаются в том же ране, что
+   пишутся). При `precomputeDepth ≤ TwoPhaseBaseDepth` фаза вырождается — запись самой
+   записи.
 3. **counting** — прямой обход task-cache без копирования (ADR-013): `taskCache.Each`
    с `workers` параллельными горутинами на шарды; колбэк для каждой записи `(task, w)` —
    `searcher.CountPathsWithCacheReversal(ctx, task, taskCache, precomputeDepth)`,
@@ -76,48 +58,37 @@ mode игнорируются.
    работает под RLock шарда при отсутствии писателей (контракт `cache.Each`). Отмена ctx
    проверяется перед каждым шардом и каждой задачей.
 
-Весь конвейер reversal работает под пониженным GOGC (`SetGCPercent`, ADR-014): значение
-применяется на входе и восстанавливается при выходе — пик фазы это живая task-cache,
-headroom над ней дорог. Class mode GC не трогает.
+Весь конвейер работает под пониженным GOGC (`SetGCPercent`, ADR-014): значение применяется на
+входе и восстанавливается при выходе — пик фазы это живая task-cache, headroom над ней дорог.
 
 ## Инварианты и корректность
 
 - Каждая запись глубины `a` проходит ровно через один канонический ключ (D4-эквивариантность
-  графа/прунера); эмиссия M — точная перегруппировка `total = Σ_C h(C)·M(C)`; task-cache
-  reversal даёт `total = Σ_tasks W(task)·f(task)` на том же множестве ключей (ADR-011).
-- Общий счёт — `atomic.Uint64`; аккумуляторы шардированы; sinks не разделяются между
-  горутинами. Итог не зависит от числа воркеров и глубины разреза (тест инвариантности)
-  и **от режима**: ModeClass == ModeReversal на всех допустимых глубинах.
-- Глубина разреза сверху ограничена `size²/2`: для class mode размером M (выше —
-  экспоненциальный рост), для reversal это точка дуальности обращения (`2d ≤ totalCells`).
+  графа/прунера); тождество итога `total = Σ_tasks W(task)·f(task)` на множестве канонических
+  префиксов (ADR-011).
+- Общий счёт — `atomic.Uint64`; таблицы шардированы; sinks не разделяются между горутинами.
+  Итог не зависит от числа воркеров и глубины разреза (тест инвариантности).
+- Глубина разреза сверху ограничена `size²/2`: точка дуальности обращения (`2d ≤ totalCells`),
+  глубже — дублирование двойственного разреза.
 
 ## Ограничения и edge cases
 
-- Память class mode: главный потребитель — аккумулятор M; истинный пик в конце gen B.
-  Подробности — ADR-003/004/010.
-- Память reversal mode: task-cache живёт до конца count-фазы и не дренируется по шардам;
-  на низких глубинах (большое q) он дороже M — точка OOM фиксируется как результат A/B.
-  Пониженный GOGC на время конвейера — штатное поведение по умолчанию (ADR-014).
-- Две конкурентные reversal-трубы в одном процессе восстанавливают GC-процент в порядке
+- Task-cache живёт до конца count-фазы и не дренируется по шардам; на низких глубинах
+  (большое q) счёт дорожает. Пониженный GOGC на время конвейера — штатное поведение
+  по умолчанию (ADR-014).
+- Две конкурентные трубы в одном процессе восстанавливают GC-процент в порядке
   «последний пишет» — значение глобально для рантайма; тесты последовательны.
-- Метрики форм (`monitor.ReportShapeStats`) публикует только class mode.
 
 ## Тесты
 
-`counter/counter_test.go`: итог на всех допустимых глубинах == эталон (1728 / 6 637 920)
-в **обоих режимах** (таблица: mode × depth); sequential == parallel; инвариантность к числу
-воркеров; `TestDefaultPrecomputeDepth`; веса промежуточных записей кратны орбите и
-останавливаются на base-глубине; tail-мемо == эталон; counting class mode публикует прунинг
-и shape-статы; reversal публикует hits/misses в счётчики фазы `counting` и не вызывает
-ReportShapeStats. Дефолт конвейера — reversal: тесты class-mode специфики (shape-статы,
-tail-мемо, DP-прунинг) обязаны звать `SetMode(ModeClass)` явно; поведение свежего `NewCounter`
-без `SetMode` закрепляется как reversal (итог == эталон, shape-статы не публикуются).
-GC-ручка (ADR-014): итог reversal не зависит от `SetGCPercent(0|40)`;
-после завершения конвейера процент рантайма восстановлен (значения до/после в тесте);
-class mode не меняет процент.
-
+`counter/counter_test.go`: итог на всех допустимых глубинах == эталон (1728 / 6 637 920);
+sequential == parallel; инвариантность к числу воркеров; `TestDefaultPrecomputeDepth`;
+веса промежуточных записей кратны орбите и останавливаются на base-глубине; counting
+публикует hits/misses в счётчики фазы `counting`. GC-ручка (ADR-014): итог не зависит от
+`SetGCPercent(0|40)`; после завершения конвейера процент рантайма восстановлен (значения
+до/после в тесте).
 
 ## Связанные
 
-ADR-001, ADR-010, ADR-011, ADR-013, ADR-014; `specs/searcher.md`, `specs/cache.md`,
-`specs/shapecount.md`, `specs/monitoring.md`. Методология замеров — `specs/benchmarks.md`.
+ADR-011, ADR-013, ADR-014, ADR-016; `specs/searcher.md`, `specs/cache.md`,
+`specs/monitoring.md`. Методология замеров — `specs/benchmarks.md`.

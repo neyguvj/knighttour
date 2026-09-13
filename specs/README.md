@@ -13,13 +13,13 @@
   на ADR строкой вида `(ADR-0NN)`.
 - Пиши спеку по гайду skill `spec-writing`; план — по гайду `plan-writing`.
 
-## Пайплайн (class mode)
+## Пайплайн (единственный конвейер, ADR-016)
 
 ```
 graph.New(N) → counter.ParallelCountWithDepth(ctx, monitor, workers, depth)
-  ├─ gen A: symmetry.GetCanonicalGroups() → searcher.GenerateRoots → аккумулятор A (D4-размещения)
-  ├─ gen B: Drain(A) worklist → searcher.ExtendToClasses → аккумулятор M (классы форм D4⋉трансляции)
-  └─ counting: DrainShard(M) per-shard → shapecount.CountShape(shape,ends) DP → total += Σ h(C)·M(C)
+  ├─ gen A: symmetry.GetCanonicalGroups() → searcher.GenerateRoots → аккумулятор (D4-размещения)
+  ├─ gen B: Drain(A) worklist → searcher.ExtendTask → task-cache (канонические префиксы, вес Σ orbitSize)
+  └─ counting: Cache.Each прямой обход → searcher.CountPathsWithCacheReversal → total = Σ W(task)·f(task)
 ```
 
 Все фазы параллельны (`errgroup`/атомарные курсоры), детерминированный итог через
@@ -30,14 +30,13 @@ graph.New(N) → counter.ParallelCountWithDepth(ctx, monitor, workers, depth)
 | Пакет | Спека | Ответственность |
 |-------|-------|-----------------|
 | state | [state.md](state.md) | Битборд посещённых клеток (uint64) и побитовые операции |
-| path | [path.md](path.md) | Единый ключ `(state,end)` всех аккумуляторов |
+| path | [path.md](path.md) | Единый ключ `(state,end)` всех таблиц |
 | graph | [graph.md](graph.md) | Предвычисленный граф ходов коня + маски соседей |
-| symmetry | [symmetry.md](symmetry.md) | D4-симметрии, канонизация пар и классов форм |
+| symmetry | [symmetry.md](symmetry.md) | D4-симметрии, канонизация пар и стартовых групп |
 | types | [types.md](types.md) | `Result` — носитель статистики подзадачи |
-| pruner | [pruner.md](pruner.md) | Отсечение тупиков (L0/L1 DFS, L2 DP, shape-фильтр) |
-| cache | [cache.md](cache.md) | Аддитивный аккумулятор «ключ → Σ весов» |
-| shapecount | [shapecount.md](shapecount.md) | DP `h(shape,ends)` по классу формы |
-| searcher | [searcher.md](searcher.md) | DFS + генерационные фазы A/B |
+| pruner | [pruner.md](pruner.md) | Отсечение тупиков (L0/L1) |
+| cache | [cache.md](cache.md) | Аддитивный аккумулятор + task-cache «ключ → Σ весов» |
+| searcher | [searcher.md](searcher.md) | DFS, генерационные фазы A/B, count-DFS |
 | counter | [counter.md](counter.md) | Оркестрация трёх фаз, параллелизм, симметрии |
 | monitoring | [monitoring.md](monitoring.md) | Прогресс по фазам (Real/Fake) |
 | main | [main.md](main.md) | CLI, сборка, graceful shutdown |

@@ -12,31 +12,25 @@
 | `-size` | 5–8 | 5 |
 | `-workers` | ≥ 1 | `runtime.NumCPU()` |
 | `-precompute-depth` | 1 … `size²/2` (sentinel 0 → авто) | `counter.DefaultPrecomputeDepth(size)` |
-| `-tail-memo` | ≥ 0 (0 — выключен) | 0 |
-| `-mode` | `class` \| `reversal` | `reversal` |
 | `-gc-percent` | ≥ 0 (0 — не трогать GC рантайма) | 40 (`counter.DefaultGCPercentReversal`) |
 
-Валидация (`parseArgs`): явный 0 у `-precompute-depth` → ошибка; неизвестный `-mode` →
-ошибка; отрицательный `-gc-percent` → ошибка (режим «GC off» не допускается);
-неизвестные флаги → ошибка (`flag.ContinueOnError`, вывод в stderr). Глубина разреза
-глубже половины доски дуальна обращению тура.
+Валидация (`parseArgs`): явный 0 у `-precompute-depth` → ошибка; отрицательный
+`-gc-percent` → ошибка (режим «GC off» не допускается); неизвестные флаги → ошибка
+(`flag.ContinueOnError`, вывод в stderr). Глубина разреза глубже половины доски дуальна
+обращению тура.
 
 ## Структуры и функции
 
 ```go
-type appArgs struct { mode string; size, workers, precomputeDepth, tailMemo, gcPercent int }
+type appArgs struct { size, workers, precomputeDepth, gcPercent int }
 
 func parseArgs(args []string) (*appArgs, error)
 func run(ctx context.Context, monitor monitoring.Monitor, args *appArgs) uint64 // graph+counter → счёт
 ```
 
-Поле со ссылкой (`mode string`) — первым: порядок навязан `govet/fieldalignment`
-(`make fix` переставляет иначе), набор полей — контрактом.
-
-`run` маппит `-mode` в `counter.SetMode` (`class` → `ModeClass`, `reversal` → `ModeReversal`)
-и передаёт `-gc-percent` в `counter.SetGCPercent`; значение действует только в reversal
-режиме (ADR-014) — class mode GC не меняет. Внешний env `GOGC` в reversal-прогоне
-перезаписывается этим значением.
+`run` собирает `graph.New(size)` + `counter.NewCounter`, передаёт `-gc-percent` в
+`counter.SetGCPercent` (ADR-014) и запускает `ParallelCountWithDepth`. Внешний env `GOGC`
+в прогоне перезаписывается этим значением.
 
 ## Graceful shutdown (Ctrl+C)
 
@@ -50,17 +44,16 @@ func run(ctx context.Context, monitor monitoring.Monitor, args *appArgs) uint64 
 
 ## Ограничения и edge cases
 
-- Режим подсчёта выбирается флагом `-mode` (ADR-011); дефолт — `reversal` (свод ADR-011,
-  шаг 7 плана 06). Значит, `-gc-percent` по умолчанию эффективен: штатный прогон идёт
-  reversal-конвейером с пониженным GOGC (ADR-014).
+- Единственный конвейер подсчёта (ADR-016); выбор схемы флагом не предусмотрен.
+- `-gc-percent` эффективен по умолчанию: штатный прогон идёт конвейером с пониженным
+  GOGC (ADR-014).
 - Обработка сигналов проверяется вручную (`kill -INT <pid>` → частичный отчёт без паники).
 
 ## Тесты
 
 `main_test.go`: `TestParseArgs` — табличные кейсы валидации всех флагов и границ, включая
-неизвестный `-mode` и отрицательный `-gc-percent`; дефолтные кейсы таблицы закрепляют
-`-mode reversal` (явный `-mode class` проверяется отдельным кейсом);
-`TestRunCountMatchesReference` — `run` с FakeMonitor для 5×5 == 1728 в обоих режимах.
+отрицательный `-gc-percent` и дефолтные значения; `TestRunCountMatchesReference` — `run` с
+FakeMonitor для 5×5 == 1728.
 
 ## Связанные
 

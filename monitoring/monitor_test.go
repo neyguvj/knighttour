@@ -72,7 +72,7 @@ func TestReportSubtaskSumsByReason(t *testing.T) {
 	m.BeginPhase("counting")
 
 	m.ReportSubtask(&types.Result{PrunedDeadEnd: 3, PrunedNoCont: 1})
-	m.ReportSubtask(&types.Result{PrunedDisconn: 4, PrunedEndpoints: 2, FilteredShapes: 5})
+	m.ReportSubtask(&types.Result{PrunedDisconn: 4, PrunedEndpoints: 2})
 
 	ph := m.active.Load()
 	assert.Equal(t, uint64(3), ph.prunedDeadEnd.Load())
@@ -80,9 +80,7 @@ func TestReportSubtaskSumsByReason(t *testing.T) {
 	assert.Equal(t, uint64(4), ph.prunedDisconn.Load())
 	assert.Equal(t, uint64(2), ph.prunedEndpoints.Load())
 	assert.Equal(t, uint64(10), ph.prunedTotal())
-	// Plan 02: filtered shapes fold separately and never into prunedTotal.
-	assert.Equal(t, uint64(5), ph.filteredShapes.Load())
-	assert.Equal(t, uint64(5), m.Phase("counting").FilteredShapes)
+	assert.Equal(t, uint64(10), m.Phase("counting").Pruned)
 }
 
 // Reversal task-cache lookups fold through ReportSubtask into the phase
@@ -136,7 +134,6 @@ func TestFakeMonitorSatisfiesInterface(t *testing.T) {
 	m.ReportTaskCompleted()
 	m.ReportPathsFound(1)
 	m.ReportSubtask(&types.Result{CacheWrites: 1, PrunedDeadEnd: 1})
-	m.ReportShapeStats(3, 2, 1)
 	m.Finish()
 }
 
@@ -181,18 +178,6 @@ func TestFakeMonitorRecordsPerPhase(t *testing.T) {
 				tot := m.Totals()
 				assert.Equal(t, uint64(104), tot.Tasks)
 				assert.Equal(t, uint64(7), tot.CacheWrites)
-			},
-		},
-		{
-			name: "shape stats published",
-			reports: func(m *FakeMonitor) {
-				m.ReportShapeStats(10, 5, 3)
-			},
-			check: func(t *testing.T, m *FakeMonitor) {
-				classes, shapes, zeros := m.ShapeStats()
-				assert.Equal(t, uint64(10), classes)
-				assert.Equal(t, uint64(5), shapes)
-				assert.Equal(t, uint64(3), zeros)
 			},
 		},
 		{
@@ -276,7 +261,6 @@ func TestMonitorsShareCountingLogic(t *testing.T) {
 		}
 		m.ReportPathsFound(77)
 		m.ReportSubtask(&types.Result{PrunedDisconn: 3, PrunedEndpoints: 1, CacheHits: 9, CacheMisses: 2})
-		m.ReportShapeStats(9, 6, 2)
 	}
 
 	realM, fakeM := NewMonitor(), NewFakeMonitor()
@@ -292,10 +276,6 @@ func TestMonitorsShareCountingLogic(t *testing.T) {
 	assert.Equal(t, withoutDuration(realM.Phase("gen A")), withoutDuration(fakeM.Phase("gen A")))
 	assert.Equal(t, withoutDuration(realM.Phase("counting")), withoutDuration(fakeM.Phase("counting")))
 	assert.Equal(t, realM.Phase("missing"), fakeM.Phase("missing"))
-
-	realClasses, realShapes, realZeros := realM.ShapeStats()
-	fakeClasses, fakeShapes, fakeZeros := fakeM.ShapeStats()
-	assert.Equal(t, []uint64{realClasses, realShapes, realZeros}, []uint64{fakeClasses, fakeShapes, fakeZeros})
 
 	gen := fakeM.Phase("gen A")
 	assert.Equal(t, uint64(1), gen.Subtasks)
@@ -316,7 +296,6 @@ func TestFakeMonitorPrintsNothing(t *testing.T) {
 		m.AddTasks(2)
 		m.ReportTaskCompleted()
 		m.ReportSubtask(&types.Result{CacheWrites: 5})
-		m.ReportShapeStats(3, 2, 1)
 		m.Finish()
 	})
 
@@ -469,7 +448,6 @@ func TestFinalReportFormat(t *testing.T) {
 	m.ReportPathsFound(100)
 	m.ReportSubtask(&types.Result{PrunedDisconn: 3, CacheHits: 5, CacheMisses: 2})
 	m.ReportTaskCompleted()
-	m.ReportShapeStats(90, 12, 7)
 
 	out := captureStdout(t, m.Finish)
 
@@ -494,19 +472,8 @@ func TestFinalReportFormat(t *testing.T) {
 		}
 	}
 	assert.NotContains(t, genLine, "hits", "phases without lookups print no hits segment")
-	assert.Contains(t, out, "Shapes: classes=90 shapes=12 zeros=7")
+	assert.NotContains(t, out, "Shapes:", "the final report has no shape section (ADR-016)")
 	assert.Contains(t, out, "Total paths: 100")
-}
-
-func TestFinalReportOmitsShapeStatsWithoutStats(t *testing.T) {
-	m := NewMonitor()
-	m.startTime = time.Now()
-	m.started.Store(true)
-	m.BeginPhase("counting")
-	m.ReportTaskCompleted()
-
-	out := captureStdout(t, m.Finish)
-	assert.NotContains(t, out, "Shapes:", "without ReportShapeStats there is no shapes section")
 }
 
 func withoutDuration(ps PhaseStats) PhaseStats {

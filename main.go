@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/signal"
 	"runtime"
-	"slices"
 	"syscall"
 
 	"knighttour/counter"
@@ -17,20 +16,11 @@ import (
 	"knighttour/monitoring"
 )
 
-// CLI mode names accepted by -mode (specs/main.md).
-const (
-	modeClass    = "class"
-	modeReversal = "reversal"
-)
-
-// mode leads: govet/fieldalignment (make fix) requires pointer-bearing fields
-// first — the layout mirrors specs/main.md.
+// appArgs mirrors the validated CLI surface of specs/main.md.
 type appArgs struct {
-	mode            string
 	size            int
 	workers         int
 	precomputeDepth int
-	tailMemo        int
 	gcPercent       int
 }
 
@@ -41,9 +31,7 @@ func parseArgs(args []string) (*appArgs, error) {
 	size := fs.Int("size", 5, "Board size (5-8)")
 	workers := fs.Int("workers", runtime.NumCPU(), "Number of workers for parallel search")
 	precomputeDepth := fs.Int("precompute-depth", 0, "Root/subtask generation depth (default: per board size)")
-	tailMemo := fs.Int("tail-memo", 0, "Counting tail memo: persist f(cur,todo) with popcount(todo) ≤ N between shapes of one worker (0 = off)")
-	mode := fs.String("mode", modeReversal, "Counting mode: class | reversal")
-	gcPercent := fs.Int("gc-percent", counter.DefaultGCPercentReversal, "GOGC applied for the duration of the reversal pipeline (0 = leave the runtime GC untouched)")
+	gcPercent := fs.Int("gc-percent", counter.DefaultGCPercentReversal, "GOGC applied for the duration of the counting pipeline (0 = leave the runtime GC untouched)")
 
 	if err := fs.Parse(args); err != nil {
 		return nil, fmt.Errorf("parse flags: %w", err)
@@ -67,19 +55,11 @@ func parseArgs(args []string) (*appArgs, error) {
 		return nil, errors.New("-workers must be at least 1")
 	}
 
-	if *tailMemo < 0 {
-		return nil, errors.New("-tail-memo must be non-negative (0 = off)")
-	}
-
-	if !slices.Contains([]string{modeClass, modeReversal}, *mode) {
-		return nil, fmt.Errorf("-mode must be one of %q or %q, got %q", modeClass, modeReversal, *mode)
-	}
-
 	if *gcPercent < 0 {
 		return nil, errors.New("-gc-percent must be non-negative (0 = leave the runtime GC untouched)")
 	}
 
-	return &appArgs{size: *size, workers: *workers, precomputeDepth: depth, tailMemo: *tailMemo, mode: *mode, gcPercent: *gcPercent}, nil
+	return &appArgs{size: *size, workers: *workers, precomputeDepth: depth, gcPercent: *gcPercent}, nil
 }
 
 // isFlagSet reports whether the flag was explicitly provided on the command line.
@@ -93,21 +73,10 @@ func isFlagSet(fs *flag.FlagSet, name string) bool {
 	return found
 }
 
-// counterMode maps a validated -mode name to the counter pipeline; unknown
-// names are rejected by parseArgs, so the fallback is unreachable in practice.
-func counterMode(mode string) counter.Mode {
-	if mode == modeReversal {
-		return counter.ModeReversal
-	}
-	return counter.ModeClass
-}
-
 func run(ctx context.Context, monitor monitoring.Monitor, args *appArgs) uint64 {
 	g := graph.New(args.size)
 	c := counter.NewCounter(g)
-	c.SetTailMemo(args.tailMemo, 0)
-	c.SetMode(counterMode(args.mode))
-	c.SetGCPercent(args.gcPercent) // effective in reversal mode only (ADR-014)
+	c.SetGCPercent(args.gcPercent) // GOGC for the pipeline duration (ADR-014)
 	return c.ParallelCountWithDepth(ctx, monitor, args.workers, args.precomputeDepth)
 }
 

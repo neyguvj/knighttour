@@ -16,7 +16,7 @@ type cacheShard struct {
 	mu   sync.RWMutex
 }
 
-// Cache is the task-cache of reversal mode (specs/cache.md, ADR-011): an
+// Cache is the counting pipeline's task-cache (specs/cache.md, ADR-011): an
 // additive "canonical key → Σ orbitSize" table that stays alive through the
 // count phase and is read concurrently via Get while whole entries are being
 // written. Keys are D4-canonical prefixes (state, end); the writer canonicalizes —

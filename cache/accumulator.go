@@ -16,14 +16,13 @@ type accShard struct {
 	mu   sync.Mutex
 }
 
-// Accumulator is the class-mode weight table of the pipeline (specs/cache.md):
-// one of the two additive "key → Σ weights" tables (the reversal task-cache is
-// Cache), shared by both generation phases. Phase A keys are D4-canonical
-// placements (state, end); phase B keys are translation+D4 normalized
-// complement shape classes (specs/shapecount.md). Entries exist only for keys
-// actually added — zeros are never stored. Thread-safe via sharding; read
-// through DrainShard/Drain after the writing phase ends (the copying Snapshot
-// was removed: it doubled peak memory on large boards).
+// Accumulator is the intermediate gen-A weight table of the pipeline
+// (specs/cache.md): one of the two additive "key → Σ weights" tables (the
+// task-cache is Cache). Keys are D4-canonical placements (state, end), weights
+// sum orbit sizes. Entries exist only for keys actually added — zeros are
+// never stored. Thread-safe via sharding; read through Drain after the writing
+// phase ends (the copying Snapshot was removed: it doubled peak memory on
+// large boards).
 type Accumulator struct {
 	shards [numShards]accShard
 }
@@ -37,9 +36,9 @@ func NewAccumulator() *Accumulator {
 }
 
 // shardIndex is the shard hash shared by both tables (Accumulator and
-// Cache). It hashes State only, so every end of one shape class lands in the
-// same shard: the counting stage groups per shard without a global snapshot
-// (specs/cache.md, ADR-004); for the task-cache it merely spreads contention.
+// Cache). It hashes State only, so every end of one mask lands in the same
+// shard — the key's ends are never split across shards (specs/cache.md,
+// ADR-004); for the task-cache it merely spreads contention.
 // Allocation-free: golden-ratio multiply, take the high bits. numShards must
 // stay 1<<7 to match the shift.
 func shardIndex(p path.Path) int {
@@ -98,15 +97,12 @@ type Entry struct {
 	Weight uint64
 }
 
-// NumShards returns the number of independently drainable shards.
-func (a *Accumulator) NumShards() int { return numShards }
-
-// DrainShard hands out shard i's records and releases its map, so peak memory
-// of a per-shard consumer stays bounded by one shard (specs/cache.md). Call
-// only after all writers stopped; further Add on a drained accumulator panics
-// (nil map) — the pipeline never does. The shard is locked only for its own
-// copy pass.
-func (a *Accumulator) DrainShard(i int) []Entry {
+// drainShard hands out shard i's records and releases its map, so peak memory
+// of the drain stays bounded by one shard plus the result (specs/cache.md).
+// Internal mechanics of Drain — public reads go through Drain only. Call after
+// all writers stopped; further Add on a drained accumulator panics (nil map) —
+// the pipeline never does. The shard is locked only for its own copy pass.
+func (a *Accumulator) drainShard(i int) []Entry {
 	sh := &a.shards[i]
 	sh.mu.Lock()
 	defer sh.mu.Unlock()
@@ -118,12 +114,13 @@ func (a *Accumulator) DrainShard(i int) []Entry {
 	return out
 }
 
-// Drain concatenates every shard and empties the table. Meant for the small
-// gen A worklist; large M tables are consumed per-shard via DrainShard.
+// Drain concatenates every shard and empties the table (the gen-A worklist).
+// Each record is handed out exactly once; a shard's map is released as soon as
+// its entries are taken.
 func (a *Accumulator) Drain() []Entry {
 	out := make([]Entry, 0, a.ItemsCount())
 	for i := range a.shards {
-		out = append(out, a.DrainShard(i)...)
+		out = append(out, a.drainShard(i)...)
 	}
 	return out
 }

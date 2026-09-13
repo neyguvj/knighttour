@@ -21,8 +21,6 @@ type Symmetry struct {
 	groups    []CanonicalGroup
 	size      int
 	perms     [numTransforms][maxCells]uint8
-	rows      [maxCells]uint8 // row/col LUTs for shape normalization (shape.go)
-	cols      [maxCells]uint8
 }
 
 func NewSymmetry(size int) *Symmetry {
@@ -45,11 +43,6 @@ func NewSymmetry(size int) *Symmetry {
 	for pos := range totalCells {
 		s.canonical[pos] = s.getCanonicalPosition(pos)
 		s.orbitSize[pos] = s.computeOrbitSize(pos)
-	}
-
-	for pos := range maxCells {
-		s.rows[pos] = uint8(pos / size)
-		s.cols[pos] = uint8(pos % size)
 	}
 
 	s.groups = s.buildCanonicalGroups()
