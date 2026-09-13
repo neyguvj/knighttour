@@ -36,13 +36,32 @@ Rules, table procedure (`make bench-table`) and freshness stamp: skill `readme-w
 
 - `/quick` – tiny code-only fix, no spec change.
 - `/task`  – lightweight spec-first in one context (specs updated before code).
-- `/feature` – full pipeline: interview (skills) → specs/plan updated → **coder ⇄ reviewer loop**
-  until `VERDICT: APPROVED` (max 5 iters, sessions resumed by task_id) → `benchmarker` writes ADR
-  measurements for hot-path changes → commit on explicit user confirmation → handoff notes in
-  `.opencode/handoff/<slug>.md` (git-ignored) + printed `opencode run --command …`; one session =
-  one feature, continuation happens in that new session only. Subagents: `coder` (implements to green `make check`),
-  `reviewer` (read-only, severity BLOCKER/MAJOR/MINOR + `SPEC_OK`), `benchmarker`
+- `/feature` – full pipeline behind a **thin orchestrator**: it never reads sources or specs and
+  never reasons about the domain — it only dispatches subagents, relays their `QUESTION:` blocks to
+  the user, tracks phases in `todowrite`, and commits. Phases: interview + spec/plan update by the
+  `spec` subagent → **coder ⇄ reviewer loop** until `VERDICT: APPROVED` (max 5 iters, sessions
+  resumed by task_id) → `benchmarker` writes ADR measurements for hot-path changes → commit on
+  explicit user confirmation. No handoff files and no spawned sessions: the next task starts in the
+  same session (one session = many tasks; heavy work lives in subagent contexts, so the orchestrator
+  stays cheap). Subagents: `spec` (interview + specs/plans/ADR edits), `coder` (implements to green
+  `make check`), `reviewer` (read-only, severity BLOCKER/MAJOR/MINOR + `SPEC_OK`), `benchmarker`
   (WIN/REGRESSION/NOISE, records numbers in ADR). Restart opencode after editing agent/skill/command files.
+
+## Agent question protocol (relay)
+
+Subagents have no direct line to the user: they talk through the orchestrator. When a subagent needs
+a decision it cannot make safely, it ENDS its turn with one block per question:
+
+```
+QUESTION: <single-line question>
+OPTIONS: <opt1> | <opt2>            # optional, when choices are known
+CONTEXT: <1–3 lines needed to answer>   # optional
+```
+
+Rules: max 4 blocks per turn (batch what belongs together); everything not blocking is a decision
+the subagent makes itself and records in `NOTES`. The orchestrator asks the user verbatim via the
+`question` tool and resumes that subagent with answers only (`ANSWER: …`). A subagent that needs no
+user input finishes with its report block (see its agent file). Never fake an answer.
 
 ## Quick Start
 
