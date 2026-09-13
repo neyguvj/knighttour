@@ -41,7 +41,6 @@ func (c *Counter) SetGCPercent(p int)                   // GOGC на время 
                                                         // class mode значение игнорирует
 func (c *Counter) SetShapeFilter(mask pruner.L2Checks)  // pre-DP фильтр class mode (ADR-008)
 func (c *Counter) SetTailMemo(k, slots int)             // tail-мемо counting class mode (план 03)
-func (c *Counter) SetL2(mask pruner.L2Checks, minTodo int)
 func (c *Counter) SetShapeDump(fn func(shape state.State, ends []int, allZero bool))
 ```
 
@@ -116,5 +115,5 @@ class mode не меняет процент.
 
 ## Связанные
 
-ADR-001, ADR-010, ADR-013; `specs/searcher.md`, `specs/cache.md`, `specs/shapecount.md`,
-`specs/monitoring.md`. Методология замеров — `specs/benchmarks.md`.
+ADR-001, ADR-010, ADR-011, ADR-013, ADR-014; `specs/searcher.md`, `specs/cache.md`,
+`specs/shapecount.md`, `specs/monitoring.md`. Методология замеров — `specs/benchmarks.md`.

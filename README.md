@@ -50,6 +50,7 @@ make check    # fmt → vet → test -race → fix (автофиксы) → lint
 | `make lint` | `golangci-lint run ./...` — статический анализ |
 | `make bench` | Бенчмарки пакета `counter/` (5×5, 6×6; 7×7 — SKIP) |
 | `make bench-deep` | То же с `BENCH_DEEP=1`: добавляется свип 7×7 (часы) |
+| `make bench-8x8 DEPTHS=…` | Гейт-прогон 8×8 в одной точке (`BENCH_8X8=1`, часы на глубину), только reversal mode (ADR-015) |
 | `make bench-size N=…` / `bench-table LOG=…` | Прогон одной доски отдельным процессом; рендер markdown-таблиц из лога (методология — `specs/benchmarks.md`) |
 | `make clean` | `go clean -testcache` |
 
