@@ -118,6 +118,15 @@ make bench            # Benchmarks (counter/)
 - Channels: Channel size must be exactly 1 or 0 (unbuffered) unless a clear performance justification is provided.
 - Context: Always propagate `context.Context` through long-running operations or API tasks for strict cancellation support.
 
+## Resource discipline (memory / allocations)
+- Zero-copy reads: traverse large shared structures (>~1 MB) in place under a lock/iterator;
+  copy/snapshot APIs are allowed only with a measured justification why direct access is impossible.
+- Every new design on a memory/perf task carries an allocation budget: a bytes × entries ×
+  workers formula for each added structure; O(workers×data) copies where a lock-only walk
+  exists are rejected in review.
+- A reference baseline with numbers means reading its code for the *mechanism* of the
+  responsible path before designing the fix — matching numbers is not enough.
+
 ## 5. Error Handling & Typing
 - Explicit Errors: Check `if err != nil` immediately. Do not ignore errors using blank identifier _.
 - Error Matching (Go 1.26+): Use `errors.AsType[T](err)` for generic, type-safe error matching.
