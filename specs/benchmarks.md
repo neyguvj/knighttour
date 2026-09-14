@@ -47,7 +47,7 @@ SKIP'а gated-размера.
 | Метрика | Смысл |
 |---------|-------|
 | `genA_ms/op`, `genB_ms/op`, `cnt_ms/op` | тайминг фаз |
-| `writesA/op`, `writesB/op` | эмиссии в аккумулятор/task-cache (не уникальные ключи) |
+| `writesA/op`, `writesB/op` | эмиссии в промежуточную таблицу gen A и task-cache (не уникальные ключи) |
 | `prunedA/op`, `prunedB/op` | отсечено прунером в генерации |
 | `cacheHits/op`, `cacheMisses/op` | lookup'ы task-cache на уровне стопа в counting |
 | `peakRSS_MB/op` | **максимум резидента процесса** (`syscall.Getrusage`) |
