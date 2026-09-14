@@ -33,8 +33,8 @@ func (c *Counter) SetGCPercent(p int)       // GOGC на время конвей
                                             // DefaultGCPercentReversal
 ```
 
-Контрактные значения `DefaultPrecomputeDepth` (держатся числовыми до пересъёмки под
-reversal — ADR-016):
+Контрактные значения `DefaultPrecomputeDepth` (подтверждены пересъёмкой под reversal —
+ADR-016 §«Замеры», план 10 принят; `8: 14` — placeholder без пересъёмки, ADR-015):
 
 | size | 5 | 6 | 7 | 8 |
 |---|---|---|---|---|

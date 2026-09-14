@@ -2,12 +2,15 @@
 
 ## Статус
 
-Завершён: этап 0 (инструменты: `counter.TestDumpZeroShapes` +
+**Закрыт 2026-09-14: механика снята вместе с потребителем (ADR-016).** Раньше план был
+завершён: этап 0 (инструменты: `counter.TestDumpZeroShapes` +
 `shapecount.TestShapeFeasibilityClassification`), реализация и замеры.
 Вердикт: Filter B (forced-chain) включён по умолчанию (`DefaultShapeFilter`);
 Filter C (articulation) — опция (~1 п.п. сверх B); Filter A (endpoint-mismatch)
 в хот-патте не включён — нулевая измеренная польза (всегда покрыт корневым
 L1). Времяперекрытия скромное (2–3% counting на 7×7): см. «Вывод».
+`pruner.ShapeFeasible`/ярус L2 и счётчик `FilteredShapes` удалены вместе с shapecount;
+замеры живут в ADR-008 навсегда, вывод о deep-классе переиспользован планом 06.
 
 ## Мотивация и базовые числа
 
