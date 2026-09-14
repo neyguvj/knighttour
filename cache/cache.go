@@ -9,6 +9,28 @@ import (
 	"knighttour/path"
 )
 
+// numShards is the shard count of the table; it must stay 1<<7 to match the
+// shift in shardIndex.
+const numShards = 128
+
+// Entry is one table record: a canonical key and its accumulated weight — the
+// worklist element phase B draws from the gen-A intermediate table
+// (specs/cache.md).
+type Entry struct {
+	Path   path.Path
+	Weight uint64
+}
+
+// shardIndex hashes State only, so every end of one mask lands in the same
+// shard — the key's ends are never split across shards (specs/cache.md,
+// ADR-004); for the task-cache it merely spreads contention.
+// Allocation-free: golden-ratio multiply, take the high bits. numShards must
+// stay 1<<7 to match the shift.
+func shardIndex(p path.Path) int {
+	h := uint64(p.State()) * 0x9E3779B97F4A7C15
+	return int(h >> (64 - 7)) // numShards = 128
+}
+
 // cacheShard is one Cache shard: its map plus the RWMutex that lets Get read
 // concurrently with live Set writers.
 type cacheShard struct {
@@ -16,19 +38,21 @@ type cacheShard struct {
 	mu   sync.RWMutex
 }
 
-// Cache is the counting pipeline's task-cache (specs/cache.md, ADR-011): an
-// additive "canonical key → Σ orbitSize" table that stays alive through the
-// count phase and is read concurrently via Get while whole entries are being
-// written. Keys are D4-canonical prefixes (state, end); the writer canonicalizes —
-// this type knows nothing about symmetries. Zeros are never stored: Set with a
-// zero weight is a no-op. Unlike the Accumulator it is never drained per shard;
-// the count phase walks it directly under shard read locks via Each (plan 09).
+// Cache is the counting pipeline's single sharded "canonical key → Σ orbitSize"
+// table (specs/cache.md, ADR-011/ADR-018): one type plays both pipeline roles —
+// the short-lived gen-A intermediate and the task-cache that stays alive
+// through the count phase and is read concurrently via Get while whole entries
+// are being written. Keys are D4-canonical prefixes (state, end); the writer
+// canonicalizes — this type knows nothing about symmetries. Zeros are never
+// stored: Set with a zero weight is a no-op. Reads are live only — Get, or a
+// direct walk under shard read locks via Each (plan 09); there is no per-shard
+// draining and no copying snapshot.
 type Cache struct {
 	shards [numShards]cacheShard
 }
 
-// NewCache returns an empty task-cache (128 shards of map[path.Path]uint64
-// under RWMutex, hashed by State via the shared shardIndex).
+// NewCache returns an empty table (128 shards of map[path.Path]uint64 under
+// RWMutex, hashed by State via shardIndex).
 func NewCache() *Cache {
 	c := &Cache{}
 	for i := range c.shards {
@@ -38,7 +62,7 @@ func NewCache() *Cache {
 }
 
 // Set accumulates one contribution: data[key] += weight. A zero weight must
-// not create an entry (specs/cache.md: no zeros in either table).
+// not create an entry (specs/cache.md: no zeros in the table).
 func (c *Cache) Set(p path.Path, weight uint64) {
 	if weight == 0 {
 		return

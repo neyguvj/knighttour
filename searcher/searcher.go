@@ -31,55 +31,12 @@ func NewSearcher(g *graph.Graph, sym *symmetry.Symmetry) *Searcher {
 	}
 }
 
-// GenerateRoots is phase A of generation (specs/counter.md): DFS from a
-// canonical start down to depth, emitting each prefix as its D4-canonical
-// (state, end) pair with the group's orbit weight. The sink is caller-owned
-// (cache.LocalSink buffers and batches into the shared accumulator).
-// Statistics: CacheWrites counts emitted prefixes.
-func (s *Searcher) GenerateRoots(ctx context.Context, sink *cache.LocalSink, start int, orbitSize uint64, depth int) (result types.Result) {
-	if s.graph.SholdSkip(start) {
-		return result
-	}
-	s.dfsGen(ctx, state.NewState(start), start, depth, orbitSize, sink, &result)
-	result.Finalize()
-	return result
-}
-
-// dfsGen is the phase-A descent: it walks prefixes down to depth and emits each
-// prefix once, as its own D4-canonical placement (state, end) carrying the start
-// group's orbit weight. The visited set is the payload, so the depth check comes
-// before unvisited/cand are computed — a leaf needs neither.
-func (s *Searcher) dfsGen(ctx context.Context, st state.State, end, depth int, weight uint64, sink *cache.LocalSink, res *types.Result) {
-	if ctx.Err() != nil {
-		return
-	}
-
-	if st.CountBits() >= depth {
-		sink.Add(s.sym.Canonicalize(st, end), weight)
-		res.CacheWrites++
-		return
-	}
-
-	unvisited := st.Invert(s.graph.GetTotalCells())
-	cand := s.graph.GetNeighborMask(end).Intersect(unvisited)
-
-	for n := range cand.AllVisited() {
-		newUnvisited := unvisited.Unvisit(n)
-		if !newUnvisited.IsEmpty() {
-			if pruned, reason := s.pruner.ShouldPruneAfterVisit(n, newUnvisited); pruned {
-				res.CountPrune(reason)
-				continue
-			}
-		}
-		s.dfsGen(ctx, st.Visit(n), n, depth, weight, sink, res)
-	}
-}
-
-// GenerateTasks writes task-cache records straight from a start (specs/counter.md):
-// the same descent as dfsGen, but each leaf prefix is written directly into
-// the shared task-cache as its D4-canonical placement with the group's orbit
-// weight (no LocalSink: cache.Set is the write path, ADR-011). SholdSkip
-// starts emit nothing. Statistics: CacheWrites counts task records written.
+// GenerateTasks is the single descent from a start (specs/searcher.md): DFS
+// from a canonical start down to depth, writing each leaf prefix straight into
+// c as its D4-canonical placement (state, end) with the group's orbit weight —
+// both the gen-A intermediate table and the task-cache go this way (ADR-018).
+// SholdSkip starts emit nothing. Statistics: CacheWrites counts written
+// prefixes.
 func (s *Searcher) GenerateTasks(ctx context.Context, c *cache.Cache, start int, orbitSize uint64, depth int) (result types.Result) {
 	if s.graph.SholdSkip(start) {
 		return result
@@ -124,10 +81,11 @@ func (s *Searcher) CountPathsWithCacheReversal(ctx context.Context, p path.Path,
 	return result
 }
 
-// dfsTask is the task-cache descent shared by GenerateTasks and ExtendTask:
-// same walk and pruning as dfsGen, but the leaf writes its canonical
-// placement into the shared cache. Duplicated rather than callback-unified
-// with dfsGen for the hot-path reason documented in specs/searcher.md.
+// dfsTask is the single generation descent shared by GenerateTasks and
+// ExtendTask: on a leaf it writes the canonical placement into the cache with
+// the group's weight (specs/searcher.md). It is not callback-unified with
+// dfsCount: recursion with a function parameter never inlines, and the base
+// case is the only difference — duplicating the loop is cheaper.
 func (s *Searcher) dfsTask(ctx context.Context, st state.State, end, depth int, weight uint64, c *cache.Cache, res *types.Result) {
 	if ctx.Err() != nil {
 		return

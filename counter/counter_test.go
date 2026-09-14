@@ -6,10 +6,12 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"knighttour/cache"
 	"knighttour/graph"
 	"knighttour/monitoring"
+	"knighttour/path"
 )
 
 func TestSequentalCount(t *testing.T) {
@@ -111,6 +113,20 @@ func TestWorkerInvariance(t *testing.T) {
 	}
 }
 
+// tableWeight sums every record's weight via a single-worker Each walk,
+// asserting positivity along the way (specs/cache.md: zeros are never stored).
+func tableWeight(t *testing.T, c *cache.Cache) uint64 {
+	t.Helper()
+	total := uint64(0)
+	err := c.Each(context.Background(), 1, func(_ context.Context, _ path.Path, weight uint64) error {
+		assert.Positive(t, weight, "weight must be positive")
+		total += weight
+		return nil
+	})
+	require.NoError(t, err)
+	return total
+}
+
 func TestGenerateIntermediateWeightsMatchOrbits(t *testing.T) {
 	g := graph.New(5)
 	counter := NewCounter(g)
@@ -126,16 +142,9 @@ func TestGenerateIntermediateWeightsMatchOrbits(t *testing.T) {
 			continue
 		}
 
-		groupAcc := cache.NewAccumulator()
-		sink := groupAcc.Local()
-		result := counter.searcher.GenerateRoots(ctx, sink, group.Canonical, uint64(group.OrbitSize), base)
-		sink.Flush()
-
-		totalWeight := uint64(0)
-		for _, e := range groupAcc.Drain() {
-			assert.Positive(t, e.Weight, "weight must be positive")
-			totalWeight += e.Weight
-		}
+		groupCache := cache.NewCache()
+		result := counter.searcher.GenerateTasks(ctx, groupCache, group.Canonical, uint64(group.OrbitSize), base)
+		totalWeight := tableWeight(t, groupCache)
 
 		assert.Equal(t, uint64(result.CacheWrites)*uint64(group.OrbitSize), totalWeight,
 			"group %d: total weight equals prefixes * orbit size", group.Canonical)

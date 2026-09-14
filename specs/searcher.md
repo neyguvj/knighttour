@@ -11,14 +11,10 @@
 ```go
 func NewSearcher(g *graph.Graph, sym *symmetry.Symmetry) *Searcher
 
-// Фаза A: DFS от канонического старта до глубины depth; на листьях — эмиссия
-// Canonicalize(state,end) с весом orbitSize в промежуточный аккумулятор.
+// Единственный спуск «от старта»: DFS от канонического начала до глубины depth; на листьях —
+// запись Canonicalize(state,end) с весом orbitSize в переданную таблицу cache.Cache.
+// Пишет и промежуточную таблицу фазы A (малая глубина), и task-cache напрямую (ADR-018).
 // SholdSkip(start) → пустой результат (фильтр чётности нечётных досок).
-func (s *Searcher) GenerateRoots(ctx context.Context, sink *cache.LocalSink,
-    start int, orbitSize uint64, depth int) types.Result
-
-// Генерация task-cache: тот же спуск, что dfsGen, но запись — канонический
-// префикс напрямую в cache.Cache (без sink). SholdSkip(start) → пустой результат.
 func (s *Searcher) GenerateTasks(ctx context.Context, c *cache.Cache,
     start int, orbitSize uint64, depth int) types.Result
 
@@ -38,14 +34,15 @@ func (s *Searcher) CountPathsWithCacheReversal(ctx context.Context, p path.Path,
 
 Спуск общий (кандидаты, прунинг, `ctx.Err()`); различие — **в базовом случае**:
 
-| | `dfsGen` (фаза A) | `dfsTask` (генерация task-cache) | `dfsCount` (count с reversal) |
-|---|---|---|---|
-| Стоп | `CountBits(st) >= depth` | `CountBits(st) >= depth` | `bits == stopLevel` — ответ через `completions`; `bits >= totalCells` → 1 |
-| Действие на стопе | эмиссия `Canonicalize(st,end)` в sink с весом `orbitSize` | `c.Set(Canonicalize(st,end), weight)` | Σ по `u ∈ N(end)∩U`: `Get(canon(U,u))`, hit → `+ w/orbitSize`, промах → 0 |
-| Статистика | `CacheWrites` | `CacheWrites` | `CacheHits`/`CacheMisses` на каждую проверку кэша, `TotalPathsFound` — число дополнений |
+| | `dfsTask` (генерация таблицы) | `dfsCount` (count с reversal) |
+|---|---|---|
+| Стоп | `CountBits(st) >= depth` | `bits == stopLevel` — ответ через `completions`; `bits >= totalCells` → 1 |
+| Действие на стопе | `c.Set(Canonicalize(st,end), weight)` | Σ по `u ∈ N(end)∩U`: `Get(canon(U,u))`, hit → `+ w/orbitSize`, промах → 0 |
+| Статистика | `CacheWrites` | `CacheHits`/`CacheMisses` на каждую проверку кэша, `TotalPathsFound` — число дополнений |
 
-Спуски не объединяются колбэком: рекурсия с function-параметром не инлайнится, а базовый
-случай — единственная разница; дублирование цикла дешевле.
+`dfsTask` — единственный генерационный спуск: пишут им и промежуточную таблицу фазы A, и
+task-cache (ADR-018). Он не объединяется колбэком с `dfsCount`: рекурсия с function-параметром
+не инлайнится, а базовый случай — единственная разница; дублирование цикла дешевле.
 
 `completions` корректен из дуальности обращения тура: каждое дополнение `(T,t)` обращается в
 суффикс, покрывающий ровно `U = full\T` и кончающийся соседом `t`, поэтому
@@ -60,7 +57,8 @@ func (s *Searcher) CountPathsWithCacheReversal(ctx context.Context, p path.Path,
 
 ## Инварианты и корректность
 
-- `dfsGen` отвечает за **размещения** (сколько раз встретился префикс с точностью до D4).
+- `dfsTask` отвечает за **размещения** (сколько раз встретился префикс с точностью до D4):
+  аддитивный `Set` схлопывает совпадающие канонические размещения в один вес.
 - `GenerateTasks`/`ExtendTask` пишут канонические префиксы глубины `depth`; `ExtendTask` при
   `CountBits(p.State()) >= depth` пишет сам `p` с весом `weight` — иначе вырожденная фаза B
   (precomputeDepth ≤ base) теряла бы записи; ниже порога спуск продолжается и листья пишутся
@@ -71,18 +69,19 @@ func (s *Searcher) CountPathsWithCacheReversal(ctx context.Context, p path.Path,
 
 ## Ограничения и edge cases
 
-- `depth = 0` в `GenerateRoots` — одна эмиссия (сам старт).
+- `depth = 0` в `GenerateTasks` — одна запись (сам старт).
 - Отклонённые эвристики (цветовой прунинг, Warnsdorff) не реализованы — ADR-009.
 
 ## Тесты
 
-`searcher/searcher_test.go`: независимый brute-force == 1728 на 5×5; `GenerateRoots` с
-`depth=totalCells` → сумма весов по группам == эталон; эмиссии = префиксы глубины depth
-(веса кратно орбите), `depth=0` — одна запись. Reversal: таблично по всем допустимым d на 5×5 —
-`Σ w·CountPathsWithCacheReversal(task)` по task-cache из `GenerateTasks` == brute-force;
-вырожденный `ExtendTask(bits==depth)` пишет запись как есть; `c == nil` и `2d > totalCells` →
-тождество полному спуску; hits+misses == числу проверок кэша (hit'ы только на уровне стопа).
+`searcher/searcher_test.go`: независимый brute-force == 1728 на 5×5; `GenerateTasks` с
+`depth=totalCells` → сумма весов по группам == эталон; записи = префиксы глубины depth
+(веса кратно орбите), `depth=0` — одна запись, `SholdSkip`-старт не пишет ничего. Reversal:
+таблично по всем допустимым d на 5×5 — `Σ w·CountPathsWithCacheReversal(task)` по task-cache из
+`GenerateTasks` == brute-force; вырожденный `ExtendTask(bits==depth)` пишет запись как есть;
+`c == nil` и `2d > totalCells` → тождество полному спуску; hits+misses == числу проверок кэша
+(hit'ы только на уровне стопа).
 
 ## Связанные
 
-ADR-005, ADR-009, ADR-011, ADR-016; `specs/pruner.md`, `specs/cache.md`.
+ADR-005, ADR-009, ADR-011, ADR-016, ADR-018; `specs/pruner.md`, `specs/cache.md`.

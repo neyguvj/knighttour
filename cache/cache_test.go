@@ -229,9 +229,8 @@ func TestCacheConcurrentGetAndEach(t *testing.T) {
 	assert.Equal(t, n, c.ItemsCount(), "readers must not mutate the table")
 }
 
-// Shared sharding invariant (specs/cache.md): all ends of one State hash to
-// one shard — for the Cache this only spreads contention, but the helper is
-// shared with the Accumulator and must stay State-only.
+// Sharding invariant (specs/cache.md): all ends of one State hash to one
+// shard — the key's ends are never split, so shardIndex must stay State-only.
 func TestShardIndexIsStateOnly(t *testing.T) {
 	states := []state.State{0b1, 0b1001, 0xFF00FF, 0x123456789ABCDEF}
 	for _, st := range states {

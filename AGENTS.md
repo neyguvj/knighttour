@@ -152,8 +152,8 @@ make bench            # Benchmarks (counter/)
   (D4-canonical placements in gen A and in the task cache)
 - **types/** – Shared `Result` struct (TotalPathsFound, CacheWrites, CacheHits/Misses, Pruned breakdown)
 - **searcher/** – DFS over bitmasks with dead-end pruning; no memo tables of its own
-  - Methods: `GenerateRoots()` (phase A prefix emission into a LocalSink),
-    `GenerateTasks()`/`ExtendTask()` (task-cache generation),
+  - Methods: `GenerateTasks()` (the single from-start descent into a `cache.Cache` — writes both
+    phase A's intermediate table and the task cache), `ExtendTask()` (phase B continuation),
     `CountPathsWithCacheReversal()` (count-DFS with early stop in the task cache);
     no public counting entry points — correctness is pinned by the brute-force oracle
     and the reversal identity tests in searcher_test.go
@@ -165,12 +165,11 @@ make bench            # Benchmarks (counter/)
     entry and restored on exit
 - **pruner/** – Stateless necessary-condition pruning (L0 local dead-end + L1 global checks):
   - `Pruner` – `ShouldPruneAfterVisit()` (hot O(deg) check, returns first prune Reason)
-- **cache/** – Two sharded weight tables (128 shards, hashed by State only):
-  - `Accumulator` keyed by `path.Path` (`Add()`, `Drain()`, `ItemsCount()`);
-    writers use `Local()` → `LocalSink` (per-goroutine buffer, threshold `Flush`) to avoid
-    lock churn. Reading is drain-only (no copying Snapshot — it doubled peak memory).
-  - `Cache` – task cache (`Set()`, concurrent `Get()`, count-phase `Each()`
-    direct-shard walk under RLock); lives until the end of the count phase, never drained per shard.
+- **cache/** – One sharded weight table `Cache` (128 shards, hashed by State only; ADR-018):
+  additive `Set()` (`+= w`, zero no-op), concurrent `Get()`, dispatch `Each()` direct-shard walk
+  under RLock. Serves both the short-lived gen-A intermediate (materialized to a worklist via
+  `Each`, then GC'd) and the task cache (lives until the end of the count phase, never drained).
+  Reading is live/`Each` only — no copying Snapshot (it doubled peak memory on large boards).
 - **symmetry/** – Exploits board symmetries to reduce search space
   - 8 symmetries: rotations and reflections
   - Methods: `GetCanonicalPosition()`, `GetOrbitSize()`, `GetCanonicalGroups()`, `Canonicalize()`

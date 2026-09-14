@@ -56,23 +56,21 @@ func TestNaiveBruteForceMatchesKnownTotal(t *testing.T) {
 	assert.Equal(t, 1728, total, "Expected 1728 for 5x5 board")
 }
 
-// GenerateRoots at depth = totalCells: every leaf is a full tour, so the summed
+// GenerateTasks at depth = totalCells: every leaf is a full tour, so the summed
 // orbit weights must reproduce the known total (D4-invariance of tour counts
 // makes per-group weighting exact; SholdSkip starts contribute zero tours).
-func TestFullCountViaGenerateRootsMatchesKnownTotal(t *testing.T) {
+func TestFullCountViaGenerateTasksMatchesKnownTotal(t *testing.T) {
 	g := graph.New(5)
 	sym := symmetry.NewSymmetry(5)
 	searcher := NewSearcher(g, sym)
 
-	acc := cache.NewAccumulator()
+	c := cache.NewCache()
 	for _, group := range sym.GetCanonicalGroups() {
-		sink := acc.Local()
-		searcher.GenerateRoots(context.Background(), sink, group.Canonical, uint64(group.OrbitSize), g.GetTotalCells())
-		sink.Flush()
+		searcher.GenerateTasks(context.Background(), c, group.Canonical, uint64(group.OrbitSize), g.GetTotalCells())
 	}
 
 	var total int64
-	for _, e := range acc.Drain() {
+	for _, e := range allTasks(t, c) {
 		assert.Equal(t, g.GetTotalCells(), e.Path.State().CountBits(), "leaf must cover the whole board")
 		total += int64(e.Weight)
 	}
@@ -80,58 +78,31 @@ func TestFullCountViaGenerateRootsMatchesKnownTotal(t *testing.T) {
 	assert.Equal(t, int64(1728), total, "Σ orbit weights over full-depth leaves == plain count")
 }
 
-func TestGenerateRootsEmitsCanonicalPrefixes(t *testing.T) {
+func TestGenerateTasksEmitsCanonicalPrefixes(t *testing.T) {
 	g := graph.New(5)
 	sym := symmetry.NewSymmetry(5)
 	searcher := NewSearcher(g, sym)
 
-	acc := cache.NewAccumulator()
-	sink := acc.Local()
-	result := searcher.GenerateRoots(context.Background(), sink, 0, 4, 3)
-	sink.Flush()
+	c := cache.NewCache()
+	result := searcher.GenerateTasks(context.Background(), c, 0, 4, 3)
 
 	assert.Positive(t, result.CacheWrites, "depth=3 must emit prefixes")
-	for _, e := range acc.Drain() {
+	for _, e := range allTasks(t, c) {
 		assert.Equal(t, 3, e.Path.State().CountBits(), "every prefix sits at target depth")
 		assert.Positive(t, e.Weight)
 	}
 }
 
-func TestGenerateRootsDepthZeroEmitsStart(t *testing.T) {
+func TestGenerateTasksDepthZeroEmitsStart(t *testing.T) {
 	g := graph.New(5)
 	sym := symmetry.NewSymmetry(5)
 	searcher := NewSearcher(g, sym)
 
-	acc := cache.NewAccumulator()
-	sink := acc.Local()
-	result := searcher.GenerateRoots(context.Background(), sink, 0, 1, 0)
-	sink.Flush()
+	c := cache.NewCache()
+	result := searcher.GenerateTasks(context.Background(), c, 0, 1, 0)
 
 	assert.Equal(t, 1, result.CacheWrites, "depth=0 emits the start itself")
-}
-
-func TestGenerateRootsSkipsWrongColor(t *testing.T) {
-	g := graph.New(5)
-	sym := symmetry.NewSymmetry(5)
-	searcher := NewSearcher(g, sym)
-
-	// Find a position the parity filter rejects on the odd board.
-	var skipped = -1
-	for p := range g.GetTotalCells() {
-		if g.SholdSkip(p) {
-			skipped = p
-			break
-		}
-	}
-	require.NotEqual(t, -1, skipped, "5x5 must filter some starts")
-
-	acc := cache.NewAccumulator()
-	sink := acc.Local()
-	result := searcher.GenerateRoots(context.Background(), sink, skipped, 1, 3)
-	sink.Flush()
-
-	assert.Zero(t, result.CacheWrites, "SholdSkip start emits nothing")
-	assert.Zero(t, acc.ItemsCount())
+	assert.Equal(t, 1, c.ItemsCount(), "depth=0 stores exactly one record")
 }
 
 // --- task-cache generation and reversal count (specs/searcher.md, ADR-011) --

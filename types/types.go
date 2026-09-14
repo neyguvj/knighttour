@@ -9,7 +9,7 @@ type Result struct {
 	TotalPathsFound int // reversal count-DFS only: completions of the subtask;
 	// generation leaves it zero (counting publishes weighted paths via ReportPathsFound)
 
-	CacheWrites int // accumulator emissions (sink.Add, incl. merges into existing keys)
+	CacheWrites int // weight-table writes (Set, incl. merges into existing keys)
 
 	CacheHits   int // reversal count-DFS only: task-cache lookups answered at the stop level
 	CacheMisses int // reversal count-DFS only: task-cache lookups with no entry (h == 0)

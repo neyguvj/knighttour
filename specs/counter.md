@@ -9,7 +9,7 @@
 ## Публичный API
 
 ```go
-const TwoPhaseBaseDepth = 5                 // глубина промежуточного аккумулятора фазы A
+const TwoPhaseBaseDepth = 5                 // глубина промежуточной таблицы фазы A
 const DefaultGCPercentReversal = 40         // GOGC на время конвейера (ADR-014)
 
 func DefaultPrecomputeDepth(size int) int   // контрактные значения таблицы ниже;
@@ -48,14 +48,15 @@ GOGC на время конвейера сохраняется (ADR-014).
 ## Алгоритм (три фазы)
 
 1. **gen A** — параллельно по каноническим стартовым группам (`errgroup` + `SetLimit(workers)`):
-   `searcher.GenerateRoots(ctx, sink, canonical, orbitSize, a)`, где
-   `a = min(precomputeDepth, TwoPhaseBaseDepth)`; воркеры пишут через свои `LocalSink`.
-   `Drain()` — worklist фазы B (тысячи задач вместо ~10 групп → полная утилизация).
+   `searcher.GenerateTasks(ctx, intermediate, canonical, orbitSize, a)`, где
+   `a = min(precomputeDepth, TwoPhaseBaseDepth)` и `intermediate` — экземпляр `cache.Cache`;
+   воркеры пишут напрямую через `Set` (буферизация-сink не нужна: таблица мала, фаза — мкс/мс).
+   Worklist фазы B материализуется из `intermediate` обходом `Each` после барьера errgroup и
+   складывается в `[]cache.Entry`; сама таблица затем выбрасывается (ADR-018).
 2. **gen B** — чанк-воркеры (`min(len(entries), workers)`, задачи тянутся атомарным
-   индексом), каждая задача — `searcher.ExtendTask(...)` с записью напрямую в `cache.Cache`
-   task-cache (без LocalSink: профиль записей иной, hit'ы читаются в том же ране, что
-   пишутся). При `precomputeDepth ≤ TwoPhaseBaseDepth` фаза вырождается — запись самой
-   записи.
+   индексом), каждая задача — `searcher.ExtendTask(...)` с записью напрямую во второй
+   `cache.Cache` task-cache. При `precomputeDepth ≤ TwoPhaseBaseDepth` фаза вырождается — запись
+   самой записи.
 3. **counting** — прямой обход task-cache без копирования (ADR-013): `taskCache.Each`
    с `workers` параллельными горутинами на шарды; колбэк для каждой записи `(task, w)` —
    `searcher.CountPathsWithCacheReversal(ctx, task, taskCache, precomputeDepth)`,
@@ -71,8 +72,9 @@ GOGC на время конвейера сохраняется (ADR-014).
 - Каждая запись глубины `a` проходит ровно через один канонический ключ (D4-эквивариантность
   графа/прунера); тождество итога `total = Σ_tasks W(task)·f(task)` на множестве канонических
   префиксов (ADR-011).
-- Общий счёт — `atomic.Uint64`; таблицы шардированы; sinks не разделяются между горутинами.
-  Итог не зависит от числа воркеров и глубины разреза (тест инвариантности).
+- Общий счёт — `atomic.Uint64`; обе таблицы шардированы, писатели входят прямо через `Set`
+  (разделяемого буфера нет). Итог не зависит от числа воркеров и глубины разреза (тест
+  инвариантности).
 - Глубина разреза сверху ограничена `size²/2`: точка дуальности обращения (`2d ≤ totalCells`),
   глубже — дублирование двойственного разреза.
 

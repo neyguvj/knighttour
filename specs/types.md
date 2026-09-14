@@ -13,7 +13,7 @@ type Result struct {
     TotalPathsFound int   // reversal count-DFS: число дополнений подзадачи; генерация
                           // не заполняет (пути публикует контур через ReportPathsFound)
 
-    CacheWrites int       // эмиссии в аккумулятор/task-cache (sink.Add, Set)
+    CacheWrites int       // записи весов в таблицы (Set, включая слияние под одним ключом)
 
     // Попадания/промахи lookup'ов в task-cache на уровне стопа count-фазы.
     CacheHits   int

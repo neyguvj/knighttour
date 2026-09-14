@@ -16,7 +16,7 @@ import (
 	"knighttour/symmetry"
 )
 
-// TwoPhaseBaseDepth is the intermediate accumulator depth of generation phase A.
+// TwoPhaseBaseDepth is the intermediate table depth of generation phase A.
 // Phase A stays single-pass (parallel over canonical start groups — enough for
 // its tiny trees); phase B extends every intermediate entry independently to
 // the target depth, exposing thousands of tasks instead of ~10 groups. When
@@ -82,12 +82,11 @@ func (c *Counter) ParallelCount(ctx context.Context, monitor monitoring.Monitor,
 }
 
 // ParallelCountWithDepth counts all open tours with the single pipeline
-// (specs/counter.md, ADR-016): gen A over canonical start groups into the
-// intermediate accumulator, gen B chunk workers extending each intermediate
-// entry into the live task-cache (direct Set — no LocalSink: the record
-// profile differs from the intermediate table's and hits are read in the same
-// run they are written), and counting walking the task-cache directly under
-// shard read locks (Cache.Each) with the early-stop count-DFS — total =
+// (specs/counter.md, ADR-016): gen A over canonical start groups into an
+// intermediate cache.Cache, gen B chunk workers extending each intermediate
+// entry into the live task-cache (both phases write direct Set, ADR-018), and
+// counting walking the task-cache directly under shard read locks (Cache.Each)
+// with the early-stop count-DFS — total =
 // Σ W(task)·f(task). precomputeDepth is the meet-in-the-middle split
 // (validated ≤ size²/2 by main.go); deeper than that duplicates the dual cut
 // of the reversed tour. The whole run executes under the configured GC percent
@@ -177,24 +176,25 @@ func (c *Counter) countOneTask(ctx context.Context, monitor monitoring.Monitor, 
 }
 
 // generateIntermediate runs phase A: DFS from every canonical start group to
-// base = min(precomputeDepth, TwoPhaseBaseDepth), accumulating D4-canonical
-// prefixes into the intermediate table through per-group LocalSinks. The
-// snapshot is the independent-task worklist of phase B.
+// base = min(precomputeDepth, TwoPhaseBaseDepth), writing D4-canonical
+// prefixes directly into an intermediate cache.Cache via Set (specs/counter.md,
+// ADR-018). After the errgroup barrier stops all writers, the table is
+// materialized into phase B's independent-task worklist and dropped to the GC.
 func (c *Counter) generateIntermediate(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) []cache.Entry {
 	monitor.BeginPhase("gen A")
-	intermediate := cache.NewAccumulator()
+	intermediate := cache.NewCache()
 	groups := c.symmetry.GetCanonicalGroups()
 	monitor.AddTasks(len(groups))
 
-	g, ctx := errgroup.WithContext(ctx)
+	base := min(precomputeDepth, TwoPhaseBaseDepth)
+	// gctx, not ctx: errgroup cancels its derived context on every Wait, so
+	// the post-barrier Each walk must run on the parent.
+	g, gctx := errgroup.WithContext(ctx)
 	g.SetLimit(workers)
 	for _, group := range groups {
 		p := group.Canonical
 		g.Go(func() error {
-			sink := intermediate.Local()
-			defer sink.Flush()
-			base := min(precomputeDepth, TwoPhaseBaseDepth)
-			result := c.searcher.GenerateRoots(ctx, sink, p, uint64(group.OrbitSize), base)
+			result := c.searcher.GenerateTasks(gctx, intermediate, p, uint64(group.OrbitSize), base)
 			monitor.ReportSubtask(&result)
 			monitor.ReportTaskCompleted()
 			return nil
@@ -202,5 +202,21 @@ func (c *Counter) generateIntermediate(ctx context.Context, monitor monitoring.M
 	}
 	_ = g.Wait()
 
-	return intermediate.Drain()
+	return materializeWorklist(ctx, intermediate)
+}
+
+// materializeWorklist flattens the gen-A table into the phase-B worklist with
+// a single Each goroutine — no mutex on the shared slice. Cancellation leaves
+// the partial worklist (the pipeline's established partial-run semantics); any
+// other error would mean a bug in Each, whose callback never fails, so it
+// fails loudly instead of counting on truncated data (specs/cache.md).
+func materializeWorklist(ctx context.Context, intermediate *cache.Cache) []cache.Entry {
+	entries := make([]cache.Entry, 0, intermediate.ItemsCount())
+	if err := intermediate.Each(ctx, 1, func(_ context.Context, p path.Path, weight uint64) error {
+		entries = append(entries, cache.Entry{Path: p, Weight: weight})
+		return nil
+	}); err != nil && !errors.Is(err, context.Canceled) {
+		panic("counter: unexpected Cache.Each error: " + err.Error())
+	}
+	return entries
 }
