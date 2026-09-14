@@ -29,12 +29,11 @@ const TwoPhaseBaseDepth = 5
 // and headroom above it is expensive — measured on 7×7 d22 (specs/decisions).
 const DefaultGCPercentReversal = 40
 
-// defaultPrecomputeDepths is the per-board default split depth: measured
-// optima on 5×5/6×6 sweeps, a sweep-tuned value on 7×7 and a conservative one
-// on 8×8 (deeper splits grow the task-cache exponentially and can exhaust
-// memory). main.go applies it when -precompute-depth is not set. The values
-// await the reversal resweep of ADR-016.
-var defaultPrecomputeDepths = map[int]int{5: 6, 6: 10, 7: 20, 8: 14}
+// defaultPrecomputeDepths is the per-board default split depth: the global
+// minimum of wall time on each board's measured depth window (ADR-017 — peak
+// RSS is a reference metric, not a gate). 8×8 keeps an unmeasured placeholder
+// (ADR-015). main.go applies it when -precompute-depth is not set.
+var defaultPrecomputeDepths = map[int]int{5: 6, 6: 14, 7: 22, 8: 14}
 
 // DefaultPrecomputeDepth returns the recommended precompute depth for a board
 // size (the table above; falls back to TwoPhaseBaseDepth+1 for unknown sizes).

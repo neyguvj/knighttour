@@ -167,8 +167,8 @@ func TestGenerateIntermediateStopsAtBaseDepth(t *testing.T) {
 
 func TestDefaultPrecomputeDepth(t *testing.T) {
 	assert.Equal(t, 6, DefaultPrecomputeDepth(5))
-	assert.Equal(t, 10, DefaultPrecomputeDepth(6))
-	assert.Equal(t, 20, DefaultPrecomputeDepth(7))
+	assert.Equal(t, 14, DefaultPrecomputeDepth(6))
+	assert.Equal(t, 22, DefaultPrecomputeDepth(7))
 	assert.Equal(t, 14, DefaultPrecomputeDepth(8))
 	assert.Equal(t, TwoPhaseBaseDepth+1, DefaultPrecomputeDepth(9))
 }

@@ -33,12 +33,16 @@ func (c *Counter) SetGCPercent(p int)       // GOGC на время конвей
                                             // DefaultGCPercentReversal
 ```
 
-Контрактные значения `DefaultPrecomputeDepth` (подтверждены пересъёмкой под reversal —
-ADR-016 §«Замеры», план 10 принят; `8: 14` — placeholder без пересъёмки, ADR-015):
+Контрактные значения `DefaultPrecomputeDepth` — глобальный минимум времени на измеренном
+окне глубин (критерий «чистое время» — ADR-017; замеры пересъёмки — ADR-016 §«Замеры», план 10;
+`8: 14` — placeholder без пересъёмки, ADR-015):
 
 | size | 5 | 6 | 7 | 8 |
 |---|---|---|---|---|
-| depth | 6 | 10 | 20 | 14 |
+| depth | 6 | 14 | 22 | 14 |
+
+Память не ограничивает выбор глубины (пик RSS — справочная метрика, ADR-017); пониженный
+GOGC на время конвейера сохраняется (ADR-014).
 
 ## Алгоритм (три фазы)
 
@@ -90,5 +94,5 @@ sequential == parallel; инвариантность к числу воркер�
 
 ## Связанные
 
-ADR-011, ADR-013, ADR-014, ADR-016; `specs/searcher.md`, `specs/cache.md`,
+ADR-011, ADR-013, ADR-014, ADR-016, ADR-017; `specs/searcher.md`, `specs/cache.md`,
 `specs/monitoring.md`. Методология замеров — `specs/benchmarks.md`.
