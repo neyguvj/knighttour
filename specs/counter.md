@@ -50,7 +50,8 @@ GOGC на время конвейера сохраняется (ADR-014).
 1. **gen A** — параллельно по каноническим стартовым группам (`errgroup` + `SetLimit(workers)`):
    `searcher.GenerateTasks(ctx, intermediate, canonical, orbitSize, a)`, где
    `a = min(precomputeDepth, TwoPhaseBaseDepth)` и `intermediate` — экземпляр `cache.Cache`;
-   воркеры пишут напрямую через `Set` (буферизация-сink не нужна: таблица мала, фаза — мкс/мс).
+   воркеры пишут напрямую через `Set` (промежуточная буферизация записей не нужна: таблица
+   мала, фаза — мкс/мс).
    Worklist фазы B материализуется из `intermediate` обходом `Each` после барьера errgroup и
    складывается в `[]cache.Entry`; сама таблица затем выбрасывается (ADR-018).
 2. **gen B** — чанк-воркеры (`min(len(entries), workers)`, задачи тянутся атомарным
