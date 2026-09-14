@@ -4,6 +4,7 @@ import (
 	"context"
 	"runtime/metrics"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -110,6 +111,39 @@ func TestWorkerInvariance(t *testing.T) {
 			count := counter.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), workers, depth)
 			assert.Equal(t, countSeq, count, "depth=%d: result must not depend on worker count", depth)
 		}
+	}
+}
+
+// A terminated context — cancelled or expired — must end the pipeline as a
+// partial run without a panic (specs/counter.md): both Cache.Each walks treat
+// any ctx termination alike, only non-ctx errors are bugs.
+func TestTerminatedContextPartialRun(t *testing.T) {
+	tests := []struct {
+		ctxFunc func() context.Context
+		name    string
+	}{
+		{name: "cancelled", ctxFunc: func() context.Context {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			return ctx
+		}},
+		{name: "deadline exceeded", ctxFunc: func() context.Context {
+			ctx, cancel := context.WithTimeout(context.Background(), -time.Second)
+			defer cancel()
+			return ctx
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			counter := NewCounter(graph.New(5))
+
+			var count uint64
+			assert.NotPanics(t, func() {
+				count = counter.ParallelCountWithDepth(tt.ctxFunc(), monitoring.NewFakeMonitor(), 4, 6)
+			}, "a terminated context must end the pipeline without a panic")
+			assert.Zero(t, count, "nothing is generated or counted under an already terminated context")
+		})
 	}
 }
 

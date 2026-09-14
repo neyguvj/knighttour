@@ -37,7 +37,7 @@ type phaseStats struct {
 	completed       atomic.Uint64
 	subtasks        atomic.Uint64 // folded ReportSubtask calls (never printed)
 	pathsFound      atomic.Uint64 // weighted paths (counting only)
-	cacheWrites     atomic.Uint64 // accumulator emissions (gen A / gen B)
+	cacheWrites     atomic.Uint64 // table emissions (gen A / gen B)
 	cacheHits       atomic.Uint64 // task-cache lookups answered (reversal counting)
 	cacheMisses     atomic.Uint64 // task-cache lookups with no entry (reversal counting)
 	prunedDeadEnd   atomic.Uint64

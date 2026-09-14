@@ -2,7 +2,6 @@ package counter
 
 import (
 	"context"
-	"errors"
 	"runtime/debug"
 	"sync/atomic"
 
@@ -146,16 +145,12 @@ func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, wo
 	monitor.AddTasks(taskCache.ItemsCount())
 
 	var total atomic.Uint64
-	// Cancellation just leaves the partial total — the same semantics as the
-	// shard-cursor loop this walk replaced. Any other error is unreachable per
-	// contract (the callback never fails, specs/cache.md): it would mean a bug
-	// in Each, so fail loudly instead of returning a silently partial result.
-	if err := taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, weight uint64) error {
+	// A terminated ctx just leaves the partial total (specs/counter.md).
+	err := taskCache.Each(ctx, workers, func(ctx context.Context, p path.Path, weight uint64) error {
 		c.countOneTask(ctx, monitor, taskCache, precomputeDepth, p, weight, &total)
 		return nil
-	}); err != nil && !errors.Is(err, context.Canceled) {
-		panic("counter: unexpected Cache.Each error: " + err.Error())
-	}
+	})
+	checkEachError(ctx, err)
 
 	return total.Load()
 }
@@ -206,17 +201,27 @@ func (c *Counter) generateIntermediate(ctx context.Context, monitor monitoring.M
 }
 
 // materializeWorklist flattens the gen-A table into the phase-B worklist with
-// a single Each goroutine — no mutex on the shared slice. Cancellation leaves
-// the partial worklist (the pipeline's established partial-run semantics); any
-// other error would mean a bug in Each, whose callback never fails, so it
-// fails loudly instead of counting on truncated data (specs/cache.md).
+// a single Each goroutine — no mutex on the shared slice. A terminated context
+// leaves the partial worklist (partial-run semantics, specs/counter.md); any
+// other Each error fails loudly via checkEachError.
 func materializeWorklist(ctx context.Context, intermediate *cache.Cache) []cache.Entry {
 	entries := make([]cache.Entry, 0, intermediate.ItemsCount())
-	if err := intermediate.Each(ctx, 1, func(_ context.Context, p path.Path, weight uint64) error {
+	err := intermediate.Each(ctx, 1, func(_ context.Context, p path.Path, weight uint64) error {
 		entries = append(entries, cache.Entry{Path: p, Weight: weight})
 		return nil
-	}); err != nil && !errors.Is(err, context.Canceled) {
+	})
+	checkEachError(ctx, err)
+	return entries
+}
+
+// checkEachError enforces the pipeline's cancellation semantics
+// (specs/counter.md): a walk ended by a terminated context — cancelled or
+// expired — keeps its partial result, while any other Cache.Each error is
+// unreachable per contract (the callback never fails, specs/cache.md) and
+// means a bug in Each itself, so it fails loudly instead of counting on
+// silently truncated data.
+func checkEachError(ctx context.Context, err error) {
+	if err != nil && ctx.Err() == nil {
 		panic("counter: unexpected Cache.Each error: " + err.Error())
 	}
-	return entries
 }
