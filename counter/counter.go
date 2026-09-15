@@ -29,18 +29,25 @@ const TwoPhaseBaseDepth = 5
 // and headroom above it is expensive — measured on 7×7 d22 (specs/decisions).
 const DefaultGCPercentReversal = 40
 
-// dispatchStackCapacity is the per-worker depth K of the counting-phase shared
-// stack (plan 13): the stack preallocates workers×K cache.Entry slots —
-// 24 B × K × min(workers, records) for the phase, zero allocations per record.
-// The default is the mid-range start of the tuning window [1000..10000]; the
-// benchmark harness sweeps it via BENCH_COUNT_K, there is no production flag.
-var dispatchStackCapacity = 5000
+// dispatchStackCapacity is the per-consumer depth K of the counting-phase
+// shared stack (plan 13): the stack preallocates consumers×K cache.Entry
+// slots — 24 B × K × min(workers, records) for the phase, zero allocations
+// per record. The default is the measured best point of the plan-13 sweep on
+// 7×7 d22 (window [1000..10000]); the benchmark harness sweeps it via
+// BENCH_COUNT_K, there is no production flag.
+var dispatchStackCapacity = 10000
 
-// dispatchClaimBatch is the flush/claim batch size B of plan 13: both the
-// producer's local buffer and the entries a consumer takes per mutex grab —
-// one synchronization per B records on each side (bench handle BENCH_COUNT_B;
-// ADR-010's claim batch was 16 too).
+// dispatchClaimBatch is the flush/claim batch ceiling B of plan 13: the
+// effective granularity comes from effectiveBatch (per-record on small
+// tables, saturating to B), one synchronization per Beff records on each
+// side (bench handle BENCH_COUNT_B; ADR-010's claim batch was 16 too).
 var dispatchClaimBatch = 16
+
+// dispatchGranularityC is the constant C of effectiveBatch: the lower bound
+// on the number of claims per consumer once the formula is active — while
+// records ≤ consumers·C the phase delivers per record (plan 13 fix; bench
+// handle BENCH_COUNT_C, no production flag).
+var dispatchGranularityC = 4
 
 // defaultPrecomputeDepths is the per-board default split depth: the global
 // minimum of wall time on each board's measured depth window (ADR-017 — peak
@@ -148,6 +155,17 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 	return c.countTasks(ctx, monitor, workers, taskCache, precomputeDepth)
 }
 
+// effectiveBatch computes the phase's single flush/claim granularity Beff once
+// at phase start from ItemsCount(): min(B, max(1, records/(consumers·C))) —
+// per-record delivery while records ≤ consumers·C (small tables never pile up
+// on one consumer), saturating to the ceiling B once records ≥ B·consumers·C
+// (specs/counter.md). Both producer flushes and consumer claims use it.
+func effectiveBatch(records, consumers int) int {
+	ceiling := max(dispatchClaimBatch, 1)
+	claimsPerConsumer := records / max(consumers*max(dispatchGranularityC, 1), 1)
+	return min(ceiling, max(1, claimsPerConsumer))
+}
+
 // countTasks is the reversal counting phase (specs/counter.md, plan 13): the
 // Cache.Each walk of the task-cache becomes a producer — its callback copies
 // each record (cache.Entry, 24 B) into one shared bounded LIFO stack instead
@@ -166,7 +184,7 @@ func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, wo
 	monitor.AddTasks(records)
 
 	consumers := max(min(workers, records), 1)
-	batch := max(dispatchClaimBatch, 1)
+	batch := effectiveBatch(records, consumers)
 	// Small tables fit into the stack entirely (producers never block); big
 	// ones keep the K-deep backpressure bound per consumer (specs/counter.md).
 	capacity := max(min(consumers*max(dispatchStackCapacity, 1), records), 1)

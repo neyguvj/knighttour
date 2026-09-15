@@ -49,12 +49,14 @@ const benchDepthsEnv = "BENCH_DEPTHS"
 // measurements fix a proper floor (plan 05).
 var sweepDefaults = map[int][]int{8: {32, 30}}
 
-// benchDispatchKEnv and benchDispatchBEnv override the counting-phase shared
-// stack knobs of plan 13 (no production flag); point runs then carry e.g.
-// BENCH_COUNT_K=2000 BENCH_COUNT_B=8 make bench-size N=7 DEPTHS=22.
+// benchDispatchKEnv, benchDispatchBEnv and benchDispatchCEnv override the
+// counting-phase shared stack knobs of plan 13 (no production flag); point
+// runs then carry e.g. BENCH_COUNT_K=2000 BENCH_COUNT_B=8 make bench-size N=7
+// DEPTHS=22.
 const (
 	benchDispatchKEnv = "BENCH_COUNT_K"
 	benchDispatchBEnv = "BENCH_COUNT_B"
+	benchDispatchCEnv = "BENCH_COUNT_C"
 )
 
 // toursExpected is the number of open tours (all symmetries counted) per board
@@ -89,10 +91,12 @@ func BenchmarkCountAllTours(b *testing.B) {
 }
 
 // applyDispatchKnobs overrides the shared-stack knobs once per benchmark
-// process when BENCH_COUNT_K / BENCH_COUNT_B are set (plan 13 tuning handles).
+// process when BENCH_COUNT_K / BENCH_COUNT_B / BENCH_COUNT_C are set (plan 13
+// tuning handles).
 func applyDispatchKnobs(b *testing.B) {
 	applyPositiveEnv(b, benchDispatchKEnv, func(v int) { dispatchStackCapacity = v })
 	applyPositiveEnv(b, benchDispatchBEnv, func(v int) { dispatchClaimBatch = v })
+	applyPositiveEnv(b, benchDispatchCEnv, func(v int) { dispatchGranularityC = v })
 }
 
 // applyPositiveEnv reads an int env handle and applies it when set; a present

@@ -278,39 +278,148 @@ func TestGCPercentAppliesAndRestores(t *testing.T) {
 	}
 }
 
+// The effective flush/claim granularity Beff of plan 13 is pinned at its formula
+// boundaries (specs/counter.md): per-record while records ≤ consumers·C, ceiling B
+// once records ≥ B·consumers·C. The rows are the measured 6×6 regression shapes and
+// the saturation edge at workers = 14 (integer division), plus both knob overrides.
+func TestEffectiveBatch(t *testing.T) {
+	tests := []struct {
+		name    string
+		records int
+		workers int
+		claimB  int // 0 keeps the default ceiling B
+		factorC int // 0 keeps the default constant C
+		want    int
+	}{
+		{name: "empty table", records: 0, workers: 8, want: 1},
+		{name: "6x6 d1 regression row", records: 6, workers: 14, want: 1},
+		{name: "6x6 d2 regression row", records: 20, workers: 14, want: 1},
+		{name: "6x6 d3 regression row", records: 73, workers: 14, want: 1},
+		{name: "per-record at the consumers·C boundary", records: 56, workers: 14, want: 1},
+		{name: "transition zone d4 row", records: 228, workers: 14, want: 4},
+		{name: "transition zone d5 row", records: 653, workers: 14, want: 11},
+		{name: "ceiling at B·consumers·C", records: 896, workers: 14, want: 16},
+		{name: "ceiling above saturation", records: 131_800_000, workers: 14, want: 16},
+		{name: "lone consumer is not throttled", records: 73, workers: 1, want: 16},
+		{name: "ceiling knob", records: 896, workers: 14, claimB: 8, want: 8},
+		{name: "C=1 shrinks the per-record zone", records: 73, workers: 14, factorC: 1, want: 5},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			savedB, savedC := dispatchClaimBatch, dispatchGranularityC
+			defer func() { dispatchClaimBatch, dispatchGranularityC = savedB, savedC }()
+			if tt.claimB > 0 {
+				dispatchClaimBatch = tt.claimB
+			}
+			if tt.factorC > 0 {
+				dispatchGranularityC = tt.factorC
+			}
+
+			consumers := max(min(tt.workers, tt.records), 1)
+			assert.Equal(t, tt.want, effectiveBatch(tt.records, consumers))
+		})
+	}
+}
+
+// A table below the batch ceiling — the plan-13 regression shapes — is delivered one
+// record per claim (specs/counter.md): a stack wired with effectiveBatch hands out
+// single entries while the formula is active and full B-sized claims once saturated.
+func TestTaskStackClaimsFollowEffectiveBatch(t *testing.T) {
+	tests := []struct {
+		name      string
+		records   int
+		wantClaim int
+	}{
+		{name: "6x6 d1 shape, per record", records: 6, wantClaim: 1},
+		{name: "6x6 d2 shape, per record", records: 20, wantClaim: 1},
+		{name: "6x6 d3 shape, per record", records: 73, wantClaim: 1},
+		{name: "saturated table, full batch", records: 896, wantClaim: dispatchClaimBatch},
+	}
+
+	const workers = 14
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			consumers := max(min(workers, tt.records), 1)
+			batch := effectiveBatch(tt.records, consumers)
+			require.Equal(t, tt.wantClaim, batch, "the formula must produce the claimed granularity")
+
+			stack := newTaskStack(max(min(consumers*dispatchStackCapacity, tt.records), 1), batch)
+			flush := make([]cache.Entry, batch)
+			for range tt.records / batch {
+				stack.push(flush)
+			}
+			if rest := tt.records % batch; rest > 0 {
+				stack.push(flush[:rest])
+			}
+			stack.close()
+
+			scratch := make([]cache.Entry, 0, batch)
+			delivered := 0
+			for {
+				var ok bool
+				scratch, ok = stack.pop(scratch[:0])
+				if !ok {
+					break
+				}
+				assert.LessOrEqual(t, len(scratch), batch, "a claim never exceeds Beff")
+				if tt.wantClaim == 1 {
+					assert.Len(t, scratch, 1, "the active formula delivers per record")
+				}
+				delivered += len(scratch)
+			}
+			assert.Equal(t, tt.records, delivered, "every record delivered exactly once")
+		})
+	}
+}
+
 // The counting stack dispatch delivers every task-cache record to the
 // consumers exactly once (specs/counter.md): the parallel total equals the
 // sequential Σ w·f(task) reference and the phase completes exactly ItemsCount
-// tasks, whatever the worker count.
+// tasks, whatever the worker count — including a below-ceiling table with the
+// Beff formula active.
 func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
+	tests := []struct {
+		name  string
+		depth int
+	}{
+		// The cache keys must sit at the counting stop depth: with a mismatched
+		// table every memo lookup misses and f(task) is zero for all records.
+		{name: "table above the batch ceiling", depth: 4},
+		{name: "table below the batch ceiling, formula active", depth: 1},
+	}
+
 	c := NewCounter(graph.New(5))
 	ctx := context.Background()
-	// The cache keys must sit at the counting stop depth: with a mismatched
-	// table every memo lookup misses and f(task) is zero for all records.
-	const depth = 4
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			taskCache := cache.NewCache()
+			for _, e := range c.generateIntermediate(ctx, monitoring.NewFakeMonitor(), 4, tt.depth) {
+				taskCache.Set(e.Path, e.Weight)
+			}
+			items := taskCache.ItemsCount()
+			require.Positive(t, items)
+			if tt.depth == 1 {
+				require.Less(t, items, dispatchClaimBatch, "the table must stay below the batch ceiling")
+			}
 
-	taskCache := cache.NewCache()
-	for _, e := range c.generateIntermediate(ctx, monitoring.NewFakeMonitor(), 4, depth) {
-		taskCache.Set(e.Path, e.Weight)
-	}
-	items := taskCache.ItemsCount()
-	require.Positive(t, items)
+			want := uint64(0)
+			require.NoError(t, taskCache.Each(ctx, 1, func(_ context.Context, p path.Path, w uint64) error {
+				res := c.searcher.CountPathsWithCacheReversal(ctx, p, taskCache, tt.depth)
+				want += uint64(res.TotalPathsFound) * w
+				return nil
+			}))
+			assert.Equal(t, uint64(1728), want, "the sequential reference must count the whole 5x5 tour total, or the dispatch equality below is vacuous")
 
-	want := uint64(0)
-	require.NoError(t, taskCache.Each(ctx, 1, func(_ context.Context, p path.Path, w uint64) error {
-		res := c.searcher.CountPathsWithCacheReversal(ctx, p, taskCache, depth)
-		want += uint64(res.TotalPathsFound) * w
-		return nil
-	}))
-	assert.Equal(t, uint64(1728), want, "the sequential reference must count the whole 5x5 tour total, or the dispatch equality below is vacuous")
-
-	for _, workers := range []int{1, 4, 8} {
-		fm := monitoring.NewFakeMonitor()
-		got := c.countTasks(ctx, fm, workers, taskCache, depth)
-		assert.Equal(t, want, got, "workers=%d: dispatch must not drop or duplicate records", workers)
-		counting := fm.Phase("counting")
-		assert.Equal(t, uint64(items), counting.Completed, "workers=%d: every record counted exactly once", workers)
-		assert.Equal(t, uint64(items), counting.Tasks, "workers=%d: AddTasks saw the whole table", workers)
+			for _, workers := range []int{1, 4, 8} {
+				fm := monitoring.NewFakeMonitor()
+				got := c.countTasks(ctx, fm, workers, taskCache, tt.depth)
+				assert.Equal(t, want, got, "workers=%d: dispatch must not drop or duplicate records", workers)
+				counting := fm.Phase("counting")
+				assert.Equal(t, uint64(items), counting.Completed, "workers=%d: every record counted exactly once", workers)
+				assert.Equal(t, uint64(items), counting.Tasks, "workers=%d: AddTasks saw the whole table", workers)
+			}
+		})
 	}
 }
 
