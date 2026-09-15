@@ -3,6 +3,9 @@ package counter
 import (
 	"context"
 	"runtime/metrics"
+	"slices"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -116,7 +119,8 @@ func TestWorkerInvariance(t *testing.T) {
 
 // A terminated context — cancelled or expired — must end the pipeline as a
 // partial run without a panic (specs/counter.md): both Cache.Each walks treat
-// any ctx termination alike, only non-ctx errors are bugs.
+// any ctx termination alike (counting stops producing and its consumers drain
+// the closed stack without counting), only non-ctx errors are bugs.
 func TestTerminatedContextPartialRun(t *testing.T) {
 	tests := []struct {
 		ctxFunc func() context.Context
@@ -272,4 +276,165 @@ func TestGCPercentAppliesAndRestores(t *testing.T) {
 			assert.Equal(t, before, gcPercentNow(), "runtime percent must be restored after the pipeline")
 		})
 	}
+}
+
+// The counting stack dispatch delivers every task-cache record to the
+// consumers exactly once (specs/counter.md): the parallel total equals the
+// sequential Σ w·f(task) reference and the phase completes exactly ItemsCount
+// tasks, whatever the worker count.
+func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
+	c := NewCounter(graph.New(5))
+	ctx := context.Background()
+	// The cache keys must sit at the counting stop depth: with a mismatched
+	// table every memo lookup misses and f(task) is zero for all records.
+	const depth = 4
+
+	taskCache := cache.NewCache()
+	for _, e := range c.generateIntermediate(ctx, monitoring.NewFakeMonitor(), 4, depth) {
+		taskCache.Set(e.Path, e.Weight)
+	}
+	items := taskCache.ItemsCount()
+	require.Positive(t, items)
+
+	want := uint64(0)
+	require.NoError(t, taskCache.Each(ctx, 1, func(_ context.Context, p path.Path, w uint64) error {
+		res := c.searcher.CountPathsWithCacheReversal(ctx, p, taskCache, depth)
+		want += uint64(res.TotalPathsFound) * w
+		return nil
+	}))
+	assert.Equal(t, uint64(1728), want, "the sequential reference must count the whole 5x5 tour total, or the dispatch equality below is vacuous")
+
+	for _, workers := range []int{1, 4, 8} {
+		fm := monitoring.NewFakeMonitor()
+		got := c.countTasks(ctx, fm, workers, taskCache, depth)
+		assert.Equal(t, want, got, "workers=%d: dispatch must not drop or duplicate records", workers)
+		counting := fm.Phase("counting")
+		assert.Equal(t, uint64(items), counting.Completed, "workers=%d: every record counted exactly once", workers)
+		assert.Equal(t, uint64(items), counting.Tasks, "workers=%d: AddTasks saw the whole table", workers)
+	}
+}
+
+// A stack far smaller than the record count — K = 1 leaves capacity min(8,
+// records) < B below one batch, K = 2 lands it exactly on B — makes every
+// full-stack flush block under the shard RLock until the consumers drain.
+// That must neither deadlock nor change the total (specs/counter.md).
+func TestCountTasksForcedOverflow(t *testing.T) {
+	tests := []struct {
+		name string
+		k    int
+	}{
+		{name: "stack below one batch", k: 1},
+		{name: "stack of exactly one batch", k: 2},
+	}
+
+	saved := dispatchStackCapacity
+	defer func() { dispatchStackCapacity = saved }()
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dispatchStackCapacity = tt.k
+			c := NewCounter(graph.New(5))
+			assert.Equal(t, uint64(1728), c.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 8, 6))
+		})
+	}
+}
+
+// The stack is the phase's only hand-off (specs/counter.md): concurrent
+// producers must deliver every record exactly once to a single consumer at any
+// capacity — capacity 1 forces every flush through a full-stack block, and a
+// batch wider than the capacity splits it across grabs.
+func TestTaskStackExactOnce(t *testing.T) {
+	tests := []struct {
+		name     string
+		capacity int
+	}{
+		{name: "capacity 1, every flush blocks", capacity: 1},
+		{name: "capacity 2", capacity: 2},
+		{name: "capacity 5", capacity: 5},
+	}
+
+	const producers, perProducer = 4, 256
+	total := producers * perProducer
+	want := make([]uint64, total)
+	for i := range want {
+		want[i] = uint64(i)
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stack := newTaskStack(tt.capacity, 16)
+			var lane atomic.Uint64
+			var wg sync.WaitGroup
+			wg.Add(producers)
+			for range producers {
+				go func() {
+					defer wg.Done()
+					buf := make([]cache.Entry, 0, 16)
+					for range perProducer / 16 {
+						for range 16 {
+							i := lane.Add(1) - 1
+							buf = append(buf, cache.Entry{Path: path.Path{}, Weight: i})
+						}
+						stack.push(buf)
+						buf = buf[:0]
+					}
+				}()
+			}
+			go func() {
+				wg.Wait()
+				stack.close()
+			}()
+
+			var got []uint64
+			scratch := make([]cache.Entry, 0, 16)
+			for {
+				var ok bool
+				scratch, ok = stack.pop(scratch[:0])
+				if !ok {
+					break
+				}
+				for _, e := range scratch {
+					got = append(got, e.Weight)
+				}
+			}
+			slices.Sort(got)
+			assert.Equal(t, want, got, "every record delivered exactly once at capacity %d", tt.capacity)
+		})
+	}
+}
+
+// cancelSpyMonitor cancels its context the first time any paths are reported
+// — i.e. right after the first task of the counting phase was counted (gen
+// phases never report paths).
+type cancelSpyMonitor struct {
+	*monitoring.FakeMonitor
+	cancel context.CancelFunc
+}
+
+// ReportPathsFound forwards to the fake and cancels the run (idempotent; the
+// first call is the one that matters).
+func (m *cancelSpyMonitor) ReportPathsFound(count int) {
+	m.FakeMonitor.ReportPathsFound(count)
+	m.cancel()
+}
+
+// Cancelling exactly at the first counted task leaves a partial total without
+// a panic: the stack is drained without counting, so with a single consumer
+// exactly one task completes (specs/counter.md).
+func TestCancelDuringCountingGivesPartialTotal(t *testing.T) {
+	c := NewCounter(graph.New(5))
+	full := c.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 1, 6)
+	require.Equal(t, uint64(1728), full)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	spy := &cancelSpyMonitor{FakeMonitor: monitoring.NewFakeMonitor(), cancel: cancel}
+
+	var got uint64
+	assert.NotPanics(t, func() {
+		got = c.ParallelCountWithDepth(ctx, spy, 1, 6)
+	})
+	assert.LessOrEqual(t, got, full, "a partial total never exceeds the full one")
+	counting := spy.Phase("counting")
+	assert.Equal(t, uint64(1), counting.Completed, "the stack entries after the first counted task are dropped without counting")
 }

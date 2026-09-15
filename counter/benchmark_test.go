@@ -49,6 +49,14 @@ const benchDepthsEnv = "BENCH_DEPTHS"
 // measurements fix a proper floor (plan 05).
 var sweepDefaults = map[int][]int{8: {32, 30}}
 
+// benchDispatchKEnv and benchDispatchBEnv override the counting-phase shared
+// stack knobs of plan 13 (no production flag); point runs then carry e.g.
+// BENCH_COUNT_K=2000 BENCH_COUNT_B=8 make bench-size N=7 DEPTHS=22.
+const (
+	benchDispatchKEnv = "BENCH_COUNT_K"
+	benchDispatchBEnv = "BENCH_COUNT_B"
+)
+
 // toursExpected is the number of open tours (all symmetries counted) per board
 // size — the invariant every split depth must reproduce. Sizes absent from the
 // table are measured but not verified (exploratory runs, e.g. the first 8×8).
@@ -69,6 +77,7 @@ var toursExpected = map[int]uint64{
 // peakRSS is a process-wide maximum: run one board size per process
 // (`make bench-size N=…`), otherwise it reflects the most hungry subtest.
 func BenchmarkCountAllTours(b *testing.B) {
+	applyDispatchKnobs(b)
 	for _, size := range benchmarkSizes {
 		b.Run("size"+strconv.Itoa(size), func(b *testing.B) {
 			if gate := gateVar(size); gatedSizes[size] && os.Getenv(gate) != "1" {
@@ -77,6 +86,27 @@ func BenchmarkCountAllTours(b *testing.B) {
 			runDepths(b, size, sweepDepths(b, size))
 		})
 	}
+}
+
+// applyDispatchKnobs overrides the shared-stack knobs once per benchmark
+// process when BENCH_COUNT_K / BENCH_COUNT_B are set (plan 13 tuning handles).
+func applyDispatchKnobs(b *testing.B) {
+	applyPositiveEnv(b, benchDispatchKEnv, func(v int) { dispatchStackCapacity = v })
+	applyPositiveEnv(b, benchDispatchBEnv, func(v int) { dispatchClaimBatch = v })
+}
+
+// applyPositiveEnv reads an int env handle and applies it when set; a present
+// but non-positive or unparseable value fails the run.
+func applyPositiveEnv(b *testing.B, env string, apply func(int)) {
+	s := os.Getenv(env)
+	if s == "" {
+		return
+	}
+	v, err := strconv.Atoi(s)
+	if err != nil || v < 1 {
+		b.Fatalf("%s: want positive integer, got %q", env, s)
+	}
+	apply(v)
 }
 
 // sweepDepths resolves the depth list for a board size: BENCH_DEPTHS override

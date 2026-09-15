@@ -202,4 +202,6 @@ Available benchmarks in `counter/benchmark_test.go`:
   `totalAllocMB/op` — per-iteration allocation delta)
 - sizes 5/6 always run; size 7 is gated by `BENCH_DEEP=1` (`make bench-deep`) and
   stops at depth 6 (`depthFloors`) — below depth 10 measurements take hours, depth 6 OOMs;
-  size 8 is gated by `BENCH_8X8=1` (ADR-015). `BENCH_DEPTHS=a,b` overrides the swept depths
+  size 8 is gated by `BENCH_8X8=1` (ADR-015). `BENCH_DEPTHS=a,b` overrides the swept depths;
+  `BENCH_COUNT_K=n`/`BENCH_COUNT_B=n` override the counting-phase shared-stack depth K and
+  claim batch B (plan 13 tuning handles, no CLI flag)
