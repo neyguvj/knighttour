@@ -31,10 +31,10 @@ const DefaultGCPercentReversal = 40
 
 // dispatchStackCapacity is the per-consumer depth K of the counting-phase
 // shared stack (plan 13): the stack preallocates consumers×K cache.Entry
-// slots — 24 B × K × min(workers, records) for the phase, zero allocations
-// per record. The default is the measured best point of the plan-13 sweep on
-// 7×7 d22 (window [1000..10000]); the benchmark harness sweeps it via
-// BENCH_COUNT_K, there is no production flag.
+// slots — 24 B × K × max(min(workers, records), 1) for the phase, zero
+// allocations per record. The default is the measured best point of the
+// plan-13 sweep on 7×7 d22 (window [1000..10000]); the benchmark harness
+// sweeps it via BENCH_COUNT_K, there is no production flag.
 var dispatchStackCapacity = 10000
 
 // dispatchClaimBatch is the flush/claim batch ceiling B of plan 13: the
