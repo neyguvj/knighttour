@@ -21,11 +21,12 @@
 |----|------|---------------|-----------|
 | G1 | permission (global) | `git push` / `git -C … push` — только подтверждение пользователя | `opencode.json → permission.bash` |
 | G2 | permission (global) | доступ к путям вне worktree: allow только `~/work/knighttour/**` и `~/work/kt-*/**`, иначе ask | `opencode.json → permission.external_directory` |
-| G3 | permission (agent `spec`) | edit/write вне `specs/**` и `work/**`; запуск субагентов | `.opencode/agent/spec.md` |
-| G4 | permission (agent `benchmarker`) | edit/write вне `specs/decisions/**` и `work/**`; запуск субагентов | `.opencode/agent/benchmarker.md` |
+| G3 | permission (agent `spec`) | edit/write вне `specs/**`, `work/**` и `~/work/kt-*/specs/**`, `~/work/kt-*/work/**`; запуск субагентов | `.opencode/agent/spec.md` |
+| G4 | permission (agent `benchmarker`) | edit/write вне `specs/decisions/**`, `work/**` и `~/work/kt-*/specs/decisions/**`, `~/work/kt-*/work/**`; запуск субагентов | `.opencode/agent/benchmarker.md` |
 | G5 | permission (agent `reviewer`) | любые правки (уже было) + запуск субагентов | `.opencode/agent/reviewer.md` |
 | G6 | permission (agent `coder`) | запуск субагентов | `.opencode/agent/coder.md` |
 | G7 | plugin (`gates.ts`) | `git commit` без свежего зелёного `make check` (ADR-023) | `.opencode/plugins/gates.ts` |
+| G8 | plugin (`gates.ts`) | правку основного дерева при активном feature-worktree (ADR-024) | `.opencode/plugins/gates.ts` |
 
 ## Plugin-ядро (`.opencode/plugins/gates.ts`)
 
@@ -86,6 +87,26 @@
   только невидимые матчеру пути (алиасы, коммит из скрипта, `git merge --squash`, cherry-pick);
   они вне скоупа v1.
 
+## Гейт G8: main read-only при активном feature-worktree (ADR-024)
+
+Сессия оркестратора живёт в основном дереве и не перезапускается между фичами; изоляция фичи —
+worktree, а не процесс. Пока гейт считает worktree активным, править основное дерево нельзя —
+страховка от «забыл workdir/абсолютный путь» в контракте WORKTREE (skill `workflow`).
+
+- **Активные worktree.** Множество строится из наблюдаемых bash-команд с exit 0: инвокация
+  `git … worktree add <path>` добавляет разрешённый абсолютный `<path>` (база относительности —
+  параметр `workdir` инструмента, иначе cwd процесса; `git -C <dir>` задаёт базу),
+  `git … worktree remove <path>` убирает. Не-нулевой exit ничего не меняет.
+- **Самоизлечение.** Перед каждой проверкой несуществующие пути молча выпадают из множества:
+  worktree, удалённый вне сессии (ручной терминал), перестает блокировать main при первой же правке.
+- **Проверка.** Инструменты `edit`/`write` (поле `filePath`) и `patch`/`apply_patch` (строки
+  `*** Update|Add|Delete File:` текста патча) с целью внутри корня основного дерева (git worktree
+  сервера), пока множество непусто, блокируются `GateError` со списком активных worktree.
+  Относительные пути инструментов разрешаются от корня проекта — это и есть основное дерево.
+- **Что не блокируется.** Bash-правки основного дерева (как в G7 — матчер снимает «забыл», а не
+  отражает злоумышленника); git-операции закрытия (`git -C "$MAIN" merge --squash` — bash, не
+  edit-инструмент); `/quick` на `chore/<slug>` без отдельного worktree (множество пусто).
+
 ## Инварианты
 
 - Ни один агент-субагент (`spec`, `coder`, `reviewer`, `benchmarker`) не запускает других
@@ -133,6 +154,18 @@ opencode должна давать блок/ask. Для plugin-гейта при
 7. негативные контроли: `git status`, `git log --oneline` не блокируются; не-`bash` инструменты
    гейтом не затрагиваются.
 
+Сценарии приёмки G8 (ADR-024):
+
+1. без активных worktree → edit файла основного дерева проходит;
+2. зелёный `git worktree add <путь>` → edit/write основного дерева блокируется `GateError`
+   (в т.ч. относительный путь инструмента), edit файлов внутри worktree — проходит;
+3. `apply_patch` со `*** Update File: <main/…>` блокируется;
+4. зелёный `git worktree remove <тот же путь>` → правка main снова проходит;
+5. worktree из множества удалён с диска → на следующей правке самоизлечение, main не заблокирован;
+6. красный (`exit != 0`) `git worktree add` множество не пополняет;
+7. красная команда `git commit` G7-гейтом блокируется независимо от состояния G8.
+
 ## Связанные
 
-ADR-022 (двухслойная схема); ADR-023 (механика G7); ADR-021 (ветка вместо флага); `AGENTS.md`.
+ADR-022 (двухслойная схема); ADR-023 (механика G7); ADR-021 (ветка вместо флага); ADR-024
+(сессия из main, механика G8); `AGENTS.md`.

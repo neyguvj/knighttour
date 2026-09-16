@@ -23,11 +23,15 @@ branch is merged, "off" means it is not. Runtime input flags (`-size`, `-workers
 Lifecycle (all three commands follow it):
 
 1. **Open:** an accepted plan → `git fetch` → `git worktree add ../kt-<NN>-<slug> -b <NN>-<slug>
-   origin/main`. Plan, spec, code, tests and the ADR draft live only in that worktree; `main` stays
-   unaware until close. Branch name `<NN>-<slug>` from the plan number; `/quick` without a plan uses
-   `chore/<slug>`.
-2. **Work:** one feature = one worktree = one opencode session (`cd ../kt-… && opencode`) so
-   subagents inherit the right cwd. Features proceed in parallel, isolated by worktree.
+   origin/main`, then pin `WT=$(cd ../kt-<NN>-<slug> && pwd)` and keep working in the same session —
+   no restart, no `cd` (ADR-024). Plan, spec, code, tests and the ADR draft live only in that worktree;
+   `main` stays unaware until close. Branch name `<NN>-<slug>` from the plan number; `/quick` without
+   a plan uses `chore/<slug>`.
+2. **Work (WORKTREE contract):** every command runs with cwd=`$WT` (bash `workdir`) or `git -C "$WT"`;
+   every file path is absolute under `$WT`; every subagent prompt starts with `WORKTREE: <abs path>`
+   plus the directive "run all commands in WORKTREE". The main tree is read-only while a feature
+   worktree exists (gate G8, ADR-024). Features proceed in parallel, isolated by worktree — name the
+   WT in each subagent prompt.
 3. **Measure:** A/B base is `merge-base HEAD origin/main`; the benchmarker uses a uniquely named
    base worktree and serializes long points under `flock ../kt-bench.lock`.
 4. **Close:**
@@ -73,9 +77,10 @@ Rules, table procedure (`make bench-table`) and freshness stamp: skill `readme-w
   **coder ⇄ reviewer loop** until `VERDICT: APPROVED` (max 5 iters, sessions resumed by task_id) →
   `benchmarker` writes ADR measurements for hot-path changes → close on explicit user confirmation.
   No handoff files and no spawned sessions; heavy work lives in subagent contexts so the orchestrator
-  stays cheap. One feature = one branch = one session: a new feature is a fresh opencode session in
-  its own worktree, not the next task of this one. Subagents: `spec` (interview + specs/plans/ADR
-  edits), `coder` (implements to green `make check`), `reviewer` (read-only, severity
+  stays cheap. One feature = one branch/worktree, but sessions are not per-feature: the orchestrator
+  stays in the main checkout and pins each feature by the WORKTREE contract (ADR-024). Subagents:
+  `spec` (interview + specs/plans/ADR edits), `coder` (implements to green `make check`),
+  `reviewer` (read-only, severity
   BLOCKER/MAJOR/MINOR + `SPEC_OK`), `benchmarker` (WIN/REGRESSION/NOISE, records numbers in ADR).
   Restart opencode after editing agent/skill/command files.
 

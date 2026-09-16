@@ -1,3 +1,5 @@
+import { existsSync } from "node:fs";
+import { resolve } from "node:path";
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 
 // Plugin core for stateful pipeline gates (specs/gates.md «Plugin-ядро», ADR-022/023).
@@ -247,6 +249,123 @@ function makeCheckBeforeCommitGate(): Gate {
 }
 
 // ---------------------------------------------------------------------------
+// Gate G8: main tree read-only while a feature worktree is active (ADR-024)
+// ---------------------------------------------------------------------------
+
+// Tools taking a single `filePath` target; patch tools carry paths inside their text body.
+const EDIT_TOOLS = new Set(["edit", "write"]);
+const PATCH_TOOLS = new Set(["patch", "apply_patch"]);
+
+// Path lines of the patch format: `*** Update File: <path>` (Add/Delete alike).
+const PATCH_FILE_LINE = /^\*\*\* (?:Update|Add|Delete) File: (.+)$/gm;
+
+/** Builds the G8 block instruction naming the worktrees that pin the session. */
+function mainEditInstruction(active: Set<string>): string {
+  return (
+    "Gate G8: editing the main tree is blocked while a feature worktree is active " +
+    `(${[...active].join(", ")}). Apply every change inside the active worktree (absolute paths, ` +
+    'bash with cwd set to it); if main must really change, close/remove the feature worktrees first ' +
+    "(`git worktree remove …`). ADR-024 WORKTREE contract."
+  );
+}
+
+/** Extracts a string field from tool args; undefined for any other shape. */
+function stringField(args: unknown, field: string): string | undefined {
+  if (typeof args !== "object" || args === null) return undefined;
+  const value = (args as Record<string, unknown>)[field];
+  return typeof value === "string" ? value : undefined;
+}
+
+/** Removes one layer of matching quotes from a token (tokenize does no quote lexing). */
+function stripQuotes(token: string): string {
+  return token.replace(/^["']|["']$/g, "");
+}
+
+/** A `git worktree add|remove <path>` invocation; `base` is the `-C <dir>` when present. */
+interface WorktreeOp {
+  sub: "add" | "remove";
+  path: string | undefined;
+  base: string | undefined;
+}
+
+/** Parses bash command segments for `git … worktree add|remove <path>` invocations (token matcher). */
+function worktreeOps(command: string): WorktreeOp[] {
+  const ops: WorktreeOp[] = [];
+  for (const segment of splitCommand(command)) {
+    const tokens = tokenize(segment.text);
+    let i = skipEnvPrefix(tokens, 0);
+    if (tokens[i] !== "git") continue;
+    let base: string | undefined;
+    i += 1;
+    for (; i < tokens.length && tokens[i] !== "worktree"; i += 1) {
+      const token = tokens[i];
+      if (GIT_VALUE_FLAGS.has(token)) {
+        if (token === "-C" && tokens[i + 1] !== undefined) base = stripQuotes(tokens[i + 1]);
+        i += 1; // consume the option value
+        continue;
+      }
+      if (!token.startsWith("-")) break; // a different git subcommand
+    }
+    const sub = tokens[i + 1];
+    if (tokens[i] !== "worktree" || (sub !== "add" && sub !== "remove")) continue;
+    const raw = tokens.slice(i + 2).find((token) => !token.startsWith("-"));
+    ops.push({ sub, path: raw === undefined ? undefined : stripQuotes(raw), base });
+  }
+  return ops;
+}
+
+/** Absolute candidate targets of a mutating tool call (empty for unrecognized shapes). */
+function targetsOf(tool: string, args: unknown, cwd: string): string[] {
+  if (EDIT_TOOLS.has(tool)) {
+    const path = stringField(args, "filePath");
+    return path === undefined ? [] : [resolve(cwd, stripQuotes(path))];
+  }
+  const text = stringField(args, "patchText") ?? stringField(args, "patch");
+  if (text === undefined) return [];
+  return [...text.matchAll(PATCH_FILE_LINE)].map((m) => resolve(cwd, stripQuotes(m[1])));
+}
+
+/** Whether `target` is `root` itself or lives under it (both absolute). */
+function isInside(root: string, target: string): boolean {
+  return target === root || target.startsWith(root + "/");
+}
+
+/**
+ * G8: while this process has seen `git worktree add ../kt-* …` and that worktree still
+ * exists, edit/write/patch calls targeting the main tree are blocked — the orchestrator
+ * session stays in main, so feature isolation is enforced mechanically (ADR-024).
+ */
+function mainTreeReadOnlyWhileFeatureGate(mainRoot: string): Gate {
+  const active = new Set<string>();
+  return {
+    id: "G8",
+    before(call) {
+      if (!EDIT_TOOLS.has(call.tool) && !PATCH_TOOLS.has(call.tool)) return;
+      for (const worktree of active) {
+        if (!existsSync(worktree)) active.delete(worktree); // self-heal out-of-band removals
+      }
+      if (active.size === 0) return;
+      // Relative tool paths resolve against the project directory — which is the main tree.
+      if (targetsOf(call.tool, call.args, mainRoot).some((target) => isInside(mainRoot, target))) {
+        throw new GateError(mainEditInstruction(active));
+      }
+    },
+    after(call) {
+      if (call.tool !== BASH_TOOL || !confirmedGreenExit(call.metadata)) return;
+      const command = commandOf(call.args);
+      if (command === undefined) return;
+      const cwd = stringField(call.args, "workdir") ?? process.cwd();
+      for (const op of worktreeOps(command)) {
+        if (op.path === undefined) continue;
+        const full = resolve(op.base === undefined ? cwd : resolve(cwd, op.base), op.path);
+        if (op.sub === "add") active.add(full);
+        else active.delete(full);
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Plugin core
 // ---------------------------------------------------------------------------
 
@@ -255,9 +374,9 @@ function makeCheckBeforeCommitGate(): Gate {
  * and one `event` handler each, dispatching to the gate list in registration
  * order. A new gate is a new list entry — the core does not change.
  */
-export const GatesPlugin: Plugin = async ({ client }) => {
-  // Stamp state lives here for the whole server process, shared by all sessions (ADR-023).
-  const gates: Gate[] = [makeCheckBeforeCommitGate()];
+export const GatesPlugin: Plugin = async ({ client, worktree }) => {
+  // Stamp and worktree state live here for the whole server process, shared by all sessions (ADR-023/024).
+  const gates: Gate[] = [makeCheckBeforeCommitGate(), mainTreeReadOnlyWhileFeatureGate(resolve(worktree))];
   const logFailure: FailureLogger = (gateID, err) => logGateFailure(client, gateID, err);
 
   return {
