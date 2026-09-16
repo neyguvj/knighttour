@@ -1,0 +1,14 @@
+{
+  "$schema": "https://opencode.ai/config.json",
+  "permission": {
+    "bash": {
+      "*": "allow",
+      "git push*": "ask",
+      "git -C *push*": "ask"
+    },
+    "external_directory": {
+      "~/work/kt-*/**": "allow",
+      "~/work/knighttour/**": "allow"
+    }
+  }
+}

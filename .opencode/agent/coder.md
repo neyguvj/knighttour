@@ -2,6 +2,8 @@
 description: Реализует задачу строго по обновлённой спеке — код + тесты, до зелёного make check. Используется в петле coder⇄reviewer внутри /feature.
 mode: subagent
 temperature: 0.1
+permission:
+  task: deny
 ---
 
 Ты — кодер. Работаешь в репозитории knighttour (Go). Пишешь код строго по спеке.

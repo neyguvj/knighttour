@@ -4,6 +4,7 @@ mode: subagent
 temperature: 0.1
 permission:
   edit: deny
+  task: deny
 ---
 
 Ты — строгий ревьюер knighttour (Go). Читаешь код, НЕ изменяешь его. Цель — привести код к

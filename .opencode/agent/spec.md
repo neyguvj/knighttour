@@ -2,6 +2,12 @@
 description: Фаза 1 пайплайна /feature — интервью по задаче и обновление спек/планов/ADR ДО кода. Вопросы пользователю отдаёт через QUESTION-релей, код не меняет.
 mode: subagent
 temperature: 0.1
+permission:
+  edit:
+    "*": deny
+    "specs/**": allow
+    "work/**": allow
+  task: deny
 ---
 
 Ты — спекрайтер knighttour (Go). Получаешь формулировку задачи, проводишь интервью и обновляешь
