@@ -35,9 +35,9 @@ func gateVar(size int) string {
 	return deepEnvVar
 }
 
-// depthFloors is the lowest swept depth per board size (default 1). Below depth
-// 10 on 7×7 measurements run into hours and depth 6 was OOM-killed, so the
-// sweep stops there.
+// depthFloors is the lowest swept depth per board size (default 1). On 7×7 a
+// point at the floor costs ~50 min (count-phase dominated) and grows downward,
+// so the sweep stops there to bound `make bench-deep` runtime.
 var depthFloors = map[int]int{7: 6}
 
 // benchDepthsEnv overrides the swept depths (comma separated, e.g. "30,32") for
