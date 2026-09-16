@@ -10,6 +10,34 @@
 - Post-Change Verification: After every code modification, you MUST run `make check`
   (it runs: go fmt → go vet → go test -race → auto-fix modern idioms → golangci-lint).
   Do not report completion if it fails. Individual targets: `make fmt vet test lint fix bench`.
+- Branch isolation: every change lands through a feature branch/worktree closed by merge (ADR-021) —
+  never edit `main` directly; see «Feature workflow».
+
+## Feature workflow (branch-per-feature) (ADR-021)
+
+The feature toggle is the **branch**, not a flag in the code. Never introduce a feature-flag /
+env handle / kill-switch to enable behavior, run an A/B, or provide a rollback — "on" means the
+branch is merged, "off" means it is not. Runtime input flags (`-size`, `-workers`,
+`-precompute-depth`, `-gc-percent`) are legitimate; they are not feature toggles.
+
+Lifecycle (all three commands follow it):
+
+1. **Open:** an accepted plan → `git fetch` → `git worktree add ../kt-<NN>-<slug> -b <NN>-<slug>
+   origin/main`. Plan, spec, code, tests and the ADR draft live only in that worktree; `main` stays
+   unaware until close. Branch name `<NN>-<slug>` from the plan number; `/quick` without a plan uses
+   `chore/<slug>`.
+2. **Work:** one feature = one worktree = one opencode session (`cd ../kt-… && opencode`) so
+   subagents inherit the right cwd. Features proceed in parallel, isolated by worktree.
+3. **Measure:** A/B base is `merge-base HEAD origin/main`; the benchmarker uses a uniquely named
+   base worktree and serializes long points under `flock ../kt-bench.lock`.
+4. **Close:**
+   - *Accepted (WIN):* squash onto current `main` (`git merge --squash`), push only on explicit
+     request, then remove the worktree and branch.
+   - *Rejected:* docs-only merge — carry `specs/plans/NN-*.md` (marked closed) and a rejected ADR
+     with before/after numbers into `main`; do **not** merge code; remove the worktree and branch.
+
+Exact git commands for open/measure/close (`$MAIN` squash, docs-only merge, cleanup, bench lock):
+skill `workflow`.
 
 ## Spec structure (one fact = one place)
 
@@ -34,18 +62,20 @@ Rules, table procedure (`make bench-table`) and freshness stamp: skill `readme-w
 
 ## Automation pipeline (escalation ladder)
 
-- `/quick` – tiny code-only fix, no spec change.
-- `/task`  – lightweight spec-first in one context (specs updated before code).
+- `/quick` – tiny code-only fix, no spec change; on a lightweight `chore/<slug>` branch.
+- `/task`  – lightweight spec-first in one context (specs updated before code), on its own worktree branch.
 - `/feature` – full pipeline behind a **thin orchestrator**: it never reads sources or specs and
   never reasons about the domain — it only dispatches subagents, relays their `QUESTION:` blocks to
-  the user, tracks phases in `todowrite`, and commits. Phases: interview + spec/plan update by the
-  `spec` subagent → **coder ⇄ reviewer loop** until `VERDICT: APPROVED` (max 5 iters, sessions
-  resumed by task_id) → `benchmarker` writes ADR measurements for hot-path changes → commit on
-  explicit user confirmation. No handoff files and no spawned sessions: the next task starts in the
-  same session (one session = many tasks; heavy work lives in subagent contexts, so the orchestrator
-  stays cheap). Subagents: `spec` (interview + specs/plans/ADR edits), `coder` (implements to green
-  `make check`), `reviewer` (read-only, severity BLOCKER/MAJOR/MINOR + `SPEC_OK`), `benchmarker`
-  (WIN/REGRESSION/NOISE, records numbers in ADR). Restart opencode after editing agent/skill/command files.
+  the user, tracks phases in `todowrite`, and drives the branch lifecycle (open worktree → … →
+  squash-merge or docs-only close). Phases: interview + spec/plan update by the `spec` subagent →
+  **coder ⇄ reviewer loop** until `VERDICT: APPROVED` (max 5 iters, sessions resumed by task_id) →
+  `benchmarker` writes ADR measurements for hot-path changes → close on explicit user confirmation.
+  No handoff files and no spawned sessions; heavy work lives in subagent contexts so the orchestrator
+  stays cheap. One feature = one branch = one session: a new feature is a fresh opencode session in
+  its own worktree, not the next task of this one. Subagents: `spec` (interview + specs/plans/ADR
+  edits), `coder` (implements to green `make check`), `reviewer` (read-only, severity
+  BLOCKER/MAJOR/MINOR + `SPEC_OK`), `benchmarker` (WIN/REGRESSION/NOISE, records numbers in ADR).
+  Restart opencode after editing agent/skill/command files.
 
 ## Agent question protocol (relay)
 

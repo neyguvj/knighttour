@@ -88,6 +88,10 @@ go test -v -run='^$' -bench='BenchmarkCountAllTours/size[56]' -benchmem ./counte
   `SetGCPercent(0)`/`-gc-percent 0`, не env.
 - Любое изменение hot-path обязано прикладывать before/after числа (`make bench` /
   `make bench-size`) — нельзя заявлять выигрыш без измерения.
+- A/B фичи меряется против базы `merge-base HEAD origin/main`, снятой в отдельном base-worktree с
+  уникальным именем (фича живёт в своей worktree-ветке, переключателя-флага нет — ADR-021). Долгие
+  точки (7×7) сериализуются глобальным `flock ../kt-bench.lock`: параллельные прогоны разных фич
+  искажают тайминги и peak RSS. Механика — skill `workflow`.
 - Числа решения попадают в ADR (навсегда), сюда — только изменения методологии.
 - CI (`.github/workflows/test.yml`) запускает **только тесты**: бенчмарки выбираются явным
   `-bench`-фильтром и в CI появляться не должны — инвариант (отсутствие гейтов в коде его

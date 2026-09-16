@@ -1,0 +1,87 @@
+---
+name: workflow
+description: Git-механика branch-per-feature (ADR-021) — открытие feature-worktree, база A/B через merge-base, сериализация тяжёлых бенчей, закрытие ветки (squash-merge или docs-only). Загружать при открытии/закрытии фичи, работе с /quick /task /feature, слиянии в main, откате непринятой фичи. Не про содержимое спеков (spec-writing) и не про замеры (benchmarks).
+---
+
+# Жизненный цикл фичи: ветка вместо флага (ADR-021)
+
+Переключатель фичи — **ветка**, а не флаг в коде. «Включено» = ветка смёржена, «выключено» = нет.
+Никогда не вводи feature-flag / env-ручку / kill-switch чтобы включить поведение, провести A/B или
+обеспечить откат. Параметры ввода запуска (`-size`, `-workers`, `-precompute-depth`, `-gc-percent`)
+легальны — это не переключатели фич. Обоснование решения — `specs/decisions/021-*.md`.
+
+## Именование
+
+Ветка `<NN>-<slug>` от номера плана; worktree рядом с репо: `../kt-<NN>-<slug>`. `/quick` без плана —
+ветка `chore/<slug>` (обычная ветка, без отдельного worktree).
+
+## Открытие
+
+Одна фича = один worktree = одна сессия opencode (субагенты наследуют cwd текущей сессии).
+
+```bash
+git fetch
+git worktree add ../kt-<NN>-<slug> -b <NN>-<slug> origin/main
+cd ../kt-<NN>-<slug> && opencode        # пересадить сессию внутрь worktree
+```
+
+Если оркестратор вызван на `main`/`master` (`git rev-parse --abbrev-ref HEAD`) — создаёт worktree и
+останавливается: перезапуск сессии обязателен, иначе субагенты работают не там. План/спека/код/тесты
+и черновик ADR живут только в этом worktree; `main` о фиче не знает до закрытия.
+
+## Замер A/B (без флага)
+
+База сравнения — `merge-base HEAD origin/main` (не `HEAD~1`; фича может быть многокоммитной).
+Каждый прогон в своём процессе; base-worktree с уникальным именем, чтобы параллельные фичи не
+сталкивались. Долгие точки (`make bench`/`bench-deep` на 7×7) сериализуются глобальным lock'ом —
+параллельные прогоны искажают тайминги и peak RSS:
+
+```bash
+BASE=$(git merge-base HEAD origin/main)
+git worktree add ../kt-base-<NN>-<slug> "$BASE"
+flock ../kt-bench.lock make bench-size N=<n> DEPTHS=<d>   # для HEAD и для базы по очереди
+git worktree remove ../kt-base-<NN>-<slug>
+```
+
+`make check` (fmt/vet/test) параллельными worktree не конфликтует — lock нужен только тяжёлым бенчам.
+
+## Закрытие
+
+Только при зелёном `make check`. Сначала зафиксировать фичу в feature-ветке (`git add` поимённо +
+`git commit`). `main` занят основным деревом, потому слияние идёт через него:
+
+```bash
+MAIN=$(dirname "$(cd "$(git rev-parse --git-common-dir)" && pwd)")
+git -C "$MAIN" status --porcelain        # пусто иначе — попросить освободить main
+```
+
+**Принято (squash + ff):** один коммит поверх актуального `main`:
+
+```bash
+git -C "$MAIN" merge --squash <NN>-<slug>
+git -C "$MAIN" commit -m "<сообщение в стиле репо>"
+# push — только по явному запросу: git -C "$MAIN" push
+```
+
+**Отклонено (docs-only merge):** в `main` переезжают только артефакты мышления, код — нет. Пометить
+план закрытым, завести ADR со статусом «отклонено» с числами до/после и строкой в индексе решений:
+
+```bash
+git -C "$MAIN" checkout <NN>-<slug> -- specs/plans/NN-*.md specs/decisions/NNN-*.md
+# пометить план закрытым; ADR «отклонено»; +строка в specs/decisions/README.md
+git -C "$MAIN" add specs/ && git -C "$MAIN" commit -m "docs: close plan NN (rejected) — <why>"
+```
+
+**Cleanup** (из `$MAIN`; это финал сессии фичи — новая фича = новый worktree/сессия):
+
+```bash
+git -C "$MAIN" worktree remove ../kt-<NN>-<slug>
+git -C "$MAIN" branch -D <NN>-<slug>
+```
+
+## Инварианты
+
+- В коде нет временных переключателей: их жизненный цикл (завёл → померил → удалил) запрещён — ветка
+  и так изолирует изменение, а откат = не мержить.
+- Отрицательный результат сохраняется: rejected-ADR с числами остаётся в `main` навсегда.
+- Оркестратор не переключает `main` внутри своего worktree — только через `$MAIN`.
