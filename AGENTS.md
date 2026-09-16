@@ -125,14 +125,25 @@ never assume Linux/GNU/bash:
 - Prefer repo tooling (`make` targets, `go`, `python3`) over shell cleverness.
 - Missing command → adapt to what exists and record in NOTES/CAVEATS; never guess.
 
+## Working scratch space (work/)
+
+All transient artifacts of the agent — benchmark/run logs, status files, one-off scripts, data
+analysis dumps — go under `work/<task>/` and nowhere else; never `/tmp`, `$TMPDIR`, `/var/...`:
+
+- `<task>` = task id: plan/ADR number (`plan13`, `adr019`), `chore-<slug>`, or a short slug of the
+  current work. One directory per task; artifacts of different tasks never mix.
+- Contents are gitignored (only `work/README.md` is tracked); nothing from `work/` is committed —
+  numbers that matter migrate to the ADR/plan, raw files stay local.
+- Layout inside a task dir is free; structure convention and rules — `work/README.md`.
+
 ## Shared tools (before writing scripts)
 
 Reusable utilities live in `tools/` (Python 3, stdlib-only), described in `specs/tools/`:
 
 - Before writing any script — check the index `specs/tools/README.md` and reuse what is there
   (e.g. `python3 tools/bench_table.py <log>` for markdown tables from bench logs).
-- A one-off script is allowed only when it cannot be reused outside the current task; keep it out
-  of the repo (`$TMPDIR`) and say so in NOTES.
+- A one-off script is allowed only when it cannot be reused outside the current task; it lives in
+  `work/<task>/` (see «Working scratch space») and never in `tools/`; say so in NOTES.
 - Reusable behavior → make it a tool: `tools/<name>.py` + card `specs/tools/<tool>.md` + index row,
   same change; conventions and card template — skill `tools`.
 

@@ -11,8 +11,9 @@
 # Test binary, built with `go test -c`
 *.test
 
-# Benchmark run logs and sweep driver scripts (per-run artifacts)
-bench-logs/
+# Per-task working scratch space (logs, one-off scripts) — structure in work/README.md
+work/*
+!work/README.md
 
 # Code coverage profiles and other test artifacts
 *.out
