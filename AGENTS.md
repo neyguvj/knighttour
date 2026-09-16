@@ -109,6 +109,20 @@ make bench            # Benchmarks (counter/)
 - Detect Version: Read go.mod before writing code. 
 - Target Version: Assume Go 1.26+ unless stated otherwise in go.mod.
 
+## Shell environment (before writing scripts)
+
+Before writing any shell script or one-liner, detect the environment and verify commands —
+never assume Linux/GNU/bash:
+
+- `uname -s` + active shell (`$0`/`$SHELL`); darwin ⇒ BSD userland + zsh.
+- Probe each non-builtin command first: `command -v <cmd>` (plus `--version` for sed/date/awk).
+- Known traps: BSD vs GNU flags (`sed -i ''`, `stat -f`, `date -j -f`, no `grep -P`);
+  no `timeout`/`nproc` unless coreutils (`gtimeout`); system bash is 3.2 (no associative
+  arrays / `mapfile` / `${x,,}`); zsh does not word-split unquoted `$var` and aborts on a
+  non-matching glob.
+- Prefer repo tooling (`make` targets, `go`, `python3`) over shell cleverness.
+- Missing command → adapt to what exists and record in NOTES/CAVEATS; never guess.
+
 ## Workflow
 - Before code modification
   1. read specs for given `specs/` folder
