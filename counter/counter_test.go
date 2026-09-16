@@ -344,7 +344,7 @@ func TestTaskStackClaimsFollowEffectiveBatch(t *testing.T) {
 			batch := effectiveBatch(tt.records, consumers)
 			require.Equal(t, tt.wantClaim, batch, "the formula must produce the claimed granularity")
 
-			stack := newTaskStack(max(min(consumers*dispatchStackCapacity, tt.records), 1), batch)
+			stack := newTaskStack(max(min(consumers*dispatchStackCapacity, tt.records), 1), batch, false)
 			flush := make([]cache.Entry, batch)
 			for range tt.records / batch {
 				stack.push(flush)
@@ -377,22 +377,30 @@ func TestTaskStackClaimsFollowEffectiveBatch(t *testing.T) {
 // consumers exactly once (specs/counter.md): the parallel total equals the
 // sequential Σ w·f(task) reference and the phase completes exactly ItemsCount
 // tasks, whatever the worker count — including a below-ceiling table with the
-// Beff formula active.
+// Beff formula active. The invariant is claim-order independent, so the whole
+// table runs under LIFO and FIFO alike (plan-13 contrast handle).
 func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
 	tests := []struct {
 		name  string
 		depth int
+		fifo  bool
 	}{
 		// The cache keys must sit at the counting stop depth: with a mismatched
 		// table every memo lookup misses and f(task) is zero for all records.
 		{name: "table above the batch ceiling", depth: 4},
 		{name: "table below the batch ceiling, formula active", depth: 1},
+		{name: "table above the batch ceiling, fifo claims", depth: 4, fifo: true},
+		{name: "table below the batch ceiling, formula active, fifo claims", depth: 1, fifo: true},
 	}
+
+	savedFIFO := dispatchClaimFIFO
+	defer func() { dispatchClaimFIFO = savedFIFO }()
 
 	c := NewCounter(graph.New(5))
 	ctx := context.Background()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			dispatchClaimFIFO = tt.fifo
 			taskCache := cache.NewCache()
 			for _, e := range c.generateIntermediate(ctx, monitoring.NewFakeMonitor(), 4, tt.depth) {
 				taskCache.Set(e.Path, e.Weight)
@@ -451,15 +459,20 @@ func TestCountTasksForcedOverflow(t *testing.T) {
 // The stack is the phase's only hand-off (specs/counter.md): concurrent
 // producers must deliver every record exactly once to a single consumer at any
 // capacity — capacity 1 forces every flush through a full-stack block, and a
-// batch wider than the capacity splits it across grabs.
+// batch wider than the capacity splits it across grabs. Exact-once holds for
+// both claim orders (the plan-13 FIFO contrast must not lose or duplicate).
 func TestTaskStackExactOnce(t *testing.T) {
 	tests := []struct {
 		name     string
 		capacity int
+		fifo     bool
 	}{
-		{name: "capacity 1, every flush blocks", capacity: 1},
-		{name: "capacity 2", capacity: 2},
-		{name: "capacity 5", capacity: 5},
+		{name: "capacity 1 lifo, every flush blocks", capacity: 1},
+		{name: "capacity 1 fifo, every flush blocks", capacity: 1, fifo: true},
+		{name: "capacity 2 lifo", capacity: 2},
+		{name: "capacity 2 fifo", capacity: 2, fifo: true},
+		{name: "capacity 5 lifo", capacity: 5},
+		{name: "capacity 5 fifo", capacity: 5, fifo: true},
 	}
 
 	const producers, perProducer = 4, 256
@@ -471,7 +484,7 @@ func TestTaskStackExactOnce(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stack := newTaskStack(tt.capacity, 16)
+			stack := newTaskStack(tt.capacity, 16, tt.fifo)
 			var lane atomic.Uint64
 			var wg sync.WaitGroup
 			wg.Add(producers)
@@ -510,6 +523,67 @@ func TestTaskStackExactOnce(t *testing.T) {
 			assert.Equal(t, want, got, "every record delivered exactly once at capacity %d", tt.capacity)
 		})
 	}
+}
+
+// The claim order is the open plan-13 contrast point (bench handle
+// BENCH_COUNT_ORDER): on one fixed push/pop sequence LIFO hands out the newest
+// entries first while FIFO preserves the push order. One pop of the FIFO run
+// necessarily reads across the ring's end (the wrapped claim), and every pop
+// reuses the same scratch buffer, as consumers do.
+func TestTaskStackClaimOrder(t *testing.T) {
+	tests := []struct {
+		name       string
+		wantClaims [][]uint64
+		fifo       bool
+	}{
+		{name: "lifo claims newest first", wantClaims: [][]uint64{{2, 3}, {1}, {4, 5}}},
+		{name: "fifo preserves push order", fifo: true, wantClaims: [][]uint64{{1, 2}, {3}, {4, 5}}},
+	}
+
+	const capacity, batch = 4, 2
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			stack := newTaskStack(capacity, batch, tt.fifo)
+			scratch := make([]cache.Entry, 0, batch)
+			pop := func() []uint64 {
+				var ok bool
+				scratch, ok = stack.pop(scratch[:0])
+				if !ok {
+					return nil
+				}
+				assert.LessOrEqual(t, len(scratch), batch, "a claim never exceeds the batch size")
+				return weightsOf(scratch)
+			}
+
+			stack.push(entriesOf(1, 2, 3)) // three of four slots live
+			claims := make([][]uint64, 0, len(tt.wantClaims))
+			claims = append(claims, pop(), pop())
+			stack.push(entriesOf(4, 5)) // wraps the ring tail after the odd claim
+			claims = append(claims, pop())
+			stack.close()
+
+			assert.Equal(t, tt.wantClaims, claims)
+			assert.Nil(t, pop(), "closed and drained ends the consumer loop")
+		})
+	}
+}
+
+// entriesOf builds a flush batch from weights, paths irrelevant to ordering.
+func entriesOf(weights ...uint64) []cache.Entry {
+	out := make([]cache.Entry, len(weights))
+	for i, w := range weights {
+		out[i] = cache.Entry{Weight: w}
+	}
+	return out
+}
+
+// weightsOf flattens the weights of a claimed batch.
+func weightsOf(batch []cache.Entry) []uint64 {
+	out := make([]uint64, len(batch))
+	for i, e := range batch {
+		out[i] = e.Weight
+	}
+	return out
 }
 
 // cancelSpyMonitor cancels its context the first time any paths are reported

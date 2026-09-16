@@ -49,6 +49,14 @@ var dispatchClaimBatch = 16
 // handle BENCH_COUNT_C, no production flag).
 var dispatchGranularityC = 4
 
+// dispatchClaimFIFO switches the counting consumers' claim side from the
+// stack top (LIFO — the production contract of specs/counter.md) to the ring
+// head (FIFO). Bench-only contrast handle BENCH_COUNT_ORDER=lifo|fifo for the
+// open plan-13 point "LIFO advantage claimed without a FIFO contrast"; the
+// counted total is order-invariant (specs/counter.md), so only scheduling
+// changes. There is no production flag and the default stays LIFO.
+var dispatchClaimFIFO = false
+
 // defaultPrecomputeDepths is the per-board default split depth: the global
 // minimum of wall time on each board's measured depth window (ADR-017 — peak
 // RSS is a reference metric, not a gate). 8×8 keeps an unmeasured placeholder
@@ -188,7 +196,7 @@ func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, wo
 	// Small tables fit into the stack entirely (producers never block); big
 	// ones keep the K-deep backpressure bound per consumer (specs/counter.md).
 	capacity := max(min(consumers*max(dispatchStackCapacity, 1), records), 1)
-	stack := newTaskStack(capacity, batch)
+	stack := newTaskStack(capacity, batch, dispatchClaimFIFO)
 
 	var total atomic.Uint64
 	var wg sync.WaitGroup
@@ -241,44 +249,59 @@ func (c *Counter) countStackTasks(ctx context.Context, monitor monitoring.Monito
 	}
 }
 
-// taskStack is the shared bounded LIFO stack of record copies between the
+// taskStack is the shared bounded buffer of record copies between the
 // Cache.Each producer(s) and the counting consumers (plan 13, the class-mode
 // stack of ADR-010 without drain and without LPT): producers push flush
-// batches, consumers claim up to batch entries per mutex grab from the top —
-// newest first. The capacity is fixed at construction and never grows; a
-// producer on a full stack parks until a consumer frees slots. Popped entries
-// are copied into the claimer's scratch buffer, so slots are reusable at once.
-// closed marks the end of production; consumers exit on closed-and-empty —
-// no entry ever appears after that, so it is the phase's end.
+// batches, consumers claim up to batch entries per mutex grab — from the top
+// (LIFO, newest first: the production default) or from the head (FIFO, oldest
+// first: the bench-only contrast behind BENCH_COUNT_ORDER). The preallocated
+// ring of slots never grows and claims are O(1): live entries occupy
+// [head, head+count) modulo cap, so a push writes at the tail and a pop reads
+// its own end, each capped at the contiguous run to the array's end (the wrap
+// continues on the next grab — push already loops, pop splits via
+// appendSlots). LIFO never moves head, so its ring degenerates to the plain
+// top-indexed stack: no extra copy or branch cost on the production path.
+// Popped entries are copied into the claimer's scratch buffer, so slots are
+// reusable at once. closed marks the end of production; consumers exit on
+// closed-and-empty — no entry ever appears after that, so it is the phase's
+// end.
 type taskStack struct {
 	notEmpty *sync.Cond
 	notFull  *sync.Cond
 	slots    []cache.Entry
-	count    int
+	head     int // ring index of the oldest live entry (FIFO claim side)
+	count    int // live entries; the newest sits at (head+count-1) mod cap
 	batch    int
+	fifo     bool // claim from head instead of top (bench contrast; default LIFO)
 	mu       sync.Mutex
 	closed   bool
 }
 
-// newTaskStack returns a stack of the given capacity (≥ 1, specs/counter.md)
-// and consumer claim size.
-func newTaskStack(capacity, batch int) *taskStack {
-	s := &taskStack{slots: make([]cache.Entry, capacity), batch: batch}
+// newTaskStack returns a stack of the given capacity (≥ 1, specs/counter.md),
+// consumer claim size, and claim order (fifo = claim from the ring head).
+func newTaskStack(capacity, batch int, fifo bool) *taskStack {
+	s := &taskStack{slots: make([]cache.Entry, capacity), batch: batch, fifo: fifo}
 	s.notEmpty = sync.NewCond(&s.mu)
 	s.notFull = sync.NewCond(&s.mu)
 	return s
 }
 
 // push appends a whole flush batch, parking while the stack is full and
-// copying as much as fits per grab (a batch may exceed the capacity). The
-// producer barrier in countTasks keeps it from racing close.
+// copying as much as fits per grab (a batch may exceed the capacity, and in
+// FIFO mode the free run may wrap). The producer barrier in countTasks keeps
+// it from racing close.
 func (s *taskStack) push(batch []cache.Entry) {
 	for len(batch) > 0 {
 		s.mu.Lock()
 		for s.count == len(s.slots) {
 			s.notFull.Wait()
 		}
-		n := copy(s.slots[s.count:], batch)
+		tail := (s.head + s.count) % len(s.slots)
+		// The free slots run from tail forward; the contiguous prefix ends at
+		// min(total free, distance to the array end). Under LIFO head is 0,
+		// making this exactly copy(slots[count:], batch) as before.
+		run := min(len(s.slots)-s.count, len(s.slots)-tail)
+		n := copy(s.slots[tail:tail+run], batch)
 		s.count += n
 		s.mu.Unlock()
 		// Broadcast, not Signal: one flush can feed several consumers parked
@@ -289,10 +312,11 @@ func (s *taskStack) push(batch []cache.Entry) {
 	}
 }
 
-// pop claims the newest min(batch, count) entries — the LIFO top — copying
-// them into dst (capacity ≥ batch), so the slots are reusable immediately.
-// ok is false once the stack is closed and drained: the consumer's exit
-// condition; parking on empty waits for a push or for close.
+// pop claims min(batch, count) entries — the newest (LIFO top) or the oldest
+// (FIFO head) — copying them into dst (capacity ≥ batch) in push order, so
+// the slots are reusable immediately. ok is false once the stack is closed
+// and drained: the consumer's exit condition; parking on empty waits for a
+// push or for close.
 func (s *taskStack) pop(dst []cache.Entry) ([]cache.Entry, bool) {
 	s.mu.Lock()
 	for s.count == 0 && !s.closed {
@@ -302,9 +326,16 @@ func (s *taskStack) pop(dst []cache.Entry) ([]cache.Entry, bool) {
 		s.mu.Unlock()
 		return dst[:0], false
 	}
-	lo := s.count - min(s.batch, s.count)
-	dst = append(dst, s.slots[lo:s.count]...)
-	s.count = lo
+	n := min(s.batch, s.count)
+	start := s.head
+	if !s.fifo {
+		start = (s.head + s.count - n) % len(s.slots) // LIFO: the newest n
+	}
+	dst = appendSlots(dst, s.slots, start, n)
+	if s.fifo {
+		s.head = (s.head + n) % len(s.slots)
+	}
+	s.count -= n
 	s.mu.Unlock()
 	s.notFull.Signal() // the producer may park on exactly this freed space
 	return dst, true
@@ -318,6 +349,16 @@ func (s *taskStack) close() {
 	s.closed = true
 	s.mu.Unlock()
 	s.notEmpty.Broadcast()
+}
+
+// appendSlots copies the n entries of the ring starting at start into dst,
+// splitting the read at the array's end when the run wraps.
+func appendSlots(dst, slots []cache.Entry, start, n int) []cache.Entry {
+	if end := start + n; end <= len(slots) {
+		return append(dst, slots[start:end]...)
+	}
+	dst = append(dst, slots[start:]...)
+	return append(dst, slots[:start+n-len(slots)]...)
 }
 
 // countOneTask runs the early-stop count-DFS for a single task and folds its

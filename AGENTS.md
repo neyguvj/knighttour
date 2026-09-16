@@ -205,5 +205,6 @@ Available benchmarks in `counter/benchmark_test.go`:
   (count-phase dominated) and grows downward, so the floor bounds the sweep runtime;
   size 8 is gated by `BENCH_8X8=1` (ADR-015). `BENCH_DEPTHS=a,b` overrides the swept depths;
   `BENCH_COUNT_K=n`/`BENCH_COUNT_B=n`/`BENCH_COUNT_C=n` override the counting-phase
-  shared-stack depth K, claim batch ceiling B and granularity constant C (plan 13
-  tuning handles, no CLI flag)
+  shared-stack depth K, claim batch ceiling B and granularity constant C;
+  `BENCH_COUNT_ORDER=lifo|fifo` switches the claim order (default lifo — the plan-13
+  LIFO/FIFO contrast point). All are tuning handles, no CLI flag

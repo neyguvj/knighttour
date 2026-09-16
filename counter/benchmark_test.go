@@ -52,11 +52,13 @@ var sweepDefaults = map[int][]int{8: {32, 30}}
 // benchDispatchKEnv, benchDispatchBEnv and benchDispatchCEnv override the
 // counting-phase shared stack knobs of plan 13 (no production flag); point
 // runs then carry e.g. BENCH_COUNT_K=2000 BENCH_COUNT_B=8 make bench-size N=7
-// DEPTHS=22.
+// DEPTHS=22. benchDispatchOrderEnv switches the claim order for the open
+// LIFO/FIFO contrast point of the same plan (default lifo).
 const (
-	benchDispatchKEnv = "BENCH_COUNT_K"
-	benchDispatchBEnv = "BENCH_COUNT_B"
-	benchDispatchCEnv = "BENCH_COUNT_C"
+	benchDispatchKEnv     = "BENCH_COUNT_K"
+	benchDispatchBEnv     = "BENCH_COUNT_B"
+	benchDispatchCEnv     = "BENCH_COUNT_C"
+	benchDispatchOrderEnv = "BENCH_COUNT_ORDER"
 )
 
 // toursExpected is the number of open tours (all symmetries counted) per board
@@ -91,12 +93,31 @@ func BenchmarkCountAllTours(b *testing.B) {
 }
 
 // applyDispatchKnobs overrides the shared-stack knobs once per benchmark
-// process when BENCH_COUNT_K / BENCH_COUNT_B / BENCH_COUNT_C are set (plan 13
-// tuning handles).
+// process when BENCH_COUNT_K / BENCH_COUNT_B / BENCH_COUNT_C /
+// BENCH_COUNT_ORDER are set (plan 13 tuning handles).
 func applyDispatchKnobs(b *testing.B) {
 	applyPositiveEnv(b, benchDispatchKEnv, func(v int) { dispatchStackCapacity = v })
 	applyPositiveEnv(b, benchDispatchBEnv, func(v int) { dispatchClaimBatch = v })
 	applyPositiveEnv(b, benchDispatchCEnv, func(v int) { dispatchGranularityC = v })
+	applyOrderEnv(b)
+}
+
+// applyOrderEnv switches the claim order for the plan-13 LIFO/FIFO contrast:
+// BENCH_COUNT_ORDER=lifo (default) or fifo; a present but unknown value fails
+// the run.
+func applyOrderEnv(b *testing.B) {
+	s := os.Getenv(benchDispatchOrderEnv)
+	if s == "" {
+		return
+	}
+	switch strings.ToLower(s) {
+	case "lifo":
+		dispatchClaimFIFO = false
+	case "fifo":
+		dispatchClaimFIFO = true
+	default:
+		b.Fatalf("%s: want lifo or fifo, got %q", benchDispatchOrderEnv, s)
+	}
 }
 
 // applyPositiveEnv reads an int env handle and applies it when set; a present
