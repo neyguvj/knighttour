@@ -49,8 +49,10 @@ skill `workflow`.
 - `specs/plans/NN-*.md` — not-yet-canonical optimization ideas (hypothesis → design → steps →
   success metrics+threshold → risks → specs touched). On acceptance → spec + ADR.
 - `specs/benchmarks.md` — benchmark methodology. `docs/requirements.md` — task spec & reference numbers.
+- `specs/tools/README.md` — index of reusable utilities (`tools/`), one card `specs/tools/<tool>.md`
+  per tool. Reuse before writing scripts (see «Shared tools»).
 - Authoring guides are skills: `spec-writing`, `plan-writing` (loaded when editing `specs/`),
-  `readme-writing` (loaded when editing `README.md`).
+  `readme-writing` (loaded when editing `README.md`), `tools` (loaded when adding a reusable script).
 
 ## README (showcase)
 
@@ -122,6 +124,17 @@ never assume Linux/GNU/bash:
   non-matching glob.
 - Prefer repo tooling (`make` targets, `go`, `python3`) over shell cleverness.
 - Missing command → adapt to what exists and record in NOTES/CAVEATS; never guess.
+
+## Shared tools (before writing scripts)
+
+Reusable utilities live in `tools/` (Python 3, stdlib-only), described in `specs/tools/`:
+
+- Before writing any script — check the index `specs/tools/README.md` and reuse what is there
+  (e.g. `python3 tools/bench_table.py <log>` for markdown tables from bench logs).
+- A one-off script is allowed only when it cannot be reused outside the current task; keep it out
+  of the repo (`$TMPDIR`) and say so in NOTES.
+- Reusable behavior → make it a tool: `tools/<name>.py` + card `specs/tools/<tool>.md` + index row,
+  same change; conventions and card template — skill `tools`.
 
 ## Workflow
 - Before code modification

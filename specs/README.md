@@ -49,6 +49,7 @@ graph.New(N) → counter.ParallelCountWithDepth(ctx, monitor, workers, depth)
 | Почему принято решение + замеры | `specs/decisions/NNN-*.md` (см. [индекс](decisions/README.md)) |
 | Гипотезы оптимизации (гипотеза→дизайн→шаги→метрики→риски) | `specs/plans/NN-*.md` |
 | Методология бенчей | `specs/benchmarks.md` |
+| Переиспользуемые скрипты-утилиты | код `tools/*.py`, карточка `specs/tools/<tool>.md`, строка в [индекс](tools/README.md) |
 | ТЗ, эталонные числа | `docs/requirements.md` |
 
 ## Проверки

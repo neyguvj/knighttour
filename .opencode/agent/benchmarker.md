@@ -19,8 +19,10 @@ temperature: 0.1
 
 1. Прочитай `specs/benchmarks.md`. Выбери точки: минимально достаточные для вывода (обычно
    одна доска + пара глубин; 7×7 — только если явно запрошено, это часы). Перед своими
-   shell-командами (flock, worktree-склейки, парсинг логов) — секция AGENTS.md «Shell environment»:
-   определи ОС/shell и проверь каждую утилиту через `command -v`; не угадывай флаги GNU-vs-BSD.
+   shell-командами (flock, worktree-склейки, парсинг логов) — сними индекс `specs/tools/README.md`
+   (AGENTS.md «Shared tools»): рендер таблиц — `tools/bench_table.py`, не пиши свой парсер;
+   затем секция AGENTS.md «Shell environment»: определи ОС/shell и проверь каждую утилиту через
+   `command -v`; не угадывай флаги GNU-vs-BSD.
 2. **База и HEAD в отдельных процессах** (peak RSS — максимум на процесс и не убывает):
    - базу меряй из чистого worktree с уникальным именем (параллельные фичи не должны сталкиваться):
      `git worktree add ../kt-base-<slug> <BASE_REF>`;
