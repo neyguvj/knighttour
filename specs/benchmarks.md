@@ -17,7 +17,9 @@ make bench-size N=7 [DEPTHS=20,22]   # один размер ОТДЕЛЬНЫМ 
 make bench-8x8 DEPTHS=32             # точечный прогон 8×8 (-timeout=24h)
 make bench-table LOG=bench.log       # рендер markdown-таблиц (tools/bench_table.py)
 
-# напрямую: без фильтра гонятся ВСЕ доски (часы/дни) — размер перечисляй явно:
+# напрямую: без фильтра гонятся ВСЕ доски (часы/дни) — размер перечисляй явно;
+# для size8 всегда добавляй и фильтр глубин (DEPTHS в make, ^depth(a|b)$ здесь):
+# полный свип 32 точек × часы ≈ недели
 go test -v -run='^$' -bench='BenchmarkCountAllTours/size[56]' -benchmem ./counter/
 ```
 
