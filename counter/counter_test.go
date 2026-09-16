@@ -278,17 +278,27 @@ func TestGCPercentAppliesAndRestores(t *testing.T) {
 	}
 }
 
+// orDefault maps a zero table column to the production knob value, so rows
+// only spell out the knob they override.
+func orDefault(value, def int) int {
+	if value == 0 {
+		return def
+	}
+	return value
+}
+
 // The effective flush/claim granularity Beff of plan 13 is pinned at its formula
 // boundaries (specs/counter.md): per-record while records ≤ consumers·C, ceiling B
 // once records ≥ B·consumers·C. The rows are the measured 6×6 regression shapes and
-// the saturation edge at workers = 14 (integer division), plus both knob overrides.
+// the saturation edge at workers = 14 (integer division); the knobs are explicit
+// arguments (production defaults when the column is zero), never package state.
 func TestEffectiveBatch(t *testing.T) {
 	tests := []struct {
 		name    string
 		records int
 		workers int
-		claimB  int // 0 keeps the default ceiling B
-		factorC int // 0 keeps the default constant C
+		claimB  int // 0 keeps the production ceiling B
+		factorC int // 0 keeps the production constant C
 		want    int
 	}{
 		{name: "empty table", records: 0, workers: 8, want: 1},
@@ -307,17 +317,10 @@ func TestEffectiveBatch(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			savedB, savedC := dispatchClaimBatch, dispatchGranularityC
-			defer func() { dispatchClaimBatch, dispatchGranularityC = savedB, savedC }()
-			if tt.claimB > 0 {
-				dispatchClaimBatch = tt.claimB
-			}
-			if tt.factorC > 0 {
-				dispatchGranularityC = tt.factorC
-			}
-
 			consumers := max(min(tt.workers, tt.records), 1)
-			assert.Equal(t, tt.want, effectiveBatch(tt.records, consumers))
+			claimB := orDefault(tt.claimB, dispatchClaimBatch)
+			factorC := orDefault(tt.factorC, dispatchGranularityC)
+			assert.Equal(t, tt.want, effectiveBatch(tt.records, consumers, claimB, factorC))
 		})
 	}
 }
@@ -341,10 +344,10 @@ func TestTaskStackClaimsFollowEffectiveBatch(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			consumers := max(min(workers, tt.records), 1)
-			batch := effectiveBatch(tt.records, consumers)
+			batch := effectiveBatch(tt.records, consumers, dispatchClaimBatch, dispatchGranularityC)
 			require.Equal(t, tt.wantClaim, batch, "the formula must produce the claimed granularity")
 
-			stack := newTaskStack(max(min(consumers*dispatchStackCapacity, tt.records), 1), batch, false)
+			stack := newTaskStack(max(min(consumers*dispatchStackCapacity, tt.records), 1), batch)
 			flush := make([]cache.Entry, batch)
 			for range tt.records / batch {
 				stack.push(flush)
@@ -373,55 +376,62 @@ func TestTaskStackClaimsFollowEffectiveBatch(t *testing.T) {
 	}
 }
 
+// taskCacheAtDepth materializes the gen-A table of one depth as a standalone
+// task-cache: its keys sit exactly at the counting stop level, so every memo
+// lookup of countTasks can hit (with a mismatched table f(task) is zero).
+func taskCacheAtDepth(c *Counter, ctx context.Context, depth int) *cache.Cache {
+	taskCache := cache.NewCache()
+	for _, e := range c.generateIntermediate(ctx, monitoring.NewFakeMonitor(), 4, depth) {
+		taskCache.Set(e.Path, e.Weight)
+	}
+	return taskCache
+}
+
+// sequentialTotal computes the Σ w·f(task) reference of a whole table with a
+// single-worker walk — the baseline the stack dispatch must reproduce. The
+// 5x5 total is asserted too, or every dispatch equality against it is vacuous.
+func sequentialTotal(t *testing.T, c *Counter, ctx context.Context, taskCache *cache.Cache, depth int) uint64 {
+	t.Helper()
+	want := uint64(0)
+	require.NoError(t, taskCache.Each(ctx, 1, func(_ context.Context, p path.Path, w uint64) error {
+		res := c.searcher.CountPathsWithCacheReversal(ctx, p, taskCache, depth)
+		want += uint64(res.TotalPathsFound) * w
+		return nil
+	}))
+	assert.Equal(t, uint64(1728), want, "the sequential reference must count the whole 5x5 tour total")
+	return want
+}
+
 // The counting stack dispatch delivers every task-cache record to the
 // consumers exactly once (specs/counter.md): the parallel total equals the
 // sequential Σ w·f(task) reference and the phase completes exactly ItemsCount
 // tasks, whatever the worker count — including a below-ceiling table with the
-// Beff formula active. The invariant is claim-order independent, so the whole
-// table runs under LIFO and FIFO alike (plan-13 contrast handle).
+// Beff formula active. LIFO is the only claim order (ADR-020).
 func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
 	tests := []struct {
 		name  string
 		depth int
-		fifo  bool
 	}{
-		// The cache keys must sit at the counting stop depth: with a mismatched
-		// table every memo lookup misses and f(task) is zero for all records.
 		{name: "table above the batch ceiling", depth: 4},
 		{name: "table below the batch ceiling, formula active", depth: 1},
-		{name: "table above the batch ceiling, fifo claims", depth: 4, fifo: true},
-		{name: "table below the batch ceiling, formula active, fifo claims", depth: 1, fifo: true},
 	}
-
-	savedFIFO := dispatchClaimFIFO
-	defer func() { dispatchClaimFIFO = savedFIFO }()
 
 	c := NewCounter(graph.New(5))
 	ctx := context.Background()
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dispatchClaimFIFO = tt.fifo
-			taskCache := cache.NewCache()
-			for _, e := range c.generateIntermediate(ctx, monitoring.NewFakeMonitor(), 4, tt.depth) {
-				taskCache.Set(e.Path, e.Weight)
-			}
+			taskCache := taskCacheAtDepth(c, ctx, tt.depth)
 			items := taskCache.ItemsCount()
 			require.Positive(t, items)
 			if tt.depth == 1 {
 				require.Less(t, items, dispatchClaimBatch, "the table must stay below the batch ceiling")
 			}
 
-			want := uint64(0)
-			require.NoError(t, taskCache.Each(ctx, 1, func(_ context.Context, p path.Path, w uint64) error {
-				res := c.searcher.CountPathsWithCacheReversal(ctx, p, taskCache, tt.depth)
-				want += uint64(res.TotalPathsFound) * w
-				return nil
-			}))
-			assert.Equal(t, uint64(1728), want, "the sequential reference must count the whole 5x5 tour total, or the dispatch equality below is vacuous")
+			want := sequentialTotal(t, c, ctx, taskCache, tt.depth)
 
 			for _, workers := range []int{1, 4, 8} {
 				fm := monitoring.NewFakeMonitor()
-				got := c.countTasks(ctx, fm, workers, taskCache, tt.depth)
+				got := c.countTasks(ctx, fm, workers, taskCache, tt.depth, dispatchStackCapacity)
 				assert.Equal(t, want, got, "workers=%d: dispatch must not drop or duplicate records", workers)
 				counting := fm.Phase("counting")
 				assert.Equal(t, uint64(items), counting.Completed, "workers=%d: every record counted exactly once", workers)
@@ -431,27 +441,35 @@ func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
 	}
 }
 
-// A stack far smaller than the record count — K = 1 leaves capacity min(8,
-// records) < B below one batch, K = 2 lands it exactly on B — makes every
-// full-stack flush block under the shard RLock until the consumers drain.
-// That must neither deadlock nor change the total (specs/counter.md).
+// A stack far smaller than the record count makes every full-stack flush block
+// under the shard RLock until the consumers drain; that must neither deadlock
+// nor change the total (specs/counter.md), and stackK is the explicit seam of
+// countTasks. The 5x5 depth-4 table holds 2·B = 32 records: with workers = 8,
+// Beff = min(16, 32/(8·4)) = 1 and K = 1 caps the stack at consumers×K = 8 of
+// those 32 records; with a lone consumer Beff = min(16, 32/(1·4)) = 8, so K = 8
+// lands the capacity exactly on one batch — every flush then waits for a drain.
 func TestCountTasksForcedOverflow(t *testing.T) {
 	tests := []struct {
-		name string
-		k    int
+		name    string
+		workers int
+		k       int
 	}{
-		{name: "stack below one batch", k: 1},
-		{name: "stack of exactly one batch", k: 2},
+		{name: "K=1, stack of consumers slots", workers: 8, k: 1},
+		{name: "capacity of exactly one batch", workers: 1, k: 8},
 	}
 
-	saved := dispatchStackCapacity
-	defer func() { dispatchStackCapacity = saved }()
+	const depth = 4
+	c := NewCounter(graph.New(5))
+	ctx := context.Background()
+	taskCache := taskCacheAtDepth(c, ctx, depth)
+	require.Equal(t, 2*dispatchClaimBatch, taskCache.ItemsCount(), "the table size pins the Beff/capacity arithmetic above")
+	want := sequentialTotal(t, c, ctx, taskCache, depth)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			dispatchStackCapacity = tt.k
-			c := NewCounter(graph.New(5))
-			assert.Equal(t, uint64(1728), c.ParallelCountWithDepth(context.Background(), monitoring.NewFakeMonitor(), 8, 6))
+			fm := monitoring.NewFakeMonitor()
+			got := c.countTasks(ctx, fm, tt.workers, taskCache, depth, tt.k)
+			assert.Equal(t, want, got, "workers=%d K=%d: forced overflow must neither deadlock nor change the total", tt.workers, tt.k)
 		})
 	}
 }
@@ -459,20 +477,15 @@ func TestCountTasksForcedOverflow(t *testing.T) {
 // The stack is the phase's only hand-off (specs/counter.md): concurrent
 // producers must deliver every record exactly once to a single consumer at any
 // capacity — capacity 1 forces every flush through a full-stack block, and a
-// batch wider than the capacity splits it across grabs. Exact-once holds for
-// both claim orders (the plan-13 FIFO contrast must not lose or duplicate).
+// batch wider than the capacity splits it across grabs.
 func TestTaskStackExactOnce(t *testing.T) {
 	tests := []struct {
 		name     string
 		capacity int
-		fifo     bool
 	}{
-		{name: "capacity 1 lifo, every flush blocks", capacity: 1},
-		{name: "capacity 1 fifo, every flush blocks", capacity: 1, fifo: true},
-		{name: "capacity 2 lifo", capacity: 2},
-		{name: "capacity 2 fifo", capacity: 2, fifo: true},
-		{name: "capacity 5 lifo", capacity: 5},
-		{name: "capacity 5 fifo", capacity: 5, fifo: true},
+		{name: "capacity 1, every flush blocks", capacity: 1},
+		{name: "capacity 2", capacity: 2},
+		{name: "capacity 5", capacity: 5},
 	}
 
 	const producers, perProducer = 4, 256
@@ -484,7 +497,7 @@ func TestTaskStackExactOnce(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stack := newTaskStack(tt.capacity, 16, tt.fifo)
+			stack := newTaskStack(tt.capacity, 16)
 			var lane atomic.Uint64
 			var wg sync.WaitGroup
 			wg.Add(producers)
@@ -525,47 +538,34 @@ func TestTaskStackExactOnce(t *testing.T) {
 	}
 }
 
-// The claim order is the open plan-13 contrast point (bench handle
-// BENCH_COUNT_ORDER): on one fixed push/pop sequence LIFO hands out the newest
-// entries first while FIFO preserves the push order. One pop of the FIFO run
-// necessarily reads across the ring's end (the wrapped claim), and every pop
-// reuses the same scratch buffer, as consumers do.
-func TestTaskStackClaimOrder(t *testing.T) {
-	tests := []struct {
-		name       string
-		wantClaims [][]uint64
-		fifo       bool
-	}{
-		{name: "lifo claims newest first", wantClaims: [][]uint64{{2, 3}, {1}, {4, 5}}},
-		{name: "fifo preserves push order", fifo: true, wantClaims: [][]uint64{{1, 2}, {3}, {4, 5}}},
-	}
-
+// LIFO is the single claim order of the contract (specs/counter.md, ADR-020):
+// on one fixed push/pop sequence the stack hands out the newest entries first.
+// Every pop reuses the same scratch buffer and pushes reuse freed slots, as
+// consumers do.
+func TestTaskStackClaimsLIFO(t *testing.T) {
 	const capacity, batch = 4, 2
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			stack := newTaskStack(capacity, batch, tt.fifo)
-			scratch := make([]cache.Entry, 0, batch)
-			pop := func() []uint64 {
-				var ok bool
-				scratch, ok = stack.pop(scratch[:0])
-				if !ok {
-					return nil
-				}
-				assert.LessOrEqual(t, len(scratch), batch, "a claim never exceeds the batch size")
-				return weightsOf(scratch)
-			}
+	stack := newTaskStack(capacity, batch)
+	scratch := make([]cache.Entry, 0, batch)
 
-			stack.push(entriesOf(1, 2, 3)) // three of four slots live
-			claims := make([][]uint64, 0, len(tt.wantClaims))
-			claims = append(claims, pop(), pop())
-			stack.push(entriesOf(4, 5)) // wraps the ring tail after the odd claim
-			claims = append(claims, pop())
-			stack.close()
-
-			assert.Equal(t, tt.wantClaims, claims)
-			assert.Nil(t, pop(), "closed and drained ends the consumer loop")
-		})
+	claim := func() []uint64 {
+		var ok bool
+		scratch, ok = stack.pop(scratch[:0])
+		if !ok {
+			return nil
+		}
+		assert.LessOrEqual(t, len(scratch), batch, "a claim never exceeds the batch size")
+		return weightsOf(scratch)
 	}
+
+	stack.push(entriesOf(1, 2, 3)) // three of four slots live
+	claims := make([][]uint64, 0, 3)
+	claims = append(claims, claim(), claim())
+	stack.push(entriesOf(4, 5)) // reuses the slots freed by the odd claim
+	claims = append(claims, claim())
+	stack.close()
+
+	assert.Equal(t, [][]uint64{{2, 3}, {1}, {4, 5}}, claims)
+	assert.Nil(t, claim(), "closed and drained ends the consumer loop")
 }
 
 // entriesOf builds a flush batch from weights, paths irrelevant to ordering.

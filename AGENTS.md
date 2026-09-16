@@ -183,13 +183,13 @@ Run benchmarks with:
 
 ```bash
 make bench
-# or directly:
-go test -v -bench=. -run=^$ -benchmem ./counter/
-# full sweep including the gated 7×7 board (many hours):
+# or directly — without a filter ALL boards run (hours/days), list sizes explicitly:
+go test -v -run=^$ -bench='BenchmarkCountAllTours/size[56]' -benchmem ./counter/
+# full sweep including the slow 7×7 board (many hours):
 make bench-deep
 # one board size in its own process (required for meaningful peakRSS — it is a
 # per-process maximum): make bench-size N=7 [DEPTHS=20,22]
-# gated 8×8 point run (hours/depth): make bench-8x8 DEPTHS=32
+# 8×8 point run (hours/depth): make bench-8x8 DEPTHS=32
 # render markdown tables from a benchmark log: make bench-table LOG=bench.log
 ```
 
@@ -200,11 +200,14 @@ Available benchmarks in `counter/benchmark_test.go`:
   `writesA/op`, `writesB/op`, `prunedA/op`, `prunedB/op`, `cacheHits/op`,
   `cacheMisses/op`) plus memory (`peakRSS_MB/op` — per-process max RSS,
   `totalAllocMB/op` — per-iteration allocation delta)
-- sizes 5/6 always run; size 7 is gated by `BENCH_DEEP=1` (`make bench-deep`) and
-  stops at depth 6 (`depthFloors`) — a point at the shallow end costs ~50 min
-  (count-phase dominated) and grows downward, so the floor bounds the sweep runtime;
-  size 8 is gated by `BENCH_8X8=1` (ADR-015). `BENCH_DEPTHS=a,b` overrides the swept depths;
-  `BENCH_COUNT_K=n`/`BENCH_COUNT_B=n`/`BENCH_COUNT_C=n` override the counting-phase
-  shared-stack depth K, claim batch ceiling B and granularity constant C;
-  `BENCH_COUNT_ORDER=lifo|fifo` switches the claim order (default lifo — the plan-13
-  LIFO/FIFO contrast point). All are tuning handles, no CLI flag
+- there are NO environment variables in the benchmark code (ADR-020): which boards run is
+  decided solely by the `-bench` filter of the Makefile target (`make bench` → `size[56]`,
+  `bench-deep` → `size[567]`, `bench-8x8` → `size8`); `DEPTHS=a,b` is a pure make argument
+  translated to an anchored `^depth(a|b)$` filter (segments match unanchored — anchors keep
+  a point from dragging in depth10–19) — no match simply runs nothing. In code one table
+  remains: `depthFloors` (`{7:6}`) bounds the descending sweep (a point at the shallow end
+  costs ~50 min and grows downward); the 8×8 cap `{32,30}` is only the Makefile's *default*
+  depth filter of the size8 targets — an explicit `DEPTHS` always selects its own point
+  (ADR-015). The counting-phase knobs are fixed
+  defaults — stack depth K=10000, claim batch ceiling B=16, granularity C=4, LIFO-only
+  claims — with no runtime override handles.

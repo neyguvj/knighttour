@@ -46,9 +46,9 @@ make check    # fmt → vet → test -race → fix (автофиксы) → lint
 | `make test` | `go test -race ./...` — тесты с проверкой гонок данных |
 | `make fix` | `go fix ./...` + `golangci-lint run --fix ./...` — автофиксы современных идиом |
 | `make lint` | `golangci-lint run ./...` — статический анализ |
-| `make bench` | Бенчмарки пакета `counter/` (5×5, 6×6; 7×7/8×8 — SKIP по гейтам) |
-| `make bench-deep` | То же с `BENCH_DEEP=1`: добавляется свип 7×7 (часы) |
-| `make bench-8x8 DEPTHS=…` | Гейт-прогон 8×8 в одной точке (`BENCH_8X8=1`, часы на глубину; доска вне штатных прогонов, ADR-015) |
+| `make bench` | Бенчмарки пакета `counter/` (5×5, 6×6; остальные доски — явным `-bench`-фильтром) |
+| `make bench-deep` | То же + свип 7×7 (фильтр `size[567]`, часы) |
+| `make bench-8x8 DEPTHS=…` | Точечный прогон 8×8 (`-bench`-фильтр `size8`; часы на глубину; доска вне штатных прогонов, ADR-015) |
 | `make bench-size N=…` / `bench-table LOG=…` | Прогон одной доски отдельным процессом (честный peak RSS); рендер markdown-таблиц из лога (методология — `specs/benchmarks.md`) |
 | `make clean` | `go clean -testcache` |
 
