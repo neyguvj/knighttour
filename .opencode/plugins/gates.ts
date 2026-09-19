@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 
 // Plugin core for stateful pipeline gates (specs/gates.md «Plugin-ядро», ADR-022/023).
@@ -366,6 +366,154 @@ function mainTreeReadOnlyWhileFeatureGate(mainRoot: string): Gate {
 }
 
 // ---------------------------------------------------------------------------
+// Gate G9: heavy bench invocations require the canonical flock (ADR-025)
+// ---------------------------------------------------------------------------
+
+// Make targets running hours-long boards (7×7/8×8); `make bench` (5×5/6×6) is the one exclusion.
+const HEAVY_MAKE_TARGETS = new Set(["bench-deep", "bench-8x8", "bench-size"]);
+
+// make options consuming the following token as their value.
+const MAKE_VALUE_FLAGS = new Set(["-C", "--directory"]);
+
+// flock(1) options consuming the following token as their value (spec: `-w` and friends).
+const FLOCK_VALUE_FLAGS = new Set(["-w", "-W", "--timeout", "-c", "--command"]);
+
+// The counting benchmark every heavy bench point belongs to.
+const BENCH_NAME = "BenchmarkCountAllTours";
+
+// `size<N>` / `size[...]` selector segment inside a `-bench` value (board filter).
+const SIZE_SEGMENT = /size(?:\[[^\]]*\]|\d+)/g;
+
+// Go's flag package treats `-flag` and `--flag` alike, so both dashes match; the anchor keeps
+// `-benchmem`/`-benchtime` out. Capture group: inline `=<value>`, absent for the space form.
+const BENCH_FLAG = /^-{1,2}bench(?:=(.*))?$/;
+
+const HEAVY_BENCH_INSTRUCTION =
+  "Gate G9: heavy benchmark runs (7×7/8×8) must be serialized under the global bench lock — " +
+  "parallel feature runs distort timings and peak RSS. Rerun as " +
+  "`flock ../kt-bench.lock make bench-size N=<n> DEPTHS=<d>` from the worktree root " +
+  "(same wrapper for `bench-deep`, `bench-8x8` and a direct `go test -bench` selecting size7/size8). " +
+  "The short `make bench` (5×5/6×6) needs no lock. ADR-025.";
+
+/** Whether the make arguments starting at `from` list a heavy bench target; flags and `-C <dir>` pass. */
+function hasHeavyMakeTarget(tokens: string[], from: number): boolean {
+  for (let i = from; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (MAKE_VALUE_FLAGS.has(token)) {
+      i += 1; // consume the option value
+      continue;
+    }
+    if (token.startsWith("-")) continue;
+    if (HEAVY_MAKE_TARGETS.has(token)) return true;
+  }
+  return false;
+}
+
+/** Index of a `make` token invoking a heavy bench target, searched across the segment so wrappers (`sudo`, `env`, `time`) do not hide it; -1 otherwise. */
+function heavyMakeIndex(tokens: string[]): number {
+  for (let i = 0; i < tokens.length; i += 1) {
+    if (tokens[i] === "make" && hasHeavyMakeTarget(tokens, i + 1)) return i;
+  }
+  return -1;
+}
+
+/**
+ * Whether one unquoted `-bench` value selects heavy boards: a size segment with 7/8 (anonymous too —
+ * BenchmarkCountAllTours is the repo's only size-segmented bench, so a false block stays in the safe
+ * direction), or all boards (`.` / the named bench without a size segment). Other values are not
+ * classified; anonymous selectors without a size segment (`depth22`) are an accepted edge (ADR-025).
+ */
+function benchValueIsHeavy(value: string): boolean {
+  const v = stripQuotes(value);
+  if (v === ".") return true; // matches every benchmark and board
+  const sizes = [...v.matchAll(SIZE_SEGMENT)];
+  if (sizes.some((m) => m[0].includes("7") || m[0].includes("8"))) return true;
+  if (!v.includes(BENCH_NAME)) return false; // unrelated benchmark — not classified
+  return sizes.length === 0; // the whole bench — all boards, heavy
+}
+
+/** Whether a `go test` invocation starting at `from` selects heavy boards via `-bench`/`--bench(=<value>)`. */
+function goTestIsHeavy(tokens: string[], from: number): boolean {
+  for (let i = from; i < tokens.length; i += 1) {
+    const flag = BENCH_FLAG.exec(tokens[i]);
+    if (flag === null) continue;
+    const value = flag[1] ?? tokens[i + 1]; // the space form consumes the next token
+    if (value !== undefined && benchValueIsHeavy(value)) return true;
+  }
+  return false;
+}
+
+/** Index of a `go test` token pair whose `-bench`/`--bench` value selects heavy boards; -1 otherwise. */
+function heavyGoTestIndex(tokens: string[]): number {
+  for (let i = 0; i + 1 < tokens.length; i += 1) {
+    if (tokens[i] === "go" && tokens[i + 1] === "test" && goTestIsHeavy(tokens, i + 2)) return i;
+  }
+  return -1;
+}
+
+/** Index of the first heavy bench invocation in the segment; -1 when the segment is not under the gate. */
+function heavyInvocationIndex(tokens: string[]): number {
+  const make = heavyMakeIndex(tokens);
+  const gotest = heavyGoTestIndex(tokens);
+  if (make === -1) return gotest;
+  if (gotest === -1) return make;
+  return Math.min(make, gotest);
+}
+
+/** First non-flag argument of a `flock` invocation starting at `from` — its lock file; flags pass, value flags consume the next token. */
+function flockLockFile(tokens: string[], from: number): string | undefined {
+  for (let i = from; i < tokens.length; i += 1) {
+    const token = tokens[i];
+    if (FLOCK_VALUE_FLAGS.has(token)) {
+      i += 1; // consume the option value
+      continue;
+    }
+    if (token.startsWith("-")) continue;
+    return stripQuotes(token);
+  }
+  return undefined;
+}
+
+/** Whether a `flock` invocation before index `heavy` guards the segment with the canonical lock file. */
+function guardedByCanonicalFlock(tokens: string[], heavy: number, base: string, canonicalLock: string): boolean {
+  for (let i = 0; i < heavy; i += 1) {
+    if (tokens[i] !== "flock") continue;
+    const lock = flockLockFile(tokens, i + 1);
+    if (lock !== undefined && resolve(base, lock) === canonicalLock) return true;
+  }
+  return false;
+}
+
+/** Blocks the whole bash invocation when a segment runs a heavy bench without canonical flock before it. */
+function requireHeavyBenchFlock(command: string | undefined, base: string, canonicalLock: string): void {
+  if (command === undefined) return;
+  for (const segment of splitCommand(command)) {
+    const tokens = tokenize(segment.text);
+    const heavy = heavyInvocationIndex(tokens);
+    if (heavy === -1 || guardedByCanonicalFlock(tokens, heavy, base, canonicalLock)) continue;
+    throw new GateError(HEAVY_BENCH_INSTRUCTION);
+  }
+}
+
+/**
+ * G9: stateless observer on bash only — a segment invoking `make bench-deep|bench-8x8|bench-size`
+ * or `go test -bench` on heavy boards must be preceded in the same segment by `flock` of the
+ * canonical lock `<parent-of-main>/kt-bench.lock` (relative args resolve from `workdir`, else
+ * process cwd — the G8 base). Exit codes are never read; serialization itself is flock(1)'s job.
+ */
+function heavyBenchFlockGate(mainRoot: string): Gate {
+  const canonicalLock = resolve(dirname(mainRoot), "kt-bench.lock");
+  return {
+    id: "G9",
+    before(call) {
+      if (call.tool !== BASH_TOOL) return;
+      const base = stringField(call.args, "workdir") ?? process.cwd();
+      requireHeavyBenchFlock(commandOf(call.args), resolve(base), canonicalLock);
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Plugin core
 // ---------------------------------------------------------------------------
 
@@ -375,8 +523,12 @@ function mainTreeReadOnlyWhileFeatureGate(mainRoot: string): Gate {
  * order. A new gate is a new list entry — the core does not change.
  */
 export const GatesPlugin: Plugin = async ({ client, worktree }) => {
-  // Stamp and worktree state live here for the whole server process, shared by all sessions (ADR-023/024).
-  const gates: Gate[] = [makeCheckBeforeCommitGate(), mainTreeReadOnlyWhileFeatureGate(resolve(worktree))];
+  // Stamp and worktree state live here for the whole server process, shared by all sessions (ADR-023/024); G9 is stateless.
+  const gates: Gate[] = [
+    makeCheckBeforeCommitGate(),
+    mainTreeReadOnlyWhileFeatureGate(resolve(worktree)),
+    heavyBenchFlockGate(resolve(worktree)),
+  ];
   const logFailure: FailureLogger = (gateID, err) => logGateFailure(client, gateID, err);
 
   return {
