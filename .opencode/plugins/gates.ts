@@ -1,5 +1,5 @@
-import { existsSync } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { existsSync, readFileSync } from "node:fs";
+import { basename, dirname, extname, join, resolve } from "node:path";
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
 
 // Plugin core for stateful pipeline gates (specs/gates.md «Plugin-ядро», ADR-022/023).
@@ -514,6 +514,141 @@ function heavyBenchFlockGate(mainRoot: string): Gate {
 }
 
 // ---------------------------------------------------------------------------
+// Gate G10: a new tools/<name>.py requires its card and index row (ADR-027)
+// ---------------------------------------------------------------------------
+
+const TOOLS_DIR = "tools";
+
+// Card-name spellings accepted for a python tool: the snake_case stem as-is and its kebab-case
+// twin (`bench_table.py` ↔ `bench-table.md`); requiring one orthography would false-block.
+function cardStems(stem: string): string[] {
+  const kebab = stem.replaceAll("_", "-");
+  return kebab === stem ? [stem] : [stem, kebab];
+}
+
+/** Builds the G10 block instruction naming where the card and the index row must appear. */
+function toolCardInstruction(target: string, specsDir: string, stem: string): string {
+  const cards = cardStems(stem).map((s) => `${specsDir}/${s}.md`).join(" or ");
+  return (
+    `Gate G10: creating ${target} is blocked — a tool exists only as code + card + index row. ` +
+    `First create the card (${cards}) following the skill \`tools\` template and add a row to ` +
+    `${specsDir}/README.md mentioning "${stem}", then repeat this write. ADR-027.`
+  );
+}
+
+/** `<X>/specs/tools` catalogs for an absolute `…/tools/…py` target (any depth); empty for other shapes. */
+function toolSpecsDirs(target: string): string[] {
+  const file = basename(target);
+  if (!file.endsWith(".py") || file === ".py") return [];
+  const segments = target.split("/");
+  const dirs: string[] = [];
+  for (let i = 0; i < segments.length - 1; i += 1) {
+    if (segments[i] !== TOOLS_DIR) continue;
+    dirs.push(join(segments.slice(0, i).join("/"), "specs", TOOLS_DIR));
+  }
+  return dirs;
+}
+
+/** Whether the tools index exists and mentions one of the stem spellings (state, not format). */
+function indexMentions(specsDir: string, stems: string[]): boolean {
+  let text: string;
+  try {
+    text = readFileSync(join(specsDir, "README.md"), "utf8");
+  } catch {
+    return false; // missing/unreadable index counts as no mention — blocking is the safe side
+  }
+  return stems.some((stem) => text.includes(stem));
+}
+
+/** Whether one catalog holds a card for the stem (either spelling) and an index mention. */
+function toolCatalogReady(specsDir: string, stem: string): boolean {
+  const stems = cardStems(stem);
+  if (!stems.some((s) => existsSync(join(specsDir, `${s}.md`)))) return false;
+  return indexMentions(specsDir, stems);
+}
+
+/** Blocks a write that creates a fresh `tools/…py` whose catalog lacks the card or the index row. */
+function requireToolCard(target: string): void {
+  if (existsSync(target)) return; // editing an existing tool is free; Update/Delete patches exist anyway
+  const specsDirs = toolSpecsDirs(target);
+  if (specsDirs.length === 0) return;
+  const stem = basename(target, ".py");
+  if (specsDirs.some((dir) => toolCatalogReady(dir, stem))) return;
+  throw new GateError(toolCardInstruction(target, specsDirs[specsDirs.length - 1], stem));
+}
+
+/**
+ * G10: stateless — creating a new `tools/<name>.py` (file absent at call time) requires the card
+ * `specs/tools/<stem|stem-kebab>.md` and an index mention in `<X>/specs/tools/README.md` of the
+ * tree being written into (structural binding, not the session root); edits of existing tools and
+ * non-`.py` files pass freely. Rename = new path, same effort; reverse order stays with review.
+ */
+function toolRequiresCardGate(mainRoot: string): Gate {
+  return {
+    id: "G10",
+    before(call) {
+      if (!EDIT_TOOLS.has(call.tool) && !PATCH_TOOLS.has(call.tool)) return;
+      for (const target of targetsOf(call.tool, call.args, mainRoot)) {
+        requireToolCard(target);
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
+// Gate G11: transit artifacts (by extension) are written only under work/ (ADR-027)
+// ---------------------------------------------------------------------------
+
+// Extension-only class: edit/write carry text, so content sniffing is pointless. The list mirrors
+// the artifact lines of .gitignore plus `.log`; extending it is a decision, not a matcher patch.
+const SCRATCH_EXTENSIONS = new Set([".log", ".exe", ".dll", ".so", ".dylib", ".test", ".out", ".pyc"]);
+
+/** Builds the G11 block instruction pointing at `work/<task>/`. */
+function scratchInstruction(target: string): string {
+  return (
+    `Gate G11: writing ${target} is blocked — transient artifacts (logs, binaries, caches; by ` +
+    "extension) live under <repo>/work/<task>/ only (AGENTS.md «Working scratch space»). Rerun the " +
+    "write there; if it became a reusable script, register it via skill `tools`. Bash redirections " +
+    "are an accepted opaque class. ADR-027."
+  );
+}
+
+/** Nearest ancestor of the target holding `.git` (dir in main, file in a worktree); undefined outside any repo. */
+function repoRootOf(target: string): string | undefined {
+  for (let dir = dirname(target); ; dir = dirname(dir)) {
+    if (existsSync(join(dir, ".git"))) return dir;
+    if (dirname(dir) === dir) return undefined;
+  }
+}
+
+/** Blocks a class-extension target inside a repo tree but outside its `work/` — existing files included. */
+function requireScratchZone(target: string): void {
+  if (!SCRATCH_EXTENSIONS.has(extname(target).toLowerCase())) return;
+  const root = repoRootOf(target);
+  if (root === undefined) return; // outside any repo — external_directory/G2 territory
+  if (isInside(join(root, "work"), target)) return;
+  throw new GateError(scratchInstruction(target));
+}
+
+/**
+ * G11: stateless — edit/write/patch targets whose extension marks a transit artifact are allowed
+ * only under `<repo-root>/work/**` of the tree being written (walk-up to `.git` defines the root).
+ * No existence exemption: an already-polluted path stays blocked. Bash redirections are the
+ * accepted opaque class (G7/G8 precedent).
+ */
+function scratchStaysInWorkGate(mainRoot: string): Gate {
+  return {
+    id: "G11",
+    before(call) {
+      if (!EDIT_TOOLS.has(call.tool) && !PATCH_TOOLS.has(call.tool)) return;
+      for (const target of targetsOf(call.tool, call.args, mainRoot)) {
+        requireScratchZone(target);
+      }
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Plugin core
 // ---------------------------------------------------------------------------
 
@@ -523,11 +658,13 @@ function heavyBenchFlockGate(mainRoot: string): Gate {
  * order. A new gate is a new list entry — the core does not change.
  */
 export const GatesPlugin: Plugin = async ({ client, worktree }) => {
-  // Stamp and worktree state live here for the whole server process, shared by all sessions (ADR-023/024); G9 is stateless.
+  // Stamp and worktree state live here for the whole server process, shared by all sessions (ADR-023/024); G9–G11 are stateless.
   const gates: Gate[] = [
     makeCheckBeforeCommitGate(),
     mainTreeReadOnlyWhileFeatureGate(resolve(worktree)),
     heavyBenchFlockGate(resolve(worktree)),
+    toolRequiresCardGate(resolve(worktree)),
+    scratchStaysInWorkGate(resolve(worktree)),
   ];
   const logFailure: FailureLogger = (gateID, err) => logGateFailure(client, gateID, err);
 
