@@ -7,8 +7,8 @@ permission:
     "*": deny
     "specs/decisions/**": allow
     "work/**": allow
-    "~/work/kt-*/specs/decisions/**": allow
-    "~/work/kt-*/work/**": allow
+    "../kt-*/specs/decisions/**": allow
+    "../kt-*/work/**": allow
   task: deny
 ---
 

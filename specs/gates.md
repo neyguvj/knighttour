@@ -21,13 +21,41 @@
 |----|------|---------------|-----------|
 | G1 | permission (global) | `git push` / `git -C … push` — только подтверждение пользователя | `opencode.json → permission.bash` |
 | G2 | permission (global) | доступ к путям вне worktree: allow только `~/work/knighttour/**` и `~/work/kt-*/**`, иначе ask | `opencode.json → permission.external_directory` |
-| G3 | permission (agent `spec`) | edit/write вне `specs/**`, `work/**` и `~/work/kt-*/specs/**`, `~/work/kt-*/work/**`; запуск субагентов | `.opencode/agent/spec.md` |
-| G4 | permission (agent `benchmarker`) | edit/write вне `specs/decisions/**`, `work/**` и `~/work/kt-*/specs/decisions/**`, `~/work/kt-*/work/**`; запуск субагентов | `.opencode/agent/benchmarker.md` |
+| G3 | permission (agent `spec`) | edit/write вне `specs/**`, `work/**` и ролевых каталогов соседних worktree `../kt-*/specs/**`, `../kt-*/work/**`; запуск субагентов | `.opencode/agent/spec.md` |
+| G4 | permission (agent `benchmarker`) | edit/write вне `specs/decisions/**`, `work/**` и ролевых каталогов соседних worktree `../kt-*/specs/decisions/**`, `../kt-*/work/**`; запуск субагентов | `.opencode/agent/benchmarker.md` |
 | G5 | permission (agent `reviewer`) | любые правки (уже было) + запуск субагентов | `.opencode/agent/reviewer.md` |
 | G6 | permission (agent `coder`) | запуск субагентов | `.opencode/agent/coder.md` |
 | G7 | plugin (`gates.ts`) | `git commit` без свежего зелёного `make check` (ADR-023) | `.opencode/plugins/gates.ts` |
 | G8 | plugin (`gates.ts`) | правку основного дерева при активном feature-worktree (ADR-024) | `.opencode/plugins/gates.ts` |
 | G9 | plugin (`gates.ts`) | `make bench-deep`/`bench-8x8`/`bench-size` и прямой `go test -bench` на тяжёлые доски без flock глобального lock'а (ADR-025) | `.opencode/plugins/gates.ts` |
+
+## Слой permission: матчинг путей (ADR-026)
+
+Паттерны permission компилируются в полностью анкорированный regex по всему subject'у
+(`^…$`, флаг `s`): `*` → `.*` — любая последовательность символов (включая `/` и переводы строк),
+`?` → `.`; совпадает вся строка целиком, вхождение подстрокой — нет; **last-match-wins**,
+catch-all `"*"` ставится первым.
+Разрешён `~/`/`$HOME/` в начале паттерна — раскрывается в абсолютный путь при загрузке конфига.
+
+Форма subject'а зависит от разрешения (opencode 1.18):
+
+- `edit` (покрывает `edit`/`write`/`apply_patch`) — **путь файла относительно корня проекта
+  сессии** (`instance.worktree`). Файлы соседнего worktree выглядят как `../kt-*/…`;
+  абсолютные и тильдовые паттерны под это разрешение не матчатся никогда (под subject-строку
+  с `..` они бьются только литералом).
+- `external_directory` — абсолютный glob `<родительский каталог>/*`; здесь `~/work/kt-*/**`
+  из корневой `opencode.json` уместен и достаточен (G2).
+
+Порядок правил для агента: встроенные дефолты → глобальный/проектный `opencode.json` →
+frontmatter агента; последние выигрывают. Следствия:
+
+- `"*": deny` во frontmatter не поднять allow'ем из `opencode.json` (он стоит левее) — ролевые
+  исключения пишутся в том же frontmatter после catch-all;
+- feature-worktree по контракту сосед main-дерева (`../kt-<NN>-<slug>`), поэтому запись агента
+  в него открывается относительным паттерном `../kt-*/<ролевой каталог>/**`; запись в само
+  основное дерево — относительным `specs/**`/`work/**` (сессия живёт в main, ADR-024);
+- Совпадение — матчинг строк: permission не проверяет существование пути и не знает про
+  «активность» worktree — stateful-часть остаётся за plugin-слоем (G8).
 
 ## Plugin-ядро (`.opencode/plugins/gates.ts`)
 
@@ -162,8 +190,9 @@ peak RSS; дисциплина сериализации глобальным loc
 
 ## Ограничения и edge cases
 
-- Паттерны permission матчат строку инструмента/команды простыми wildcard'ами (`*`, `?`);
-  last-match-wins, catch-all `"*"` ставится первым.
+- Матчинг путей permission (формы subject'а, порядок правил, тильда) — в секции
+  «Слой permission: матчинг путей»; там же причина, по которой G3/G4 используют относительные
+  `../kt-*` паттерны вместо `~/work/kt-*` (ADR-026).
 - Слой permission не знает состояния (ветка, результат `make check`) — для таких проверок
   предназначен plugin-слой.
 - `ask` проходим пользователем (и авто-режимом); `deny` непроходим ни для кого, кроме правки
@@ -184,6 +213,15 @@ peak RSS; дисциплина сериализации глобальным loc
 - `cd` внутри команды матчером не отслеживается: относительный lock-аргумент резолвится от `workdir`
   инструмента. Каноническое написание, запущенное из другого каталога, бьёт по иному файлу — принятый
   edge, WORKTREE-контракт требует cwd=`$WT`.
+- Относительные `../kt-*` паттерны G3/G4 резолвятся от корня проекта сессии; контракт предполагает,
+  что opencode запущен в main-дереве (ADR-024). Запуск сессии внутри worktree переопределяет, что для
+  неё «main»: `specs/**` накроет сам worktree, а основное дерево станет `../knighttour/…` и закроется.
+- Удалённый worktree формально остаётся под паттерном (permission — матчинг строк без проверки
+  существования): запись в `<удалённый kt-*>/specs/…` воссоздала бы каталоги. Принято; WORKTREE-контракт
+  требует путь из свежего `git worktree add`, а G8 самоизлечивает своё множество (это влияет только на
+  блокировку main).
+- Чужой каталог вне `~/work/kt-*` (например `~/work/<other>`): `external_directory` даёт ask (G2), а
+  edit-слой G3/G4 — deny, и `--auto` его не снимает; двойная защита проверена эмпирически (ADR-026).
 
 ## Тесты
 
@@ -232,7 +270,22 @@ opencode должна давать блок/ask. Для plugin-гейта при
 8. негативные контроли: `git status`, `go test ./...` (без `-bench`), не-bash инструменты не блокируются;
    G9 не трогает состояние G7/G8 и не зависит от него.
 
+Сценарии приёмки G3/G4 (ADR-026; применяются со свежим процессом opencode):
+
+1. сессия в main при активном feature-worktree: агент `spec` пишет по абсолютному пути
+   `<worktree>/specs/<pkg>.md` — разрешено (файл создан);
+2. тот же агент в корень worktree (`<worktree>/README.md`) — блокируется G3 (`deny`);
+3. тот же агент в `~/work/<other>/specs/x.md` — блокируется G3 даже в `--auto`
+   (external ask автопроходится, edit-нет);
+4. `spec` пишет `specs/**` основного дерева: без активных worktree — разрешено; при активном —
+   блокируется G8 (гейт не сломан: permission пропускает, plugin снимает);
+5. `benchmarker`: `<worktree>/specs/decisions/NNN-*.md` и `<worktree>/work/<task>/log` — разрешено;
+   `<worktree>/counter/*.go` — блокируется G4; base-worktree `../kt-base-<slug>` попадает под
+   `../kt-*` (замеры пишутся в ADR основного дерева/worktree фичи, не в базу);
+6. негативный контроль: `reviewer`/`coder` не затронуты (G5/G6 без изменений).
+
 ## Связанные
 
 ADR-022 (двухслойная схема); ADR-023 (механика G7); ADR-021 (ветка вместо флага); ADR-024
-(сессия из main, механика G8); ADR-025 (механика G9); `AGENTS.md`.
+(сессия из main, механика G8); ADR-025 (механика G9); ADR-026 (относительные паттерны G3/G4 для
+feature-worktree); `AGENTS.md`.
