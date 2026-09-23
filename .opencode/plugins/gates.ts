@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
@@ -27,6 +28,12 @@ interface GateResult extends GateCall {
   metadata: unknown;
 }
 
+/** A slash-command invocation observed before its model turn (hook `command.execute.before`). */
+interface CommandInvocation {
+  name: string;
+  sessionID: string;
+}
+
 /**
  * A stateful gate (specs/gates.md): observers run in registration order;
  * `before` may throw GateError to abort the tool call, other throws are a bug.
@@ -36,6 +43,7 @@ interface Gate {
   before?(call: GateCall): void;
   after?(call: GateResult): void;
   onEvent?(event: BusEvent): void;
+  onCommand?(invocation: CommandInvocation): void;
 }
 
 /** Intentional block: the message reaches the model as the tool error (specs/gates.md). */
@@ -649,22 +657,160 @@ function scratchStaysInWorkGate(mainRoot: string): Gate {
 }
 
 // ---------------------------------------------------------------------------
+// Gate G12: a package's spec is updated before its Go code (ADR-028)
+// ---------------------------------------------------------------------------
+
+// Slash commands around the /quick bypass mark: quick marks the session, task/feature clear it.
+const QUICK_COMMAND = "quick";
+const SPEC_FIRST_COMMANDS = new Set(["task", "feature"]);
+
+// Git calls cost ~8 ms in this repo (ADR-028); a hung call must never stall an edit — on any
+// failure (including timeout) the verdict is unknown and the check passes (fail-open).
+const GIT_TIMEOUT_MS = 5000;
+
+/** Outcome of the "spec updated" git check; `unknown` (git failed / base unresolvable) passes. */
+type SpecState = "updated" | "stale" | "unknown";
+
+/** Builds the G12 instruction for a package whose spec file does not exist yet. */
+function missingSpecInstruction(target: string, specRel: string): string {
+  return (
+    `Gate G12: editing ${target} is blocked — its package has no spec at ${specRel}. Create the ` +
+    "spec first (AGENTS.md «Mandatory workflow» step 2), then repeat this edit. If the change is " +
+    "code-only and needs no spec, run it via /quick on a chore/<slug> branch. ADR-028."
+  );
+}
+
+/** Builds the G12 instruction for an existing but unmodified spec. */
+function staleSpecInstruction(target: string, specRel: string): string {
+  return (
+    `Gate G12: editing ${target} is blocked — ${specRel} shows no pending change in this tree ` +
+    "(clean working copy and unchanged since merge-base with main). Update the spec first — the " +
+    "contract for your change, or a line stating behavior/API are unchanged — then repeat this " +
+    "edit; or run a code-only change via /quick on a chore/<slug> branch. ADR-028."
+  );
+}
+
+/** Runs git in `root`; undefined on any failure (non-zero exit, timeout, missing git). */
+function gitInTree(root: string, args: string[]): string | undefined {
+  try {
+    return execFileSync("git", ["-C", root, ...args], {
+      encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: 1 << 20,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+/** `merge-base HEAD origin/main` (the A/B base of skill workflow), falling back to local `main`. */
+function branchBase(root: string): string | undefined {
+  for (const ref of ["origin/main", "main"]) {
+    const sha = gitInTree(root, ["merge-base", "HEAD", ref])?.trim();
+    if (sha !== undefined && sha !== "") return sha;
+  }
+  return undefined;
+}
+
+/**
+ * Whether the spec counts as updated in `root` at call time: dirty worktree/index (untracked
+ * included — a fresh spec) or changed since the branch base. An unresolvable base is `unknown`:
+ * no false block from infrastructure gaps (ADR-028 fail-open).
+ */
+function specState(root: string, specRel: string): SpecState {
+  const status = gitInTree(root, ["status", "--porcelain", "--", specRel]);
+  if (status === undefined) return "unknown";
+  if (status.trim() !== "") return "updated";
+  const base = branchBase(root);
+  if (base === undefined) return "unknown";
+  const diff = gitInTree(root, ["diff", "--name-only", base, "--", specRel]);
+  if (diff === undefined) return "unknown";
+  return diff.trim() === "" ? "stale" : "updated";
+}
+
+/** Repo-relative spec path of a Go target: root package → specs/main.md, <dir>/…go → specs/<dir>.md. */
+function specPathOf(root: string, target: string): string {
+  const dir = dirname(target.slice(root.length + 1));
+  return join("specs", (dir === "." ? "main" : dir) + ".md");
+}
+
+/** Whether a directory segment of the tree-relative path equals `name` (Go's ignored `testdata`);
+ * relative to the repo root so ancestor directories of the checkout can never disable the gate. */
+function underDirSegment(relPath: string, name: string): boolean {
+  return dirname(relPath).split("/").includes(name);
+}
+
+/** Positive-verdict cache key: tree root + repo-relative spec path (specs/gates.md G12). */
+function specCacheKey(root: string, specRel: string): string {
+  return `${root}\u0000${specRel}`;
+}
+
+/** Blocks a Go source edit unless the package spec exists and is updated; verified positives cache. */
+function requireFreshSpec(target: string, passed: Set<string>): void {
+  if (!target.endsWith(".go") || target.endsWith("_test.go")) return;
+  const root = repoRootOf(target); // walk-up to `.git`, as in G11; outside any repo — G2 territory
+  if (root === undefined) return;
+  if (isInside(join(root, "work"), target)) return; // scratch zone (G11's other side)
+  if (underDirSegment(target.slice(root.length + 1), "testdata")) return;
+  const specRel = specPathOf(root, target);
+  if (passed.has(specCacheKey(root, specRel))) return;
+  if (!existsSync(join(root, specRel))) throw new GateError(missingSpecInstruction(target, specRel));
+  const state = specState(root, specRel);
+  if (state === "updated") passed.add(specCacheKey(root, specRel));
+  if (state === "stale") throw new GateError(staleSpecInstruction(target, specRel));
+}
+
+/**
+ * G12: edit/write/patch of `<pkg>/*.go` (not `_test.go`, not `work/**`/`testdata/`) requires
+ * `specs/<pkg>.md` dirty in the target tree or changed since merge-base with main; a missing
+ * spec blocks with "create it". Positives cache per (root, spec), negatives never do; the cache
+ * resets on `vcs.branch.updated`. The `/quick` command marks its session as bypassed while
+ * `/task` and `/feature` clear the mark — via `command.execute.before`, because `command.executed`
+ * arrives only after the whole command turn (probe, ADR-028). State is independent of G7–G11.
+ */
+function specBeforeCodeGate(mainRoot: string): Gate {
+  const passed = new Set<string>();
+  const quickSessions = new Set<string>();
+  return {
+    id: "G12",
+    before(call) {
+      if (quickSessions.has(call.sessionID)) return;
+      if (!EDIT_TOOLS.has(call.tool) && !PATCH_TOOLS.has(call.tool)) return;
+      for (const target of targetsOf(call.tool, call.args, mainRoot)) {
+        requireFreshSpec(target, passed);
+      }
+    },
+    onCommand(invocation) {
+      if (invocation.name === QUICK_COMMAND) quickSessions.add(invocation.sessionID);
+      else if (SPEC_FIRST_COMMANDS.has(invocation.name)) quickSessions.delete(invocation.sessionID);
+    },
+    onEvent(event) {
+      if (event.type === "vcs.branch.updated") passed.clear();
+    },
+  };
+}
+
+// ---------------------------------------------------------------------------
 // Plugin core
 // ---------------------------------------------------------------------------
 
 /**
- * Gates plugin: registers one `tool.execute.before`, one `tool.execute.after`
- * and one `event` handler each, dispatching to the gate list in registration
- * order. A new gate is a new list entry — the core does not change.
+ * Gates plugin: registers one `tool.execute.before`, one `tool.execute.after`,
+ * one `command.execute.before` and one `event` handler each, dispatching to the
+ * gate list in registration order. A new gate is a new list entry — the core
+ * does not change.
  */
 export const GatesPlugin: Plugin = async ({ client, worktree }) => {
-  // Stamp and worktree state live here for the whole server process, shared by all sessions (ADR-023/024); G9–G11 are stateless.
+  // Stamp and worktree state live here for the whole server process, shared by all sessions (ADR-023/024);
+  // G9–G11 are stateless; G12 keeps its own session marks and spec cache (ADR-028).
   const gates: Gate[] = [
     makeCheckBeforeCommitGate(),
     mainTreeReadOnlyWhileFeatureGate(resolve(worktree)),
     heavyBenchFlockGate(resolve(worktree)),
     toolRequiresCardGate(resolve(worktree)),
     scratchStaysInWorkGate(resolve(worktree)),
+    specBeforeCodeGate(resolve(worktree)),
   ];
   const logFailure: FailureLogger = (gateID, err) => logGateFailure(client, gateID, err);
 
@@ -677,6 +823,12 @@ export const GatesPlugin: Plugin = async ({ client, worktree }) => {
     "tool.execute.after": async (input, output) => {
       for (const gate of gates) {
         await runGate(gate, logFailure, () => gate.after?.(gateResult(input, output)));
+      }
+    },
+    "command.execute.before": async (input) => {
+      const invocation: CommandInvocation = { name: input.command, sessionID: input.sessionID };
+      for (const gate of gates) {
+        await runGate(gate, logFailure, () => gate.onCommand?.(invocation));
       }
     },
     event: async ({ event }) => {
