@@ -144,11 +144,13 @@ const NO_ENTRY = "-";
 
 const COMMIT_INSTRUCTION =
   "Gate G7: 'git commit' is blocked — the target tree's content does not match any green " +
-  "`make check` fingerprint recorded in this opencode process (ADR-029). Run `make check` in " +
-  "the target tree, confirm it exits 0, then repeat the commit; or chain it self-guarded: " +
-  '`make check && git commit -m "..."`. Staging checked content (`git add`) is fine; any other ' +
-  "change since the check needs a fresh one. A block right after a green check means git could " +
-  "not describe the target tree — the gate fails closed.";
+  "`make check` fingerprint recorded in this opencode process (ADR-029). Run `make check` " +
+  "unpiped in the target tree (a pipe steals its exit code and cancels the stamp), confirm it " +
+  "exits 0, then repeat the commit; or chain it self-guarded from the start: " +
+  '`make check && git add … && git commit -m "..."` — a blocked call executes nothing, ' +
+  "including a `git add` chained before the commit. Staging checked content (`git add`) is fine; " +
+  "any other change since the check needs a fresh one. A block right after a green check means " +
+  "git could not describe the target tree — the gate fails closed.";
 
 // Auto-commit subcommands get the two-step detour: a check before the merge cannot attest what
 // the merge commits, so the block instruction unfolds `--no-commit` → `make check` → commit.
