@@ -54,7 +54,9 @@ git worktree remove ../kt-base-<NN>-<slug>
 
 ## Закрытие
 
-Только при зелёном `make check`. Сначала зафиксировать фичу в feature-ветке (`git add` поимённо +
+Только при зелёном `make check`. Коммит аттестует гейт G7 v2 по контентному отпечатку (ADR-029):
+проверка обязана относиться к тому дереву, где создаётся коммит, — зелёный в worktree не пропустит
+коммит в ушедший вперёд `main`. Сначала зафиксировать фичу в feature-ветке (`git add` поимённо +
 `git commit`). `main` занят основным деревом, потому слияние идёт через него:
 
 ```bash
@@ -66,6 +68,7 @@ git -C "$MAIN" status --porcelain        # пусто иначе — попро�
 
 ```bash
 git -C "$MAIN" merge --squash <NN>-<slug>
+make -C "$MAIN" check                    # аттестует пост-squash содержимое main (G7 v2)
 git -C "$MAIN" commit -m "<сообщение в стиле репо>"
 # push — только по явному запросу: git -C "$MAIN" push
 ```
@@ -76,6 +79,7 @@ git -C "$MAIN" commit -m "<сообщение в стиле репо>"
 ```bash
 git -C "$MAIN" checkout <NN>-<slug> -- specs/plans/NN-*.md specs/decisions/NNN-*.md
 # пометить план закрытым; ADR «отклонено»; +строка в specs/decisions/README.md
+make -C "$MAIN" check                    # содержимое main изменилось — аттестация перед коммитом (G7 v2)
 git -C "$MAIN" add specs/ && git -C "$MAIN" commit -m "docs: close plan NN (rejected) — <why>"
 ```
 

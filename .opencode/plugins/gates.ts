@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { basename, dirname, extname, join, resolve } from "node:path";
 import type { Plugin, PluginInput } from "@opencode-ai/plugin";
@@ -93,14 +94,11 @@ async function logGateFailure(client: PluginInput["client"], gateID: string, err
 }
 
 // ---------------------------------------------------------------------------
-// Gate G7: green `make check` stamp required by `git commit` (ADR-023)
+// Gate G7: commit-creating invocations require a green `make check` content
+// fingerprint (ADR-023; v2 — ADR-029)
 // ---------------------------------------------------------------------------
 
 const BASH_TOOL = "bash";
-
-// Tools whose invocation invalidates the stamp. opencode ≥1.18 registers the patcher as
-// `apply_patch`; `patch` is kept for id compatibility across versions.
-const MUTATING_TOOLS = new Set(["edit", "write", "patch", "apply_patch"]);
 
 // git global options that consume the following token as their value.
 const GIT_VALUE_FLAGS = new Set([
@@ -115,11 +113,49 @@ const GIT_VALUE_FLAGS = new Set([
 
 const ENV_PREFIX = /^[A-Za-z_][A-Za-z0-9_]*=.*/;
 
+// Git calls cost ~8 ms in this repo (ADR-028); a hung call must never stall a tool invocation —
+// on any failure (including timeout) the verdict is unknown. Callers decide: G7 fingerprinting
+// blocks (fail-closed, ADR-029), G12 passes (fail-open). maxBuffer scales with `ls-files` output.
+const GIT_TIMEOUT_MS = 5000;
+const GIT_MAX_BUFFER = 8 << 20;
+
+/** Runs git in `root`; undefined on any failure (non-zero exit, timeout, missing git). */
+function gitInTree(root: string, args: string[]): string | undefined {
+  try {
+    return execFileSync("git", ["-C", root, ...args], {
+      encoding: "utf8",
+      timeout: GIT_TIMEOUT_MS,
+      stdio: ["ignore", "pipe", "ignore"],
+      maxBuffer: GIT_MAX_BUFFER,
+    });
+  } catch {
+    return undefined;
+  }
+}
+
+// Subcommands that create a commit (specs/gates.md G7 v2): the explicit `commit` plus the
+// auto-commit ones. Forms that provably create no commit are exempted in the matcher: any of
+// them with `--no-commit`, and `merge --squash` / `merge --ff-only`.
+const COMMIT_SUBCOMMANDS = new Set(["commit", "merge", "cherry-pick", "revert", "rebase", "am"]);
+
+// Sentinel for "no such entry": hex digests and blob OIDs never contain `-`, so a missing
+// working copy (deleted/unreadable) and an unstaged path share one impossible value.
+const NO_ENTRY = "-";
+
 const COMMIT_INSTRUCTION =
-  "Gate G7: 'git commit' is blocked — no green 'make check' stamp in this opencode process. " +
-  "Run `make check`, confirm it exits 0, then repeat the commit; or use a self-guarded chain: " +
-  '`make check && git commit -m "..."`. ' +
-  "The stamp is set by a successful `make check` (bash) and invalidated by edit/write/patch edits.";
+  "Gate G7: 'git commit' is blocked — the target tree's content does not match any green " +
+  "`make check` fingerprint recorded in this opencode process (ADR-029). Run `make check` in " +
+  "the target tree, confirm it exits 0, then repeat the commit; or chain it self-guarded: " +
+  '`make check && git commit -m "..."`. Staging checked content (`git add`) is fine; any other ' +
+  "change since the check needs a fresh one. A block right after a green check means git could " +
+  "not describe the target tree — the gate fails closed.";
+
+// Auto-commit subcommands get the two-step detour: a check before the merge cannot attest what
+// the merge commits, so the block instruction unfolds `--no-commit` → `make check` → commit.
+const AUTO_COMMIT_INSTRUCTION =
+  COMMIT_INSTRUCTION +
+  " A pre-merge check does not attest an auto-committing merge/cherry-pick/revert/rebase/am: " +
+  "rerun it with `--no-commit` (or `merge --squash`), then `make check`, then an explicit `git commit`.";
 
 /** A command fragment between shell separators; sepBefore is the separator that ends it. */
 interface Segment {
@@ -154,36 +190,109 @@ function skipEnvPrefix(tokens: string[], from: number): number {
   return i;
 }
 
+/** Parsed `make check` segment; `dir` is its last `-C <dir>` — the invocation base. */
+interface MakeCheck {
+  dir: string | undefined;
+}
+
 /** Segment invokes `make` with target `check`; `make` flags and `-C <dir>` are allowed. */
-function isMakeCheckSegment(segment: string): boolean {
+function makeCheckOf(segment: string): MakeCheck | undefined {
   const tokens = tokenize(segment);
   let i = skipEnvPrefix(tokens, 0);
-  if (tokens[i] !== "make") return false;
+  if (tokens[i] !== "make") return undefined;
+  let dir: string | undefined;
   for (i += 1; i < tokens.length; i += 1) {
     const token = tokens[i];
     if (token === "-C" || token === "--directory") {
+      if (tokens[i + 1] !== undefined) dir = stripQuotes(tokens[i + 1]);
       i += 1; // consume the directory value
       continue;
     }
     if (token.startsWith("-")) continue;
-    if (token === "check") return true;
+    if (token === "check") return { dir };
   }
-  return false;
+  return undefined;
 }
 
-/** Segment invokes `git` with subcommand `commit`; global flags and env prefixes are allowed. */
-function isGitCommitSegment(segment: string): boolean {
+/** Segment invokes `make` with target `check`; flags and `-C <dir>` are allowed. */
+function isMakeCheckSegment(segment: string): boolean {
+  return makeCheckOf(segment) !== undefined;
+}
+
+/** A commit-creating git invocation found in one command segment. */
+interface CommitInvocation {
+  autoCommit: boolean; // merge/cherry-pick/revert/rebase/am — the block adds the two-step detour
+  dir: string | undefined; // value of the last git `-C <dir>` flag, if any
+}
+
+/**
+ * The commit-creating `git` invocation in a segment (token matcher as in v1: env prefixes and
+ * global flags pass), or undefined when the segment does not create a commit — including the
+ * provably non-committing forms `--no-commit`, `merge --squash` and `merge --ff-only`.
+ */
+function commitInvocation(segment: string): CommitInvocation | undefined {
   const tokens = tokenize(segment);
   let i = skipEnvPrefix(tokens, 0);
-  if (tokens[i] !== "git") return false;
+  if (tokens[i] !== "git") return undefined;
+  let dir: string | undefined;
   for (i += 1; i < tokens.length; i += 1) {
     const token = tokens[i];
     if (GIT_VALUE_FLAGS.has(token)) {
+      if (token === "-C" && tokens[i + 1] !== undefined) dir = stripQuotes(tokens[i + 1]);
       i += 1; // consume the option value
       continue;
     }
     if (token.startsWith("-")) continue;
-    return token === "commit";
+    if (!COMMIT_SUBCOMMANDS.has(token)) return undefined;
+    return exemptFromCommit(tokens, i) ? undefined : { autoCommit: token !== "commit", dir };
+  }
+  return undefined;
+}
+
+/** Post-subcommand flags consuming the next token as their value (commit messages etc.). */
+const MESSAGE_VALUE_FLAGS = new Set(["-m", "--message", "-F", "--file"]);
+
+/**
+ * Tokens of a raw run regrouped quote-aware like shell argv: quotes group and disappear, so a
+ * multi-word `-m "..."` message is one token and hides its literals from the exemption scan.
+ * Undefined when quoting is unbalanced — then no exemption can be trusted (conservative).
+ */
+function topLevelTokens(raw: string): string[] | undefined {
+  const tokens: string[] = [];
+  let current = "";
+  let quote: string | undefined;
+  for (const ch of raw) {
+    if (quote !== undefined) {
+      if (ch === quote) quote = undefined;
+      else current += ch;
+    } else if (ch === '"' || ch === "'") {
+      quote = ch;
+    } else if (/\s/.test(ch)) {
+      if (current !== "") tokens.push(current);
+      current = "";
+    } else {
+      current += ch;
+    }
+  }
+  if (quote !== undefined) return undefined;
+  if (current !== "") tokens.push(current);
+  return tokens;
+}
+
+/** Whether the subcommand at `at` is told to not create a commit (exemption forms, specs/gates.md). */
+function exemptFromCommit(tokens: string[], at: number): boolean {
+  // Exemptions are recognized outside quotes only: `-m "fix --no-commit handling"` commits.
+  const rest = topLevelTokens(tokens.slice(at + 1).join(" "));
+  if (rest === undefined) return false; // unbalanced quoting — keep the invocation gated
+  for (let j = 0; j < rest.length; j += 1) {
+    const token = rest[j];
+    // A message value is text, not a flag: `git commit -m --no-commit` commits (git parses it so).
+    if (MESSAGE_VALUE_FLAGS.has(token)) {
+      j += 1; // consume the option value
+      continue;
+    }
+    if (token === "--no-commit") return true;
+    if (tokens[at] === "merge" && (token === "--squash" || token === "--ff-only")) return true;
   }
   return false;
 }
@@ -202,30 +311,35 @@ function confirmedGreenExit(metadata: unknown): boolean {
   return typeof exit === "number" && exit === 0;
 }
 
+/** The last `make check` segment of a command: its index and `-C <dir>` base (the stamp target). */
+interface GreenCheck {
+  index: number;
+  dir: string | undefined;
+}
+
+/** Last `make check` in the segments (single parse per segment, newest first); none → undefined. */
+function lastMakeCheck(segments: Segment[]): GreenCheck | undefined {
+  for (let index = segments.length - 1; index >= 0; index -= 1) {
+    const check = makeCheckOf(segments[index].text);
+    if (check !== undefined) return { index, dir: check.dir };
+  }
+  return undefined;
+}
+
 /**
- * Whether a whole-line exit 0 confirms the check: true only when every segment after the last
- * matched `make check` is joined by `&&`; `; | ||` make the reported code belong to a later
- * command, so success would be unconfirmed (ADR-023: no stamp without confirmation).
+ * Whether a whole-line exit 0 confirms the check at `check`: true only when every segment after
+ * it is joined by `&&`; `; | ||` make the reported code belong to a later command, so success
+ * would be unconfirmed (ADR-023: no stamp without confirmation).
  */
-function stampsGreen(segments: Segment[]): boolean {
-  const check = segments.findLastIndex((segment) => isMakeCheckSegment(segment.text));
-  if (check === -1) return false;
+function lineExitConfirmsCheck(segments: Segment[], check: number): boolean {
   return segments.slice(check + 1).every((segment) => segment.sepBefore === "&&");
 }
 
-/** Blocks a `git commit` unless the stamp is green or an `&&`-linked earlier segment runs `make check`. */
-function requireGreenStamp(command: string | undefined, green: boolean): void {
-  if (green || command === undefined) return;
-  const segments = splitCommand(command);
-  const commit = segments.findIndex((segment) => isGitCommitSegment(segment.text));
-  if (commit === -1) return;
-  if (guardedByCheck(segments, commit)) return;
-  throw new GateError(COMMIT_INSTRUCTION);
-}
-
 /**
- * Whether the commit segment sits at the end of an all-`&&` chain containing a `make check`:
- * on a red check the chain aborts before the commit, so no stamp is needed (specs/gates.md).
+ * Whether the commit-creating segment sits at the end of an all-`&&` chain containing a
+ * `make check`: on a red check the chain aborts before the commit, so no stamp is needed
+ * (specs/gates.md). For auto-commit subcommands the exception is formal — the matcher grants
+ * it by syntax; only the block instruction carries the semantic caveat.
  */
 function guardedByCheck(segments: Segment[], commit: number): boolean {
   let start = commit;
@@ -233,25 +347,147 @@ function guardedByCheck(segments: Segment[], commit: number): boolean {
   return segments.slice(start, commit).some((segment) => isMakeCheckSegment(segment.text));
 }
 
-/** G7: passive green stamp from `make check`, required fresh at `git commit`. */
+/** Content record of one tree path at stamp time. */
+interface PathRecord {
+  work: string; // sha256 of the working-copy bytes (NO_ENTRY when unreadable/deleted)
+  index: string; // staged blob OID from `git ls-files -s` (NO_ENTRY when untracked)
+}
+
+/** A tree fingerprint: every non-ignored path → content record (specs/gates.md G7 "Отпечаток"). */
+type TreeFingerprint = Map<string, PathRecord>;
+
+/** sha256 of the file bytes; NO_ENTRY when unreadable — a distinct state from any content. */
+function contentHash(path: string): string {
+  try {
+    return createHash("sha256").update(readFileSync(path)).digest("hex");
+  } catch {
+    return NO_ENTRY;
+  }
+}
+
+/**
+ * Content fingerprint of the repo at `root`: every non-ignored path (`tracked ∪ untracked`;
+ * gitignore entries like `work/**` stay out — they take no part in the check) mapped to its
+ * working-copy hash and staged blob OID. Undefined on any git failure — callers fail closed.
+ */
+function treeFingerprint(root: string): TreeFingerprint | undefined {
+  const listed = gitInTree(root, ["ls-files", "-s", "-o", "--exclude-standard", "-z"]);
+  if (listed === undefined) return undefined;
+  const fingerprint: TreeFingerprint = new Map();
+  for (const entry of listed.split("\0")) {
+    if (entry === "") continue;
+    // `-s` entries carry `<mode> <oid> <stage>\t<path>`; `-o` (untracked) entries are bare paths.
+    const tab = entry.indexOf("\t");
+    const index = tab === -1 ? NO_ENTRY : entry.slice(0, tab).split(" ")[1];
+    const path = tab === -1 ? entry : entry.slice(tab + 1);
+    fingerprint.set(path, { work: contentHash(join(root, path)), index });
+  }
+  return fingerprint;
+}
+
+/** Paths whose working copy differs from the index (`git diff-files`); undefined on git failure. */
+function unstagedChanges(root: string): Set<string> | undefined {
+  const listed = gitInTree(root, ["diff-files", "-z", "--name-only"]);
+  if (listed === undefined) return undefined;
+  return new Set(listed.split("\0").filter((path) => path !== ""));
+}
+
+/**
+ * Whether the current tree still matches a stamped fingerprint (specs/gates.md G7): same path
+ * set, every working copy unchanged, and each index entry either unchanged or moved to exactly
+ * the checked content — `git add` between check and commit stages what was tested; any other
+ * index move (foreign blob, dropped entry) changes what would be committed.
+ */
+function fingerprintMatches(stamped: TreeFingerprint, current: TreeFingerprint, root: string): boolean {
+  if (stamped.size !== current.size) return false;
+  const moved: Array<[string, PathRecord]> = [];
+  for (const [path, want] of stamped) {
+    const now = current.get(path);
+    if (now === undefined || now.work !== want.work) return false;
+    if (now.index !== want.index) moved.push([path, now]);
+  }
+  if (moved.length === 0) return true;
+  const unstaged = unstagedChanges(root); // legal moves are staged-clean: absent from this set
+  if (unstaged === undefined) return false;
+  return moved.every(([path, now]) => now.index !== NO_ENTRY && !unstaged.has(path));
+}
+
+/** Repo holding the tree an invocation acts on: git `-C <dir>` over `workdir`/cwd, then walk-up. */
+function invocationRepo(dir: string | undefined, workdir: string | undefined): string | undefined {
+  const base = resolve(workdir ?? process.cwd());
+  return repoRootAt(dir === undefined ? base : resolve(base, dir));
+}
+
+/** Whether the repo tree currently matches one recorded green fingerprint (fail-closed on gaps). */
+function treeIsGreen(root: string | undefined, green: Set<TreeFingerprint>): boolean {
+  if (root === undefined) return false; // outside any repo — nothing was checked here
+  const current = treeFingerprint(root);
+  if (current === undefined) return false; // git failure — fail-closed (ADR-029)
+  for (const stamped of green) {
+    if (fingerprintMatches(stamped, current, root)) return true;
+  }
+  return false;
+}
+
+/** Blocks every commit-creating segment whose target tree does not match a green fingerprint. */
+function requireGreenFingerprint(
+  command: string | undefined,
+  workdir: string | undefined,
+  green: Set<TreeFingerprint>,
+): void {
+  if (command === undefined) return;
+  const segments = splitCommand(command);
+  for (let i = 0; i < segments.length; i += 1) {
+    const invocation = commitInvocation(segments[i].text);
+    if (invocation === undefined || guardedByCheck(segments, i)) continue;
+    // Each creating invocation is checked against its own target tree (specs/gates.md G7).
+    if (treeIsGreen(invocationRepo(invocation.dir, workdir), green)) continue;
+    throw new GateError(invocation.autoCommit ? AUTO_COMMIT_INSTRUCTION : COMMIT_INSTRUCTION);
+  }
+}
+
+// Green stamps live for the process lifetime; a bounded FIFO keeps memory flat in long-running
+// orchestrators — evicting the oldest fingerprint only ever costs one extra `make check` (specs/gates.md).
+const GREEN_STAMP_LIMIT = 64;
+
+/** Records the fingerprint of the tree `make check` physically ran in; no repo/git gap → no stamp. */
+function recordGreenStamp(dir: string | undefined, workdir: string | undefined, green: Set<TreeFingerprint>): void {
+  const root = invocationRepo(dir, workdir);
+  if (root === undefined) return; // not a repo — no stamp (safe direction)
+  const fingerprint = treeFingerprint(root);
+  if (fingerprint === undefined) return;
+  green.add(fingerprint);
+  while (green.size > GREEN_STAMP_LIMIT) {
+    const oldest = green.values().next();
+    if (oldest.done === true) break; // unreachable while size > limit ≥ 1
+    green.delete(oldest.value);
+  }
+}
+
+/**
+ * G7 v2: the stamp is a set of content fingerprints, not a flag. A green `make check` (bash,
+ * exit-0 confirmed) records the fingerprint of the tree it ran in; a commit-creating invocation
+ * passes only while its target tree still matches one recorded fingerprint — or it sits at the
+ * end of an all-`&&` chain started by `make check`. Invalidation by edit/write/patch tools and
+ * `file.edited` is gone: content comparison subsumes it, edits by any means (bash included)
+ * surface as a fingerprint mismatch at commit time (ADR-029).
+ */
 function makeCheckBeforeCommitGate(): Gate {
-  let green = false;
+  const green = new Set<TreeFingerprint>();
   return {
     id: "G7",
     before(call) {
-      if (call.tool === BASH_TOOL) {
-        requireGreenStamp(commandOf(call.args), green);
-        return;
-      }
-      if (MUTATING_TOOLS.has(call.tool)) green = false;
+      if (call.tool !== BASH_TOOL) return;
+      requireGreenFingerprint(commandOf(call.args), stringField(call.args, "workdir"), green);
     },
     after(call) {
       if (call.tool !== BASH_TOOL || !confirmedGreenExit(call.metadata)) return;
       const command = commandOf(call.args);
-      if (command !== undefined && stampsGreen(splitCommand(command))) green = true;
-    },
-    onEvent(event) {
-      if (event.type === "file.edited") green = false;
+      if (command === undefined) return;
+      const segments = splitCommand(command);
+      const check = lastMakeCheck(segments);
+      if (check === undefined || !lineExitConfirmsCheck(segments, check.index)) return;
+      recordGreenStamp(check.dir, stringField(call.args, "workdir"), green);
     },
   };
 }
@@ -621,12 +857,17 @@ function scratchInstruction(target: string): string {
   );
 }
 
-/** Nearest ancestor of the target holding `.git` (dir in main, file in a worktree); undefined outside any repo. */
-function repoRootOf(target: string): string | undefined {
-  for (let dir = dirname(target); ; dir = dirname(dir)) {
-    if (existsSync(join(dir, ".git"))) return dir;
-    if (dirname(dir) === dir) return undefined;
+/** The repo holding the directory `dir` — walk-up including `dir` itself; undefined outside any repo. */
+function repoRootAt(dir: string): string | undefined {
+  for (let d = dir; ; d = dirname(d)) {
+    if (existsSync(join(d, ".git"))) return d;
+    if (dirname(d) === d) return undefined;
   }
+}
+
+/** Nearest ancestor of a written target file holding `.git` (dir in main, file in a worktree). */
+function repoRootOf(target: string): string | undefined {
+  return repoRootAt(dirname(target));
 }
 
 /** Blocks a class-extension target inside a repo tree but outside its `work/` — existing files included. */
@@ -664,10 +905,6 @@ function scratchStaysInWorkGate(mainRoot: string): Gate {
 const QUICK_COMMAND = "quick";
 const SPEC_FIRST_COMMANDS = new Set(["task", "feature"]);
 
-// Git calls cost ~8 ms in this repo (ADR-028); a hung call must never stall an edit — on any
-// failure (including timeout) the verdict is unknown and the check passes (fail-open).
-const GIT_TIMEOUT_MS = 5000;
-
 /** Outcome of the "spec updated" git check; `unknown` (git failed / base unresolvable) passes. */
 type SpecState = "updated" | "stale" | "unknown";
 
@@ -688,20 +925,6 @@ function staleSpecInstruction(target: string, specRel: string): string {
     "contract for your change, or a line stating behavior/API are unchanged — then repeat this " +
     "edit; or run a code-only change via /quick on a chore/<slug> branch. ADR-028."
   );
-}
-
-/** Runs git in `root`; undefined on any failure (non-zero exit, timeout, missing git). */
-function gitInTree(root: string, args: string[]): string | undefined {
-  try {
-    return execFileSync("git", ["-C", root, ...args], {
-      encoding: "utf8",
-      timeout: GIT_TIMEOUT_MS,
-      stdio: ["ignore", "pipe", "ignore"],
-      maxBuffer: 1 << 20,
-    });
-  } catch {
-    return undefined;
-  }
 }
 
 /** `merge-base HEAD origin/main` (the A/B base of skill workflow), falling back to local `main`. */
@@ -802,8 +1025,9 @@ function specBeforeCodeGate(mainRoot: string): Gate {
  * does not change.
  */
 export const GatesPlugin: Plugin = async ({ client, worktree }) => {
-  // Stamp and worktree state live here for the whole server process, shared by all sessions (ADR-023/024);
-  // G9–G11 are stateless; G12 keeps its own session marks and spec cache (ADR-028).
+  // Green fingerprints and active-worktree state live here for the whole server process, shared
+  // by all sessions (ADR-023/024/029); G9–G11 are stateless; G12 keeps its own session marks and
+  // spec cache (ADR-028).
   const gates: Gate[] = [
     makeCheckBeforeCommitGate(),
     mainTreeReadOnlyWhileFeatureGate(resolve(worktree)),
