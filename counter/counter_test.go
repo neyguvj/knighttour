@@ -76,6 +76,25 @@ func TestCountingPhaseReportsPruning(t *testing.T) {
 		counting.Pruned, "pruned total equals the per-reason breakdown")
 }
 
+// The forced-chain write gate runs on the leaves of both generation phases and
+// its reason reaches the phase counters (specs/counter.md, ADR-030); the
+// counting phase never runs the gate, so its gate counter stays zero.
+func TestGenerationPhasesReportWriteGate(t *testing.T) {
+	g := graph.New(5)
+	counter := NewCounter(g)
+
+	fm := monitoring.NewFakeMonitor()
+	assert.Equal(t, uint64(1728), counter.ParallelCountWithDepth(context.Background(), fm, 8, 6))
+
+	genA := fm.Phase("gen A")
+	assert.Positive(t, genA.PrunedForcedChain, "gen A leaves must pass the gate")
+	genB := fm.Phase("gen B")
+	assert.Positive(t, genB.PrunedForcedChain, "gen B leaves must pass the gate")
+
+	counting := fm.Phase("counting")
+	assert.Zero(t, counting.PrunedForcedChain, "the write gate belongs to generation only")
+}
+
 func TestParallelCountWithDepthMatchesReference(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -444,32 +463,37 @@ func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
 // A stack far smaller than the record count makes every full-stack flush block
 // under the shard RLock until the consumers drain; that must neither deadlock
 // nor change the total (specs/counter.md), and stackK is the explicit seam of
-// countTasks. The 5x5 depth-4 table holds 2·B = 32 records: with workers = 8,
-// Beff = min(16, 32/(8·4)) = 1 and K = 1 caps the stack at consumers×K = 8 of
-// those 32 records; with a lone consumer Beff = min(16, 32/(1·4)) = 8, so K = 8
-// lands the capacity exactly on one batch — every flush then waits for a drain.
+// countTasks. The gated 5x5 depth-4 table (forced-chain write gate pruned its
+// dead keys, ADR-030) holds a couple dozen records: with workers = 8 the Beff
+// formula gives per-record delivery and K = 1 caps the stack at consumers×K
+// slots — below the record count, so flushes block; with a lone consumer the
+// effective batch is a handful of records and K lands the capacity exactly on
+// one batch, so every flush waits for a drain.
 func TestCountTasksForcedOverflow(t *testing.T) {
 	tests := []struct {
 		name    string
 		workers int
-		k       int
+		k       int // 0 = derive: lone-consumer capacity of exactly one batch
 	}{
 		{name: "K=1, stack of consumers slots", workers: 8, k: 1},
-		{name: "capacity of exactly one batch", workers: 1, k: 8},
+		{name: "capacity of exactly one batch", workers: 1, k: 0},
 	}
 
 	const depth = 4
 	c := NewCounter(graph.New(5))
 	ctx := context.Background()
 	taskCache := taskCacheAtDepth(c, ctx, depth)
-	require.Equal(t, 2*dispatchClaimBatch, taskCache.ItemsCount(), "the table size pins the Beff/capacity arithmetic above")
+	items := taskCache.ItemsCount()
+	require.Greater(t, items, 8, "the overflow scenario needs more records than the K=1 stack slots")
 	want := sequentialTotal(t, c, ctx, taskCache, depth)
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			consumers := max(min(tt.workers, items), 1)
+			batch := effectiveBatch(items, consumers, dispatchClaimBatch, dispatchGranularityC)
 			fm := monitoring.NewFakeMonitor()
-			got := c.countTasks(ctx, fm, tt.workers, taskCache, depth, tt.k)
-			assert.Equal(t, want, got, "workers=%d K=%d: forced overflow must neither deadlock nor change the total", tt.workers, tt.k)
+			got := c.countTasks(ctx, fm, tt.workers, taskCache, depth, orDefault(tt.k, batch))
+			assert.Equal(t, want, got, "workers=%d: forced overflow must neither deadlock nor change the total", tt.workers)
 		})
 	}
 }

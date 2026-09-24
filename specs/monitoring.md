@@ -28,6 +28,7 @@ func NewFakeMonitor() *FakeMonitor       // verbose: false — только на
 type PhaseStats struct { Tasks, Completed, Subtasks, PathsFound, CacheWrites uint64;
     CacheHits, CacheMisses uint64;
     Pruned uint64; PrunedDeadEnd, PrunedNoCont, PrunedDisconn, PrunedEndpoints uint64;
+    PrunedForcedChain uint64; // гейт записи (генерационные фазы)
     Duration time.Duration }
 
 func (m *monitor) Phase(name string) PhaseStats  // сумма одноимённых фаз
@@ -53,7 +54,8 @@ func (m *monitor) Totals() PhaseStats            // сумма по всем ф�
 [1.234s] Phase gen B | Tasks: 1200/5041 (23.8%) | Paths 0 | Writes 447520 | Pruned 129334 | ETA 3.953s
 ```
 Финальный отчёт (`Finish`): строка на фазу + итог; разбивка pruned в скобках перечисляет
-только ненулевые виды в фиксированном порядке `deadend, nocont, disconn, endpoints`.
+только ненулевые виды в фиксированном порядке
+`deadend, nocont, disconn, endpoints, chain`.
 
 ETA — линейная оценка `elapsed_phase·(total−completed)/completed`; при `completed==0` или
 `total==0` → `ETA --`, при `completed>=total` → `ETA 0s`. Сегмент `Writes` условен

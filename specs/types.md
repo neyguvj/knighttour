@@ -25,6 +25,7 @@ type Result struct {
     PrunedNoCont      int
     PrunedDisconn     int
     PrunedEndpoints   int
+    PrunedForcedChain int // гейт записи: цикл/перегруз обязательных цепочек (генерационные фазы)
 }
 
 func (r *Result) Add(other *Result)         // покомпонентное сложение (pointer — wide block)

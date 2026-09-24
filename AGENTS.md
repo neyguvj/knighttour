@@ -270,8 +270,10 @@ Available benchmarks in `counter/benchmark_test.go`:
 - `BenchmarkCountAllTours` – `-precompute-depth` sweep (`size²/2..floor`,
   descending) per board under subtests `size{N}/depth{D}`; publishes per-phase
   FakeMonitor counters as extra metrics (`genA_ms/op`, `genB_ms/op`, `cnt_ms/op`,
-  `writesA/op`, `writesB/op`, `prunedA/op`, `prunedB/op`, `cacheHits/op`,
-  `cacheMisses/op`) plus memory (`peakRSS_MB/op` — per-process max RSS,
+  `writesA/op`, `writesB/op`, `prunedA/op`, `prunedB/op`, `prunedL2A/op`,
+  `prunedL2B/op` (write-gate chain cuts per generation phase), `taskEntries/op`
+  (task-cache item count), `cacheHits/op`, `cacheMisses/op`) plus memory
+  (`peakRSS_MB/op` — per-process max RSS,
   `totalAllocMB/op` — per-iteration allocation delta)
 - there are NO environment variables in the benchmark code (ADR-020): which boards run is
   decided solely by the `-bench` filter of the Makefile target (`make bench` → `size[56]`,

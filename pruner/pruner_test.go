@@ -7,6 +7,7 @@ import (
 
 	"knighttour/graph"
 	"knighttour/state"
+	"knighttour/symmetry"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -377,5 +378,242 @@ func TestAdvanced_MatchesNaiveOnWalks(t *testing.T) {
 			st = st.Visit(n)
 			end = n
 		}
+	}
+}
+
+// --- write gate: forced-chain check (specs/pruner.md, ADR-030) ---
+
+// walkState produces a gate-shaped state (cur, todo): a random walk of the
+// given length is grown and then descended randomly for depth steps, mimicking
+// the generation leaves that feed ShouldPruneState.
+func walkState(rng *rand.Rand, g *graph.Graph, length, descend int) (int, state.State, bool) {
+	var mask state.State
+	for range 100 {
+		mask = state.Bit(rng.Intn(g.GetTotalCells()))
+		cur := bits.TrailingZeros64(uint64(mask))
+		grew := true
+		for range length - 1 {
+			var cand []int
+			for n := range g.GetNeighborMask(cur).AllVisited() {
+				if mask.IsUnvisited(n) {
+					cand = append(cand, n)
+				}
+			}
+			if len(cand) == 0 {
+				grew = false
+				break
+			}
+			cur = cand[rng.Intn(len(cand))]
+			mask = mask.Visit(cur)
+		}
+		if grew && mask.CountBits() == length {
+			break
+		}
+	}
+	if mask.CountBits() != length {
+		return 0, 0, false
+	}
+	cur := bits.TrailingZeros64(uint64(mask))
+	todo := mask.Unvisit(cur)
+	for range descend {
+		var cand []int
+		for n := range g.GetNeighborMask(cur).Intersect(todo).AllVisited() {
+			cand = append(cand, n)
+		}
+		if len(cand) == 0 {
+			break
+		}
+		cur = cand[rng.Intn(len(cand))]
+		todo = todo.Unvisit(cur)
+	}
+	return cur, todo, true
+}
+
+// bruteH counts Hamiltonian paths from cur covering todo (reference oracle).
+func bruteH(g *graph.Graph, cur int, todo state.State) uint64 {
+	if todo.IsEmpty() {
+		return 1
+	}
+	var total uint64
+	for n := range g.GetNeighborMask(cur).Intersect(todo).AllVisited() {
+		total += bruteH(g, n, todo.Unvisit(n))
+	}
+	return total
+}
+
+func TestShouldPruneState_Reasons(t *testing.T) {
+	g := graph.New(6)
+	p := New(g)
+
+	tests := []struct {
+		name       string
+		cur        int
+		todo       state.State
+		wantReason Reason
+	}{
+		{name: "clean state survives", cur: 26, todo: state.State(0x8855cc8c), wantReason: NoReason},
+		{name: "forced chain", cur: 29, todo: state.State(0x311198260), wantReason: ForcedChain},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pruned, reason := p.ShouldPruneState(tt.cur, tt.todo)
+			assert.Equal(t, tt.wantReason != NoReason, pruned)
+			assert.Equal(t, tt.wantReason, reason)
+
+			// The gate body assumes the caller already passed L0/L1 on the
+			// descent — pin that these states sit inside the contract.
+			basePruned, baseReason := p.ShouldPruneAfterVisit(tt.cur, tt.todo)
+			assert.False(t, basePruned, "precondition: L0/L1 must pass, got %v", baseReason)
+
+			if pruned {
+				assert.Zero(t, bruteH(g, tt.cur, tt.todo), "a cut state must have no completions")
+			}
+		})
+	}
+}
+
+// Gate cuts must never remove a key with nonzero completions — the soundness
+// lemma behind the write gate (specs/searcher.md), verified on walk samples
+// against the brute-force oracle. The cut reason is always ForcedChain, and
+// it must actually fire on the sample.
+func TestWriteGateCutsAreSound(t *testing.T) {
+	rng := rand.New(rand.NewSource(123)) //nolint:gosec // deterministic test seed
+	for _, size := range []int{5, 6} {
+		g := graph.New(size)
+		p := New(g)
+		cuts := 0
+		for range 10000 {
+			cur, todo, ok := walkState(rng, g, 10+rng.Intn(7), rng.Intn(5))
+			if !ok {
+				continue
+			}
+			pruned, reason := p.ShouldPruneState(cur, todo)
+			if !pruned {
+				continue
+			}
+			cuts++
+			assert.Equal(t, ForcedChain, reason, "the gate has a single reason")
+			assert.Zero(t, bruteH(g, cur, todo),
+				"size=%d gate cut of a state with completions: cur=%d todo=%s", size, cur, todo.String())
+		}
+		assert.Positive(t, cuts, "forced chain must fire on size %d sample", size)
+	}
+}
+
+// Forced-chain forcing is only sound with a pinned end; states without a
+// unique degree-1 todo vertex must never be cut by it.
+func TestForcedChainCut_RequiresFixedEnd(t *testing.T) {
+	g := graph.New(6)
+	p := New(g)
+
+	rng := rand.New(rand.NewSource(9)) //nolint:gosec // deterministic test seed
+	for range 20000 {
+		cur, todo, ok := walkState(rng, g, 12+rng.Intn(7), rng.Intn(5))
+		if !ok {
+			continue
+		}
+		if !p.forcedChainCut(cur, todo) {
+			continue
+		}
+		h := todo | state.Bit(cur)
+		deg1 := 0
+		for v := range todo.AllVisited() {
+			if g.GetNeighborMask(v).Intersect(h).CountBits() == 1 {
+				deg1++
+			}
+		}
+		assert.Equal(t, 1, deg1, "cur=%d todo=%s", cur, todo.String())
+	}
+}
+
+// countDegenerate checks one (cur, todo) with |todo| ≤ 3 against the gate — a
+// firing cut must be a true zero of the brute-force oracle — and counts the
+// reachable states that stayed alive for the non-vacuity pin.
+func countDegenerate(t *testing.T, p *Pruner, g *graph.Graph, cur int, todo state.State, alive *int) {
+	t.Helper()
+	cut, reason := p.ShouldPruneState(cur, todo)
+	reachable := bruteH(g, cur, todo) > 0
+	if cut {
+		assert.False(t, reachable, "degenerate cut of a reachable state: cur=%d todo=%s (%v)",
+			cur, todo.String(), reason)
+	}
+	if reachable {
+		*alive++
+	}
+}
+
+// Degenerate remainders (|todo| ≤ 3) run the gate on the general grounds: a
+// firing cut stays sound and every reachable state stays alive. Exhaustive
+// over cur × todo of size ≤ 3 on 5×5.
+func TestShouldPruneState_DegenerateRemainders(t *testing.T) {
+	g := graph.New(5)
+	p := New(g)
+	total := g.GetTotalCells()
+
+	alive := 0
+	for cur := range total {
+		var cells []int
+		for c := range total {
+			if c != cur {
+				cells = append(cells, c)
+			}
+		}
+		countDegenerate(t, p, g, cur, state.State(0), &alive)
+		for i := range cells {
+			countDegenerate(t, p, g, cur, state.Bit(cells[i]), &alive)
+			for j := i + 1; j < len(cells); j++ {
+				countDegenerate(t, p, g, cur, state.Bit(cells[i]).Visit(cells[j]), &alive)
+				for k := j + 1; k < len(cells); k++ {
+					countDegenerate(t, p, g, cur, state.Bit(cells[i]).Visit(cells[j]).Visit(cells[k]), &alive)
+				}
+			}
+		}
+	}
+	assert.Positive(t, alive, "reachable degenerate states must stay alive")
+}
+
+// mapPos applies a D4 transform to one board position.
+func mapPos(tf symmetry.Transform, size, pos int) int {
+	x, y := pos/size, pos%size
+	nx, ny := tf(x, y, size)
+	return nx*size + ny
+}
+
+// The gate predicate is D4-equivariant: it depends only on graph structure and
+// mask (the forced-chain condition is component-local, no connectivity needed),
+// so "dead" is an orbit property and the verdict is consistent with key
+// canonicalization (specs/pruner.md).
+func TestShouldPruneState_D4Equivariant(t *testing.T) {
+	rng := rand.New(rand.NewSource(5)) //nolint:gosec // deterministic test seed
+	for _, size := range []int{5, 6} {
+		g := graph.New(size)
+		p := New(g)
+		tfs := symmetry.GetSymmetries(size)
+
+		fired := 0
+		for range 20000 {
+			cur, todo, ok := walkState(rng, g, 8+rng.Intn(14), rng.Intn(5))
+			if !ok {
+				continue
+			}
+			wantPruned, wantReason := p.ShouldPruneState(cur, todo)
+			if wantPruned {
+				fired++
+			}
+			for _, tf := range tfs {
+				tCur := mapPos(tf, size, cur)
+				var tTodo state.State
+				for v := range todo.AllVisited() {
+					tTodo = tTodo.Visit(mapPos(tf, size, v))
+				}
+				gotPruned, gotReason := p.ShouldPruneState(tCur, tTodo)
+				assert.Equal(t, wantPruned, gotPruned, "cur=%d todo=%s", cur, todo.String())
+				if wantPruned {
+					assert.Equal(t, wantReason, gotReason, "cur=%d todo=%s", cur, todo.String())
+				}
+			}
+		}
+		assert.Positive(t, fired, "sample must contain gate cuts on size %d", size)
 	}
 }

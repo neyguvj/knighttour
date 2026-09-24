@@ -59,6 +59,8 @@ go test -v -run='^$' -bench='BenchmarkCountAllTours/size[56]' -benchmem ./counte
 | `genA_ms/op`, `genB_ms/op`, `cnt_ms/op` | тайминг фаз |
 | `writesA/op`, `writesB/op` | эмиссии в промежуточную таблицу gen A и task-cache (не уникальные ключи) |
 | `prunedA/op`, `prunedB/op` | отсечено прунером в генерации |
+| `prunedL2A/op`, `prunedL2B/op` | из них — отсечения гейта записи (причина ForcedChain) по фазам gen A / gen B |
+| `taskEntries/op` | число записей task-cache (`ItemsCount`; публикуется контуром как `Tasks` фазы counting) |
 | `cacheHits/op`, `cacheMisses/op` | lookup'ы task-cache на уровне стопа в counting |
 | `peakRSS_MB/op` | **максимум резидента процесса** (`syscall.Getrusage`) |
 | `totalAllocMB/op` | дельта `runtime.MemStats.TotalAlloc` вокруг итерации |

@@ -33,23 +33,24 @@ type phaseStats struct {
 	endTime   time.Time
 	name      string
 
-	tasks           atomic.Uint64
-	completed       atomic.Uint64
-	subtasks        atomic.Uint64 // folded ReportSubtask calls (never printed)
-	pathsFound      atomic.Uint64 // weighted paths (counting only)
-	cacheWrites     atomic.Uint64 // table emissions (gen A / gen B)
-	cacheHits       atomic.Uint64 // task-cache lookups answered (reversal counting)
-	cacheMisses     atomic.Uint64 // task-cache lookups with no entry (reversal counting)
-	prunedDeadEnd   atomic.Uint64
-	prunedNoCont    atomic.Uint64
-	prunedDisconn   atomic.Uint64
-	prunedEndpoints atomic.Uint64
+	tasks             atomic.Uint64
+	completed         atomic.Uint64
+	subtasks          atomic.Uint64 // folded ReportSubtask calls (never printed)
+	pathsFound        atomic.Uint64 // weighted paths (counting only)
+	cacheWrites       atomic.Uint64 // table emissions (gen A / gen B)
+	cacheHits         atomic.Uint64 // task-cache lookups answered (reversal counting)
+	cacheMisses       atomic.Uint64 // task-cache lookups with no entry (reversal counting)
+	prunedDeadEnd     atomic.Uint64
+	prunedNoCont      atomic.Uint64
+	prunedDisconn     atomic.Uint64
+	prunedEndpoints   atomic.Uint64
+	prunedForcedChain atomic.Uint64 // write gate: forced chain overload/cycle
 }
 
 // prunedTotal is the sum of the per-reason pruning counters.
 func (ph *phaseStats) prunedTotal() uint64 {
 	return ph.prunedDeadEnd.Load() + ph.prunedNoCont.Load() +
-		ph.prunedDisconn.Load() + ph.prunedEndpoints.Load()
+		ph.prunedDisconn.Load() + ph.prunedEndpoints.Load() + ph.prunedForcedChain.Load()
 }
 
 // duration is the phase wall time; zero while the phase is still open.
@@ -142,6 +143,7 @@ func (m *monitor) ReportSubtask(r *types.Result) {
 	ph.prunedNoCont.Add(uint64(r.PrunedNoCont))
 	ph.prunedDisconn.Add(uint64(r.PrunedDisconn))
 	ph.prunedEndpoints.Add(uint64(r.PrunedEndpoints))
+	ph.prunedForcedChain.Add(uint64(r.PrunedForcedChain))
 }
 
 // Start always anchors the run clock; only the verbose monitor spawns the
@@ -264,8 +266,8 @@ func (ph *phaseStats) hitsSegment(lowercase bool) string {
 	return fmt.Sprintf(" | %s %d/%d", name, hits, misses)
 }
 
-// pruneBreakdown renders "(deadend N, nocont N, disconn N, endpoints N)" with
-// only non-zero parts in this fixed order; empty string when nothing was
+// pruneBreakdown renders "(deadend N, nocont N, disconn N, endpoints N, chain N)"
+// with only non-zero parts in this fixed order; empty string when nothing was
 // pruned.
 func (ph *phaseStats) pruneBreakdown() string {
 	counters := [...]struct {
@@ -276,6 +278,7 @@ func (ph *phaseStats) pruneBreakdown() string {
 		{"nocont", ph.prunedNoCont.Load()},
 		{"disconn", ph.prunedDisconn.Load()},
 		{"endpoints", ph.prunedEndpoints.Load()},
+		{"chain", ph.prunedForcedChain.Load()},
 	}
 	parts := make([]string, 0, len(counters))
 	for _, c := range counters {
@@ -334,6 +337,8 @@ type PhaseStats struct {
 	PrunedDisconn   uint64
 	PrunedEndpoints uint64
 
+	PrunedForcedChain uint64 // write gate: forced chain overload/cycle
+
 	Duration time.Duration // zero while the phase is still open
 }
 
@@ -378,5 +383,6 @@ func (a *PhaseStats) add(ph *phaseStats) {
 	a.PrunedNoCont += ph.prunedNoCont.Load()
 	a.PrunedDisconn += ph.prunedDisconn.Load()
 	a.PrunedEndpoints += ph.prunedEndpoints.Load()
+	a.PrunedForcedChain += ph.prunedForcedChain.Load()
 	a.Duration += ph.duration()
 }

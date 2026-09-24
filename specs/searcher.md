@@ -12,14 +12,15 @@
 func NewSearcher(g *graph.Graph, sym *symmetry.Symmetry) *Searcher
 
 // Единственный спуск «от старта»: DFS от канонического начала до глубины depth; на листьях —
-// запись Canonicalize(state,end) с весом orbitSize в переданную таблицу cache.Cache.
-// Пишет и промежуточную таблицу фазы A (малая глубина), и task-cache напрямую (ADR-018).
-// SholdSkip(start) → пустой результат (фильтр чётности нечётных досок).
+// запись Canonicalize(state,end) с весом orbitSize в переданную таблицу cache.Cache, если лист
+// прошёл гейт записи (см. ниже). Пишет и промежуточную таблицу фазы A (малая глубина), и
+// task-cache напрямую (ADR-018). SholdSkip(start) → пустой результат (фильтр чётности нечётных
+// досок).
 func (s *Searcher) GenerateTasks(ctx context.Context, c *cache.Cache,
     start int, orbitSize uint64, depth int) types.Result
 
 // Продолжение task-генерации от канонической записи p с весом weight до depth;
-// запись уже на depth (или глубже) пишется как есть (вырожденная фаза B).
+// запись уже на depth (или глубже) пишется как есть без гейта (вырожденная фаза B).
 func (s *Searcher) ExtendTask(ctx context.Context, c *cache.Cache,
     p path.Path, weight uint64, depth int) types.Result
 
@@ -37,8 +38,15 @@ func (s *Searcher) CountPathsWithCacheReversal(ctx context.Context, p path.Path,
 | | `dfsTask` (генерация таблицы) | `dfsCount` (count с reversal) |
 |---|---|---|
 | Стоп | `CountBits(st) >= depth` | `bits == stopLevel` — ответ через `completions`; `bits >= totalCells` → 1 |
-| Действие на стопе | `c.Set(Canonicalize(st,end), weight)` | Σ по `u ∈ N(end)∩U`: `Get(canon(U,u))`, hit → `+ w/orbitSize`, промах → 0 |
-| Статистика | `CacheWrites` | `CacheHits`/`CacheMisses` на каждую проверку кэша, `TotalPathsFound` — число дополнений |
+| Действие на стопе | гейт → `c.Set(Canonicalize(st,end), weight)` | Σ по `u ∈ N(end)∩U`: `Get(canon(U,u))`, hit → `+ w/orbitSize`, промах → 0 |
+| Статистика | `CacheWrites` (фактические `Set`), прунинг гейта в `CountPrune` | `CacheHits`/`CacheMisses` на каждую проверку кэша, `TotalPathsFound` — число дополнений |
+
+**Гейт записи** в базовом случае `dfsTask`: перед `Set` вызвать
+`pruner.ShouldPruneState(end, st.Invert(totalCells))`; прунуто → `res.CountPrune(reason)` и
+записи нет (проверка идёт до канонизации — отсечённый лист её не платит). Один хук покрывает обе
+таблицы (промежуточную gen A и task-cache gen B) — спуск общий. Degenerate self-write
+`ExtendTask` (`p.State().CountBits() >= depth`) гейта не проходит: это ровно тот же ключ/пара,
+что лист фазы A, уже пропустивший гейт той же проверкой.
 
 `dfsTask` — единственный генерационный спуск: пишут им и промежуточную таблицу фазы A, и
 task-cache (ADR-018). Он не объединяется колбэком с `dfsCount`: рекурсия с function-параметром
@@ -53,7 +61,23 @@ task-cache (ADR-018). Он не объединяется колбэком с `df
 Общее: `ctx.Err()` на входе; `unvisited := st.Invert(totalCells)`; кандидаты
 `GetNeighborMask(end).Intersect(unvisited)`, перебор `AllVisited()`; прунинг
 `ShouldPruneAfterVisit(n,newUnvisited)` с `res.CountPrune(reason)`. Без аллокаций в горячем
-цикле.
+цикле (гейт — стейт-лесс O(V+E)-проверка pruner'а со стековым scratch).
+
+## Лемма звукосности гейта записи
+
+Запись `(S,s)` (`|S| = depth`, `s` — конец префикса) участвует в итоге двояко: как задача
+`W·f(S,s)` и как ответ мемо задачам с остатком `S`, где `f(S,s)` — число путей из `s`, покрывающих
+ровно `full\S`. Если предикат гейта ложен (он — необходимое условие существования такого пути,
+specs/pruner.md), то пропуск записи итог `Σ W·f` не меняет:
+
+1. **Собственный вклад**: `f(S,s) = 0` ⟹ слагаемое `W·f(S,s)` нулевое.
+2. **Мемо-запросы**: count-фаза запрашивает ключ `(U,u)` только на уровне стопа из достигнутого
+   состояния `(full\U, t)` с `t ∈ N(u)`, т.е. тогда и только тогда, когда существует путь,
+   покрывающий `full\U` и кончающийся соседом `u`. По дуальности обращения (префикс-реверс
+   дополнения) это в точности `f(U,u) > 0`. Значит мёртвый ключ не запрашивается никогда —
+   отсутствие записи не добавляет ни промаха, ни потери.
+3. **Согласованность с канонизацией**: предикат D4-эквивариантен, поэтому «мёртвость» — свойство
+   орбиты, и решение не зависит от выбранного представителя ключа.
 
 ## Инварианты и корректность
 
@@ -65,23 +89,27 @@ task-cache (ADR-018). Он не объединяется колбэком с `df
   канонизованными. `SholdSkip` в `ExtendTask` не проверяется: корни отфильтрованы фазой A.
 - Тождество count-фазы: `total = Σ_tasks W(task) · f(task)`, где `f` — count-DFS со стопом
   на уровне `totalCells − d`; мемо отвечает по **точному** состоянию, деление `W/orbitSize`
-  точно, т.к. вес ключа — сумма размеров орбит (ADR-011).
+  точно, т.к. вес ключа — сумма размеров орбит (ADR-011). Гейт записи множество задач сокращает
+  только нулевыми по `f` ключами (лемма выше) — тождество сохраняет силу.
 
 ## Ограничения и edge cases
 
-- `depth = 0` в `GenerateTasks` — одна запись (сам старт).
+- `depth = 0` в `GenerateTasks` — одна запись (сам старт): гейт на ней выполняется без
+  предусловия L0/L1 (звукó, но может быть пустым) и живые старты не режет.
 - Отклонённые эвристики (цветовой прунинг, Warnsdorff) не реализованы — ADR-009.
 
 ## Тесты
 
 `searcher/searcher_test.go`: независимый brute-force == 1728 на 5×5; `GenerateTasks` с
-`depth=totalCells` → сумма весов по группам == эталон; записи = префиксы глубины depth
-(веса кратно орбите), `depth=0` — одна запись, `SholdSkip`-старт не пишет ничего. Reversal:
-таблично по всем допустимым d на 5×5 — `Σ w·CountPathsWithCacheReversal(task)` по task-cache из
-`GenerateTasks` == brute-force; вырожденный `ExtendTask(bits==depth)` пишет запись как есть;
-`c == nil` и `2d > totalCells` → тождество полному спуску; hits+misses == числу проверок кэша
-(hit'ы только на уровне стопа).
+`depth=totalCells` → сумма весов по группам == эталон (гейт на пустом остатке ничего не режет);
+записи = префиксы глубины depth (веса кратно орбите), `depth=0` — одна запись, `SholdSkip`-старт
+не пишет ничего. Reversal: таблично по всем допустимым d на 5×5 —
+`Σ w·CountPathsWithCacheReversal(task)` по task-cache из `GenerateTasks` == brute-force;
+вырожденный `ExtendTask(bits==depth)` пишет запись как есть; `c == nil` и `2d > totalCells` →
+тождество полному спуску; hits+misses == числу проверок кэша (hit'ы только на уровне стопа).
+Гейт: отдельный тест леммы — на 5×5 собрать множество ключей, отказанных гейтом (внутренний обход
+всех листьев фиксированной глубины), и brute-force проверить `f(key) = 0` для каждого.
 
 ## Связанные
 
-ADR-005, ADR-009, ADR-011, ADR-016, ADR-018; `specs/pruner.md`, `specs/cache.md`.
+ADR-005, ADR-009, ADR-011, ADR-016, ADR-018, ADR-030; `specs/pruner.md`, `specs/cache.md`.

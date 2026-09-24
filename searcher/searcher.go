@@ -35,8 +35,9 @@ func NewSearcher(g *graph.Graph, sym *symmetry.Symmetry) *Searcher {
 // from a canonical start down to depth, writing each leaf prefix straight into
 // c as its D4-canonical placement (state, end) with the group's orbit weight —
 // both the gen-A intermediate table and the task-cache go this way (ADR-018).
-// SholdSkip starts emit nothing. Statistics: CacheWrites counts written
-// prefixes.
+// A leaf is written only when it passes the write gate; gate cuts are counted
+// in the Result breakdown. SholdSkip starts emit nothing. Statistics:
+// CacheWrites counts written prefixes.
 func (s *Searcher) GenerateTasks(ctx context.Context, c *cache.Cache, start int, orbitSize uint64, depth int) (result types.Result) {
 	if s.graph.SholdSkip(start) {
 		return result
@@ -49,9 +50,11 @@ func (s *Searcher) GenerateTasks(ctx context.Context, c *cache.Cache, start int,
 // ExtendTask is phase B of task-cache generation: it continues the task
 // descent from an already canonical entry p with its aggregated weight down
 // to the target depth. An entry at or beyond the depth (degenerate split,
-// precomputeDepth ≤ base) writes itself as-is — descending further would
-// lose its record; below the threshold leaves are written canonicalized like
-// in GenerateTasks. No SholdSkip check: roots were filtered by phase A.
+// precomputeDepth ≤ base) writes itself as-is without the gate — it is
+// exactly the phase-A leaf of the same key/par, already gated by the same
+// check; descending further would lose its record. Below the threshold leaves
+// are written canonicalized like in GenerateTasks, passing the gate there.
+// No SholdSkip check: roots were filtered by phase A.
 func (s *Searcher) ExtendTask(ctx context.Context, c *cache.Cache, p path.Path, weight uint64, depth int) (result types.Result) {
 	if p.State().CountBits() >= depth {
 		c.Set(p, weight)
@@ -83,15 +86,23 @@ func (s *Searcher) CountPathsWithCacheReversal(ctx context.Context, p path.Path,
 
 // dfsTask is the single generation descent shared by GenerateTasks and
 // ExtendTask: on a leaf it writes the canonical placement into the cache with
-// the group's weight (specs/searcher.md). It is not callback-unified with
-// dfsCount: recursion with a function parameter never inlines, and the base
-// case is the only difference — duplicating the loop is cheaper.
+// the group's weight (specs/searcher.md). Before the write the forced-chain
+// gate (ShouldPruneState) drops keys with zero completions — pruned leaves pay
+// the check but not the canonicalization, and one hook covers both tables. It
+// is not callback-unified with dfsCount: recursion with a function parameter
+// never inlines, and the base case is the only difference — duplicating the
+// loop is cheaper.
 func (s *Searcher) dfsTask(ctx context.Context, st state.State, end, depth int, weight uint64, c *cache.Cache, res *types.Result) {
 	if ctx.Err() != nil {
 		return
 	}
 
 	if st.CountBits() >= depth {
+		todo := st.Invert(s.graph.GetTotalCells())
+		if pruned, reason := s.pruner.ShouldPruneState(end, todo); pruned {
+			res.CountPrune(reason)
+			return
+		}
 		c.Set(s.sym.Canonicalize(st, end), weight)
 		res.CacheWrites++
 		return

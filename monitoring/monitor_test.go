@@ -73,14 +73,16 @@ func TestReportSubtaskSumsByReason(t *testing.T) {
 
 	m.ReportSubtask(&types.Result{PrunedDeadEnd: 3, PrunedNoCont: 1})
 	m.ReportSubtask(&types.Result{PrunedDisconn: 4, PrunedEndpoints: 2})
+	m.ReportSubtask(&types.Result{PrunedForcedChain: 6})
 
 	ph := m.active.Load()
 	assert.Equal(t, uint64(3), ph.prunedDeadEnd.Load())
 	assert.Equal(t, uint64(1), ph.prunedNoCont.Load())
 	assert.Equal(t, uint64(4), ph.prunedDisconn.Load())
 	assert.Equal(t, uint64(2), ph.prunedEndpoints.Load())
-	assert.Equal(t, uint64(10), ph.prunedTotal())
-	assert.Equal(t, uint64(10), m.Phase("counting").Pruned)
+	assert.Equal(t, uint64(6), ph.prunedForcedChain.Load())
+	assert.Equal(t, uint64(16), ph.prunedTotal())
+	assert.Equal(t, uint64(16), m.Phase("counting").Pruned)
 }
 
 // Reversal task-cache lookups fold through ReportSubtask into the phase
@@ -260,7 +262,7 @@ func TestMonitorsShareCountingLogic(t *testing.T) {
 			m.ReportTaskCompleted()
 		}
 		m.ReportPathsFound(77)
-		m.ReportSubtask(&types.Result{PrunedDisconn: 3, PrunedEndpoints: 1, CacheHits: 9, CacheMisses: 2})
+		m.ReportSubtask(&types.Result{PrunedDisconn: 3, PrunedEndpoints: 1, PrunedForcedChain: 4, CacheHits: 9, CacheMisses: 2})
 	}
 
 	realM, fakeM := NewMonitor(), NewFakeMonitor()
@@ -446,7 +448,7 @@ func TestFinalReportFormat(t *testing.T) {
 	m.BeginPhase("counting")
 	m.AddTasks(1)
 	m.ReportPathsFound(100)
-	m.ReportSubtask(&types.Result{PrunedDisconn: 3, CacheHits: 5, CacheMisses: 2})
+	m.ReportSubtask(&types.Result{PrunedDisconn: 3, PrunedForcedChain: 1, CacheHits: 5, CacheMisses: 2})
 	m.ReportTaskCompleted()
 
 	out := captureStdout(t, m.Finish)
@@ -465,6 +467,8 @@ func TestFinalReportFormat(t *testing.T) {
 	require.NotEmpty(t, countingLine)
 	assert.NotContains(t, countingLine, "writes", "no zero writes segment in counting phase")
 	assert.Contains(t, countingLine, "hits 5/2", "task-cache hits/misses appear on the phase line")
+	assert.Contains(t, countingLine, "pruned 4 (disconn 3, chain 1)",
+		"write-gate reasons extend the breakdown in the fixed order")
 	genLine := ""
 	for line := range strings.SplitSeq(out, "\n") {
 		if strings.HasPrefix(line, "Phase generation ") {

@@ -14,11 +14,13 @@ type Result struct {
 	CacheHits   int // reversal count-DFS only: task-cache lookups answered at the stop level
 	CacheMisses int // reversal count-DFS only: task-cache lookups with no entry (h == 0)
 
-	Pruned          int // branches cut by ShouldPruneAfterVisit (sum of the breakdown below)
+	Pruned          int // branches cut by the pruner (sum of the breakdown below)
 	PrunedDeadEnd   int // local dead-end: isolated cell / lone unreachable cell
 	PrunedNoCont    int // last has no unvisited neighbor (no continuation)
 	PrunedDisconn   int // G[unvisited] is not connected
 	PrunedEndpoints int // degree-1 endpoint heuristic violated
+
+	PrunedForcedChain int // write gate: forced-chain overload/cycle (generation phases)
 }
 
 // Add folds other into r field by field. other is passed by pointer: Result
@@ -33,6 +35,7 @@ func (r *Result) Add(other *Result) {
 	r.PrunedNoCont += other.PrunedNoCont
 	r.PrunedDisconn += other.PrunedDisconn
 	r.PrunedEndpoints += other.PrunedEndpoints
+	r.PrunedForcedChain += other.PrunedForcedChain
 }
 
 // CountPrune records one pruned branch under the reason returned by the pruner.
@@ -48,6 +51,8 @@ func (r *Result) CountPrune(reason pruner.Reason) {
 		r.PrunedDisconn++
 	case pruner.Endpoints:
 		r.PrunedEndpoints++
+	case pruner.ForcedChain:
+		r.PrunedForcedChain++
 	}
 }
 
@@ -55,5 +60,5 @@ func (r *Result) CountPrune(reason pruner.Reason) {
 // once before returning a Result; CountPrune deliberately does not touch the
 // aggregate on every branch.
 func (r *Result) Finalize() {
-	r.Pruned = r.PrunedDeadEnd + r.PrunedNoCont + r.PrunedDisconn + r.PrunedEndpoints
+	r.Pruned = r.PrunedDeadEnd + r.PrunedNoCont + r.PrunedDisconn + r.PrunedEndpoints + r.PrunedForcedChain
 }

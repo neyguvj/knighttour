@@ -10,18 +10,19 @@ import (
 
 func TestResultAdd(t *testing.T) {
 	r := Result{TotalPathsFound: 5, CacheWrites: 3, CacheHits: 4, PrunedDeadEnd: 4}
-	other := Result{TotalPathsFound: 7, CacheWrites: 1, CacheHits: 2, CacheMisses: 6, PrunedDisconn: 6, PrunedEndpoints: 2}
+	other := Result{TotalPathsFound: 7, CacheWrites: 1, CacheHits: 2, CacheMisses: 6, PrunedDisconn: 6, PrunedEndpoints: 2, PrunedForcedChain: 5}
 
 	r.Add(&other)
 
 	assert.Equal(t, Result{
-		TotalPathsFound: 12,
-		CacheWrites:     4,
-		CacheHits:       6,
-		CacheMisses:     6,
-		PrunedDeadEnd:   4,
-		PrunedDisconn:   6,
-		PrunedEndpoints: 2,
+		TotalPathsFound:   12,
+		CacheWrites:       4,
+		CacheHits:         6,
+		CacheMisses:       6,
+		PrunedDeadEnd:     4,
+		PrunedDisconn:     6,
+		PrunedEndpoints:   2,
+		PrunedForcedChain: 5,
 	}, r)
 }
 
@@ -35,6 +36,7 @@ func TestResultCountPrune(t *testing.T) {
 		{name: "no continuation", reason: pruner.NoContinuation, fieldOf: func(r *Result) int { return r.PrunedNoCont }},
 		{name: "disconnected", reason: pruner.Disconnected, fieldOf: func(r *Result) int { return r.PrunedDisconn }},
 		{name: "endpoints", reason: pruner.Endpoints, fieldOf: func(r *Result) int { return r.PrunedEndpoints }},
+		{name: "forced chain", reason: pruner.ForcedChain, fieldOf: func(r *Result) int { return r.PrunedForcedChain }},
 	}
 
 	for _, tc := range tests {
@@ -58,7 +60,8 @@ func TestResultCountPrune(t *testing.T) {
 		r.CountPrune(pruner.DeadEnd)
 		r.CountPrune(pruner.Endpoints)
 		r.CountPrune(pruner.Disconnected)
+		r.CountPrune(pruner.ForcedChain)
 		r.Finalize()
-		assert.Equal(t, 3, r.Pruned)
+		assert.Equal(t, 4, r.Pruned)
 	})
 }

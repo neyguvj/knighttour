@@ -120,9 +120,14 @@ func reportBenchMetrics(b *testing.B, m *monitoring.FakeMonitor) {
 	b.ReportMetric(float64(genB.CacheWrites), "writesB/op")
 	b.ReportMetric(float64(genA.Pruned), "prunedA/op")
 	b.ReportMetric(float64(genB.Pruned), "prunedB/op")
+	// Of the generation prunes: forced-chain write-gate cuts per phase.
+	b.ReportMetric(float64(genA.PrunedForcedChain), "prunedL2A/op")
+	b.ReportMetric(float64(genB.PrunedForcedChain), "prunedL2B/op")
 	// Task-cache lookups of the counting phase at the reversal stop level.
 	b.ReportMetric(float64(counting.CacheHits), "cacheHits/op")
 	b.ReportMetric(float64(counting.CacheMisses), "cacheMisses/op")
+	// Task-cache records after the write gate (countTasks publishes ItemsCount as Tasks).
+	b.ReportMetric(float64(counting.Tasks), "taskEntries/op")
 }
 
 // ms renders a phase duration as milliseconds with microsecond precision.

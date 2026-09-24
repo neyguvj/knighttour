@@ -11,6 +11,7 @@ import (
 	"knighttour/cache"
 	"knighttour/graph"
 	"knighttour/path"
+	"knighttour/pruner"
 	"knighttour/state"
 	"knighttour/symmetry"
 )
@@ -279,4 +280,58 @@ func TestGenerateTasksSkipsWrongColor(t *testing.T) {
 
 	assert.Zero(t, result.CacheWrites, "SholdSkip start emits nothing")
 	assert.Zero(t, c.ItemsCount())
+}
+
+// --- write gate lemma (specs/searcher.md) ---
+
+// gateLeafWalk mirrors the dfsTask descent — L0/L1 pruning included — down to
+// a fixed depth and applies the write gate at every leaf, collecting the keys
+// it rejects.
+func gateLeafWalk(g *graph.Graph, pr *pruner.Pruner, st state.State, end, depth int, rejected map[path.Path]bool) {
+	if st.CountBits() == depth {
+		todo := st.Invert(g.GetTotalCells())
+		if cut, _ := pr.ShouldPruneState(end, todo); cut {
+			rejected[path.New(st, end)] = true
+		}
+		return
+	}
+
+	unvisited := st.Invert(g.GetTotalCells())
+	for n := range g.GetNeighborMask(end).Intersect(unvisited).AllVisited() {
+		newUnvisited := unvisited.Unvisit(n)
+		if !newUnvisited.IsEmpty() {
+			if cut, _ := pr.ShouldPruneAfterVisit(n, newUnvisited); cut {
+				continue
+			}
+		}
+		gateLeafWalk(g, pr, st.Visit(n), n, depth, rejected)
+	}
+}
+
+// The soundness lemma of the write gate: every generation leaf the gate
+// rejects has f(key) = 0 — no Hamiltonian path from the end covers the
+// remainder. Exhaustive descent on 5×5 to a fixed depth (the production
+// L0/L1 pruning included), each rejected key re-checked against the
+// independent brute-force oracle.
+func TestWriteGateRejectsOnlyDeadKeys(t *testing.T) {
+	const size = 5
+	const depth = 12 // half the board: the gate fires, the oracle stays cheap
+
+	g := graph.New(size)
+	sym := symmetry.NewSymmetry(size)
+	searcher := NewSearcher(g, sym)
+
+	rejected := make(map[path.Path]bool)
+	for start := range g.GetTotalCells() {
+		if g.SholdSkip(start) {
+			continue
+		}
+		gateLeafWalk(g, searcher.pruner, state.NewState(start), start, depth, rejected)
+	}
+
+	require.NotEmpty(t, rejected, "the gate must reject some depth-%d keys on 5x5", depth)
+	for key := range rejected {
+		assert.Zero(t, naiveCountFrom(g, key.State(), key.End()),
+			"rejected key %v must have f = 0", key)
+	}
 }
