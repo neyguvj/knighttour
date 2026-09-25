@@ -152,7 +152,7 @@ func TestReversalMatchesBruteForceAllDepths(t *testing.T) {
 
 			var sum uint64
 			for i, e := range allTasks(t, taskCache) {
-				res := searcher.CountPathsWithCacheReversal(context.Background(), e.Path, taskCache, d)
+				res := searcher.CountPathsWithCacheReversal(context.Background(), e.Path, taskCache.Reader(), d)
 				sum += e.Weight * uint64(res.TotalPathsFound)
 
 				if i < naiveSample {
@@ -193,12 +193,12 @@ func TestCountPathsWithCacheReversalFullDescentIdentities(t *testing.T) {
 	searcher := NewSearcher(g, sym)
 
 	tests := []struct {
-		c    *cache.Cache
+		c    *cache.Reader
 		name string
 		d    int
 	}{
 		{name: "nil cache", c: nil, d: 6},
-		{name: "beyond duality", c: cache.NewCache(), d: size*size/2 + 1},
+		{name: "beyond duality", c: cache.NewCache().Reader(), d: size*size/2 + 1},
 	}
 
 	for _, tt := range tests {
@@ -233,7 +233,7 @@ func TestReversalStopLookupsHappenAtStopLevel(t *testing.T) {
 	cand := g.GetNeighborMask(12).Intersect(unvisited)
 	require.Positive(t, cand.CountBits())
 
-	res := searcher.CountPathsWithCacheReversal(context.Background(), p, cache.NewCache(), d)
+	res := searcher.CountPathsWithCacheReversal(context.Background(), p, cache.NewCache().Reader(), d)
 	assert.Zero(t, res.TotalPathsFound, "empty cache answers zero completions")
 	assert.Zero(t, res.CacheHits)
 	assert.Equal(t, cand.CountBits(), res.CacheMisses, "one lookup per candidate end at the stop level")
@@ -254,7 +254,7 @@ func TestReversalStopLookupsHappenAtStopLevel(t *testing.T) {
 		}
 	}
 
-	res = searcher.CountPathsWithCacheReversal(context.Background(), p, c, d)
+	res = searcher.CountPathsWithCacheReversal(context.Background(), p, c.Reader(), d)
 	assert.Equal(t, want, res.TotalPathsFound, "each candidate under the seeded key adds W/orbitSize == 1")
 	assert.Equal(t, want, res.CacheHits)
 	assert.Equal(t, cand.CountBits()-want, res.CacheMisses)
@@ -280,6 +280,46 @@ func TestGenerateTasksSkipsWrongColor(t *testing.T) {
 
 	assert.Zero(t, result.CacheWrites, "SholdSkip start emits nothing")
 	assert.Zero(t, c.ItemsCount())
+}
+
+// Phase B through a batched Staging sink must land exactly the task-cache that
+// direct writes produce (plan 15): same keys, same summed weights.
+func TestExtendTaskViaStagingMatchesDirect(t *testing.T) {
+	g := graph.New(5)
+	sym := symmetry.NewSymmetry(5)
+	searcher := NewSearcher(g, sym)
+	ctx := context.Background()
+
+	intermediate := cache.NewCache()
+	for _, start := range []int{0, 12} {
+		searcher.GenerateTasks(ctx, intermediate, start, 8, 3)
+	}
+	var worklist []cache.Entry
+	require.NoError(t, intermediate.Each(ctx, 1, func(_ context.Context, p path.Path, w uint64) error {
+		worklist = append(worklist, cache.Entry{Path: p, Weight: w})
+		return nil
+	}))
+	require.NotEmpty(t, worklist)
+
+	dump := func(c *cache.Cache) map[path.Path]uint64 {
+		m := make(map[path.Path]uint64)
+		require.NoError(t, c.Each(ctx, 1, func(_ context.Context, p path.Path, w uint64) error {
+			m[p] = w
+			return nil
+		}))
+		return m
+	}
+
+	direct := cache.NewCache()
+	staged := cache.NewCache()
+	sink := staged.NewStaging(7) // force several auto-flushes across the worklist
+	for _, e := range worklist {
+		searcher.ExtendTask(ctx, direct, e.Path, e.Weight, 6)
+		searcher.ExtendTask(ctx, sink, e.Path, e.Weight, 6)
+	}
+	sink.Flush()
+
+	assert.Equal(t, dump(direct), dump(staged), "batched writes land the same table")
 }
 
 // --- write gate lemma (specs/searcher.md) ---

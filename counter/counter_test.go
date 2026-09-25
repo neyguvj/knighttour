@@ -413,7 +413,7 @@ func sequentialTotal(t *testing.T, c *Counter, ctx context.Context, taskCache *c
 	t.Helper()
 	want := uint64(0)
 	require.NoError(t, taskCache.Each(ctx, 1, func(_ context.Context, p path.Path, w uint64) error {
-		res := c.searcher.CountPathsWithCacheReversal(ctx, p, taskCache, depth)
+		res := c.searcher.CountPathsWithCacheReversal(ctx, p, taskCache.Reader(), depth)
 		want += uint64(res.TotalPathsFound) * w
 		return nil
 	}))

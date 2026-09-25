@@ -12,23 +12,24 @@
 func NewSearcher(g *graph.Graph, sym *symmetry.Symmetry) *Searcher
 
 // Единственный спуск «от старта»: DFS от канонического начала до глубины depth; на листьях —
-// запись Canonicalize(state,end) с весом orbitSize в переданную таблицу cache.Cache, если лист
-// прошёл гейт записи (см. ниже). Пишет и промежуточную таблицу фазы A (малая глубина), и
-// task-cache напрямую (ADR-018). SholdSkip(start) → пустой результат (фильтр чётности нечётных
-// досок).
-func (s *Searcher) GenerateTasks(ctx context.Context, c *cache.Cache,
+// запись Canonicalize(state,end) с весом orbitSize в переданный sink (cache.Sink: таблица
+// напрямую или батч-Staging — выбор за вызывающим контуром), если лист прошёл гейт записи
+// (см. ниже). Пишет и промежуточную таблицу фазы A (малая глубина), и task-cache (ADR-018).
+// SholdSkip(start) → пустой результат (фильтр чётности нечётных досок).
+func (s *Searcher) GenerateTasks(ctx context.Context, c cache.Sink,
     start int, orbitSize uint64, depth int) types.Result
 
 // Продолжение task-генерации от канонической записи p с весом weight до depth;
 // запись уже на depth (или глубже) пишется как есть без гейта (вырожденная фаза B).
-func (s *Searcher) ExtendTask(ctx context.Context, c *cache.Cache,
+func (s *Searcher) ExtendTask(ctx context.Context, c cache.Sink,
     p path.Path, weight uint64, depth int) types.Result
 
 // Число полных дополнений p с ранним стопом на уровне totalCells-d: остаток
-// U = full\T answering'ется суммой W(canon(U,u))/orbitSize по u ∈ N(t)∩U из c.
-// c == nil или 2d > totalCells → полный спуск без обращения.
+// U = full\T answering'ется суммой W(canon(U,u))/orbitSize по u ∈ N(t)∩U из мемо-ридера.
+// Мемо читается безлоковым cache.Reader (ADR-031): count-фаза идёт после барьера генерации,
+// писателей нет. c == nil или 2d > totalCells → полный спуск без обращения.
 func (s *Searcher) CountPathsWithCacheReversal(ctx context.Context, p path.Path,
-    c *cache.Cache, d int) types.Result
+    c *cache.Reader, d int) types.Result
 ```
 
 ## Горячий DFS: рекурсивные методы
@@ -109,6 +110,7 @@ specs/pruner.md), то пропуск записи итог `Σ W·f` не ме�
 тождество полному спуску; hits+misses == числу проверок кэша (hit'ы только на уровне стопа).
 Гейт: отдельный тест леммы — на 5×5 собрать множество ключей, отказанных гейтом (внутренний обход
 всех листьев фиксированной глубины), и brute-force проверить `f(key) = 0` для каждого.
+`ExtendTask` через батч-Staging sink даёт ту же таблицу, что прямая запись (ADR-031).
 
 ## Связанные
 

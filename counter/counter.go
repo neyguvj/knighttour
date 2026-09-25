@@ -44,6 +44,14 @@ const dispatchStackCapacity = 10000
 // 16 too).
 const dispatchClaimBatch = 16
 
+// stagingFlushLimit is the per-worker auto-flush threshold of the gen-B
+// batched writer (plan 15): one Lock per touched shard per F emissions
+// instead of per leaf, cutting the RWMutex wake/spin churn measured to
+// dominate cache.Set on 7×7 d22. Budget: 24 B × F per worker ≈ 196 KB, a few
+// MB across workers — noise against the task-cache peak. Fixed value, no
+// runtime override (ADR-020).
+const stagingFlushLimit = 8192
+
 // dispatchGranularityC is the constant C of effectiveBatch: the lower bound
 // on the number of claims per consumer once the formula is active — while
 // records ≤ consumers·C the phase delivers per record (plan 13 fix). Fixed
@@ -134,6 +142,11 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 	g, gctx := errgroup.WithContext(ctx)
 	for range min(len(intermediate), workers) {
 		g.Go(func() error {
+			// One private Staging per worker (plan 15); the deferred Flush
+			// runs on every exit path — exhausted worklist or cancelled ctx —
+			// so buffered leaves are no less visible than direct writes.
+			staging := taskCache.NewStaging(stagingFlushLimit)
+			defer staging.Flush()
 			for {
 				i := int(nextEntry.Add(1)) - 1
 				if i >= len(intermediate) {
@@ -145,7 +158,7 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 				default:
 				}
 				e := intermediate[i]
-				result := c.searcher.ExtendTask(gctx, taskCache, e.Path, e.Weight, precomputeDepth)
+				result := c.searcher.ExtendTask(gctx, staging, e.Path, e.Weight, precomputeDepth)
 				monitor.ReportSubtask(&result)
 				monitor.ReportTaskCompleted()
 			}
@@ -185,6 +198,9 @@ func effectiveBatch(records, consumers, claimB, granularityC int) int {
 // tests force overflow with a smaller value.
 func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, workers int, taskCache *cache.Cache, precomputeDepth, stackK int) uint64 {
 	monitor.BeginPhase("counting")
+	// ItemsCount is the barrier read: every gen-B writer finished before this
+	// call, so the lock-free memo Reader created here sees all records (plan 15).
+	memo := taskCache.Reader()
 	records := taskCache.ItemsCount()
 	monitor.AddTasks(records)
 
@@ -201,7 +217,7 @@ func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, wo
 	for range consumers {
 		go func() {
 			defer wg.Done()
-			c.countStackTasks(ctx, monitor, taskCache, precomputeDepth, stack, &total)
+			c.countStackTasks(ctx, monitor, memo, precomputeDepth, stack, &total)
 		}()
 	}
 
@@ -232,7 +248,7 @@ func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, wo
 // stack until it closes empty, running the early-stop count-DFS for every
 // record off every shard lock. The claim buffer belongs to this goroutine —
 // pop copies into it and frees the slots immediately.
-func (c *Counter) countStackTasks(ctx context.Context, monitor monitoring.Monitor, taskCache *cache.Cache, precomputeDepth int, stack *taskStack, total *atomic.Uint64) {
+func (c *Counter) countStackTasks(ctx context.Context, monitor monitoring.Monitor, memo *cache.Reader, precomputeDepth int, stack *taskStack, total *atomic.Uint64) {
 	buf := make([]cache.Entry, 0, stack.batch)
 	for {
 		var ok bool
@@ -241,7 +257,7 @@ func (c *Counter) countStackTasks(ctx context.Context, monitor monitoring.Monito
 			return
 		}
 		for _, e := range buf {
-			c.countOneTask(ctx, monitor, taskCache, precomputeDepth, e.Path, e.Weight, total)
+			c.countOneTask(ctx, monitor, memo, precomputeDepth, e.Path, e.Weight, total)
 		}
 	}
 }
@@ -330,11 +346,11 @@ func (s *taskStack) close() {
 // weighted path count and per-task statistics into the shared counters. It is
 // invoked from a counting consumer, off every shard lock; a terminated context
 // skips the task (partial-run semantics, specs/counter.md).
-func (c *Counter) countOneTask(ctx context.Context, monitor monitoring.Monitor, taskCache *cache.Cache, precomputeDepth int, p path.Path, weight uint64, total *atomic.Uint64) {
+func (c *Counter) countOneTask(ctx context.Context, monitor monitoring.Monitor, memo *cache.Reader, precomputeDepth int, p path.Path, weight uint64, total *atomic.Uint64) {
 	if ctx.Err() != nil {
 		return
 	}
-	result := c.searcher.CountPathsWithCacheReversal(ctx, p, taskCache, precomputeDepth)
+	result := c.searcher.CountPathsWithCacheReversal(ctx, p, memo, precomputeDepth)
 	paths := uint64(result.TotalPathsFound) * weight
 	total.Add(paths)
 	monitor.ReportPathsFound(int(paths))

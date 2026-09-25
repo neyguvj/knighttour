@@ -273,3 +273,140 @@ func TestCacheConcurrentSetGet(t *testing.T) {
 		assert.Equal(t, uint64(writers), weight)
 	}
 }
+
+// assertVisible checks that exactly want[path] entries of keys are visible in c
+// (right weight, found) and every other key misses.
+func assertVisible(t *testing.T, c *Cache, want map[path.Path]uint64, keys ...path.Path) {
+	t.Helper()
+	stored := 0
+	for _, k := range keys {
+		w, found := c.Get(k)
+		wantW, wantFound := want[k]
+		assert.Equalf(t, wantFound, found, "visibility of %v", k)
+		if wantFound {
+			assert.Equalf(t, wantW, w, "weight of %v", k)
+			stored++
+		}
+	}
+	assert.Equal(t, stored, c.ItemsCount(), "no records beyond the visible set")
+}
+
+// Staging buffers contributions until a flush boundary: invisible before it,
+// additive after (duplicates inside one batch collapse), zero weight is never
+// staged and does not consume the limit, auto-flush at the limit loses
+// nothing, and limit < 1 clamps to per-Set flushing (specs/cache.md).
+func TestStagingFlushBoundaries(t *testing.T) {
+	k1 := path.New(state.State(0b1), 1)
+	k2 := path.New(state.State(0b100), 2)
+
+	tests := []struct {
+		ops        func(s *Staging)
+		before     map[path.Path]uint64
+		afterFlush map[path.Path]uint64
+		name       string
+		limit      int
+	}{
+		{
+			name:       "batch invisible until explicit flush",
+			limit:      100,
+			ops:        func(s *Staging) { s.Set(k1, 3); s.Set(k1, 4); s.Set(k2, 5) },
+			before:     map[path.Path]uint64{},
+			afterFlush: map[path.Path]uint64{k1: 7, k2: 5},
+		},
+		{
+			name:       "zero weight is no-op and does not consume the limit",
+			limit:      1,
+			ops:        func(s *Staging) { s.Set(k1, 0); s.Set(k1, 6) },
+			before:     map[path.Path]uint64{k1: 6}, // auto-flushed by the weight-6 Set alone
+			afterFlush: map[path.Path]uint64{k1: 6},
+		},
+		{
+			name:       "auto-flush at limit, tail buffered",
+			limit:      2,
+			ops:        func(s *Staging) { s.Set(k1, 1); s.Set(k2, 2); s.Set(k1, 3) },
+			before:     map[path.Path]uint64{k1: 1, k2: 2},
+			afterFlush: map[path.Path]uint64{k1: 4, k2: 2},
+		},
+		{
+			name:       "limit clamped to one flushes per Set",
+			limit:      0,
+			ops:        func(s *Staging) { s.Set(k1, 2) },
+			before:     map[path.Path]uint64{k1: 2},
+			afterFlush: map[path.Path]uint64{k1: 2},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewCache()
+			s := c.NewStaging(tt.limit)
+			tt.ops(s)
+			assertVisible(t, c, tt.before, k1, k2)
+			s.Flush()
+			assertVisible(t, c, tt.afterFlush, k1, k2)
+			s.Flush() // idempotent on drained baskets
+			assertVisible(t, c, tt.afterFlush, k1, k2)
+		})
+	}
+}
+
+// Concurrent Staging writers (one per goroutine) over overlapping keys plus
+// concurrent Get under -race: every key sums across all writers — flush
+// boundaries lose nothing and batched writes stay visible to readers.
+func TestStagingConcurrentWriters(t *testing.T) {
+	const writers = 8
+	const perWriter = 1000
+
+	c := NewCache()
+	var wg sync.WaitGroup
+	for range writers {
+		wg.Go(func() {
+			s := c.NewStaging(64)
+			defer s.Flush()
+			for i := range perWriter {
+				k := path.New(state.State(i), 0) // same keys across writers → sums merge
+				s.Set(k, 1)
+				c.Get(k) // readers over live batched writers
+			}
+		})
+	}
+	wg.Wait()
+
+	assert.Equal(t, perWriter, c.ItemsCount())
+	for i := range perWriter {
+		weight, found := c.Get(path.New(state.State(i), 0))
+		require.True(t, found)
+		assert.Equal(t, uint64(writers), weight)
+	}
+}
+
+// Reader is the lock-free post-barrier handle: its hit/miss and weights match
+// Get on a table that no longer has writers, and concurrent Readers under
+// -race observe one identical snapshot (specs/cache.md).
+func TestReaderMatchesGetConcurrently(t *testing.T) {
+	c := NewCache()
+	const n = 2000
+	for i := range n {
+		c.Set(path.New(state.State(i), i%3), uint64(i+1)) // writers done — barrier point
+	}
+
+	var mismatches atomic.Int64
+	var wg sync.WaitGroup
+	for range 4 {
+		r := c.Reader()
+		wg.Go(func() {
+			for i := range n {
+				gotW, gotOK := r.Get(path.New(state.State(i), i%3))
+				wantW, wantOK := c.Get(path.New(state.State(i), i%3))
+				if gotW != wantW || gotOK != wantOK {
+					mismatches.Add(1)
+				}
+			}
+		})
+	}
+	wg.Wait()
+
+	assert.Zero(t, mismatches.Load(), "Reader must agree with Get on a quiescent table")
+	_, found := c.Reader().Get(path.New(state.State(n+7), 0))
+	assert.False(t, found, "miss stays (0,false)")
+}
