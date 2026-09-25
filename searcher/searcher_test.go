@@ -103,7 +103,7 @@ func TestGenerateTasksDepthZeroEmitsStart(t *testing.T) {
 	result := searcher.GenerateTasks(context.Background(), c, 0, 1, 0)
 
 	assert.Equal(t, 1, result.CacheWrites, "depth=0 emits the start itself")
-	assert.Equal(t, 1, c.ItemsCount(), "depth=0 stores exactly one record")
+	assert.Equal(t, 1, c.Seal().Len(), "depth=0 stores exactly one record")
 }
 
 // --- task-cache generation and reversal count (specs/searcher.md, ADR-011) --
@@ -119,17 +119,16 @@ func buildTaskCache(g *graph.Graph, searcher *Searcher, d int) *cache.Cache {
 	return c
 }
 
-// allTasks flattens a task-cache into one slice via Each — the direct shard
-// walk the count phase uses after plan 09 removed the Cache snapshots. One
-// worker keeps the append race-free without an extra lock.
+// allTasks flattens a task-cache into one slice via the sealed View's All
+// walk — the lock-free direct iteration the count phase uses (plan 16). A
+// single walk keeps the append race-free without an extra lock.
 func allTasks(tb testing.TB, c *cache.Cache) []cache.Entry {
 	tb.Helper()
-	out := make([]cache.Entry, 0, c.ItemsCount())
-	err := c.Each(context.Background(), 1, func(_ context.Context, p path.Path, w uint64) error {
-		out = append(out, cache.Entry{Path: p, Weight: w})
-		return nil
-	})
-	require.NoError(tb, err)
+	view := c.Seal()
+	out := make([]cache.Entry, 0, view.Len())
+	for e := range view.All(context.Background()) {
+		out = append(out, e)
+	}
 	return out
 }
 
@@ -148,11 +147,11 @@ func TestReversalMatchesBruteForceAllDepths(t *testing.T) {
 	for d := 1; d <= g.GetTotalCells()/2; d++ {
 		t.Run("depth"+strconv.Itoa(d), func(t *testing.T) {
 			taskCache := buildTaskCache(g, searcher, d)
-			require.Positive(t, taskCache.ItemsCount())
+			require.Positive(t, taskCache.Seal().Len())
 
 			var sum uint64
 			for i, e := range allTasks(t, taskCache) {
-				res := searcher.CountPathsWithCacheReversal(context.Background(), e.Path, taskCache.Reader(), d)
+				res := searcher.CountPathsWithCacheReversal(context.Background(), e.Path, taskCache.Seal(), d)
 				sum += e.Weight * uint64(res.TotalPathsFound)
 
 				if i < naiveSample {
@@ -178,10 +177,11 @@ func TestExtendTaskWritesEntryAsIsAtTargetDepth(t *testing.T) {
 	result := searcher.ExtendTask(context.Background(), c, p, 3, 2)
 
 	assert.Equal(t, 1, result.CacheWrites, "entry at target depth writes itself")
-	weight, found := c.Get(p)
+	view := c.Seal()
+	weight, found := view.Get(p)
 	assert.True(t, found, "record must be stored as-is under the entry key")
 	assert.Equal(t, uint64(3), weight)
-	assert.Equal(t, 1, c.ItemsCount())
+	assert.Equal(t, 1, view.Len())
 }
 
 // c == nil and 2d > totalCells both disable reversal: the count must equal
@@ -193,12 +193,12 @@ func TestCountPathsWithCacheReversalFullDescentIdentities(t *testing.T) {
 	searcher := NewSearcher(g, sym)
 
 	tests := []struct {
-		c    *cache.Reader
+		c    *cache.View
 		name string
 		d    int
 	}{
 		{name: "nil cache", c: nil, d: 6},
-		{name: "beyond duality", c: cache.NewCache().Reader(), d: size*size/2 + 1},
+		{name: "beyond duality", c: cache.NewCache().Seal(), d: size*size/2 + 1},
 	}
 
 	for _, tt := range tests {
@@ -233,7 +233,7 @@ func TestReversalStopLookupsHappenAtStopLevel(t *testing.T) {
 	cand := g.GetNeighborMask(12).Intersect(unvisited)
 	require.Positive(t, cand.CountBits())
 
-	res := searcher.CountPathsWithCacheReversal(context.Background(), p, cache.NewCache().Reader(), d)
+	res := searcher.CountPathsWithCacheReversal(context.Background(), p, cache.NewCache().Seal(), d)
 	assert.Zero(t, res.TotalPathsFound, "empty cache answers zero completions")
 	assert.Zero(t, res.CacheHits)
 	assert.Equal(t, cand.CountBits(), res.CacheMisses, "one lookup per candidate end at the stop level")
@@ -254,7 +254,7 @@ func TestReversalStopLookupsHappenAtStopLevel(t *testing.T) {
 		}
 	}
 
-	res = searcher.CountPathsWithCacheReversal(context.Background(), p, c.Reader(), d)
+	res = searcher.CountPathsWithCacheReversal(context.Background(), p, c.Seal(), d)
 	assert.Equal(t, want, res.TotalPathsFound, "each candidate under the seeded key adds W/orbitSize == 1")
 	assert.Equal(t, want, res.CacheHits)
 	assert.Equal(t, cand.CountBits()-want, res.CacheMisses)
@@ -279,7 +279,7 @@ func TestGenerateTasksSkipsWrongColor(t *testing.T) {
 	result := searcher.GenerateTasks(context.Background(), c, skipped, 1, 3)
 
 	assert.Zero(t, result.CacheWrites, "SholdSkip start emits nothing")
-	assert.Zero(t, c.ItemsCount())
+	assert.Zero(t, c.Seal().Len())
 }
 
 // Phase B through a batched Staging sink must land exactly the task-cache that
@@ -295,18 +295,16 @@ func TestExtendTaskViaStagingMatchesDirect(t *testing.T) {
 		searcher.GenerateTasks(ctx, intermediate, start, 8, 3)
 	}
 	var worklist []cache.Entry
-	require.NoError(t, intermediate.Each(ctx, 1, func(_ context.Context, p path.Path, w uint64) error {
-		worklist = append(worklist, cache.Entry{Path: p, Weight: w})
-		return nil
-	}))
+	for e := range intermediate.Seal().All(ctx) {
+		worklist = append(worklist, e)
+	}
 	require.NotEmpty(t, worklist)
 
 	dump := func(c *cache.Cache) map[path.Path]uint64 {
 		m := make(map[path.Path]uint64)
-		require.NoError(t, c.Each(ctx, 1, func(_ context.Context, p path.Path, w uint64) error {
-			m[p] = w
-			return nil
-		}))
+		for e := range c.Seal().All(ctx) {
+			m[e.Path] = e.Weight
+		}
 		return m
 	}
 

@@ -18,8 +18,8 @@
 ```
 graph.New(N) → counter.ParallelCountWithDepth(ctx, monitor, workers, depth)
   ├─ gen A: symmetry.GetCanonicalGroups() → searcher.GenerateTasks → промежуточный cache.Cache (D4-размещения)
-  ├─ gen B: Each(A) worklist → searcher.ExtendTask → task-cache (канонические префиксы, вес Σ orbitSize)
-  └─ counting: Cache.Each прямой обход → searcher.CountPathsWithCacheReversal → total = Σ W(task)·f(task)
+  ├─ gen B: View.All worklist (после Seal промежуточной таблицы) → searcher.ExtendTask → task-cache (канонические префиксы, вес Σ orbitSize)
+  └─ counting: Seal(task-cache) → батч-канал поверх View.All → searcher.CountPathsWithCacheReversal → total = Σ W(task)·f(task)
 ```
 
 Все фазы параллельны (`errgroup`/атомарные курсоры), детерминированный итог через

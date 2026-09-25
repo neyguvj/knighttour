@@ -239,10 +239,12 @@ Reusable utilities live in `tools/` (Python 3, stdlib-only), described in `specs
 - **pruner/** – Stateless necessary-condition pruning (L0 local dead-end + L1 global checks):
   - `Pruner` – `ShouldPruneAfterVisit()` (hot O(deg) check, returns first prune Reason)
 - **cache/** – One sharded weight table `Cache` (128 shards, hashed by State only; ADR-018):
-  additive `Set()` (`+= w`, zero no-op), concurrent `Get()`, dispatch `Each()` direct-shard walk
-  under RLock. Serves both the short-lived gen-A intermediate (materialized to a worklist via
-  `Each`, then GC'd) and the task cache (lives until the end of the count phase, never drained).
-  Reading is live/`Each` only — no copying Snapshot (it doubled peak memory on large boards).
+  additive `Set()` (`+= w`, zero no-op) under a writers-only Mutex; reads go through the sealed
+  `View` handle from `Seal()` — lock-free `Get()`, `Len()` and the dispatch walk
+  `All(ctx) iter.Seq[Entry]` over the live maps (write → seal → read, plan 16). Serves both the
+  short-lived gen-A intermediate (materialized to a worklist via `View.All`, then GC'd) and the
+  task cache (lives until the end of the count phase, never drained). No copying Snapshot
+  (it doubled peak memory on large boards).
 - **symmetry/** – Exploits board symmetries to reduce search space
   - 8 symmetries: rotations and reflections
   - Methods: `GetCanonicalPosition()`, `GetOrbitSize()`, `GetCanonicalGroups()`, `Canonicalize()`
@@ -284,5 +286,6 @@ Available benchmarks in `counter/benchmark_test.go`:
   costs ~50 min and grows downward); the 8×8 cap `{32,30}` is only the Makefile's *default*
   depth filter of the size8 targets — an explicit `DEPTHS` always selects its own point
   (ADR-015). The counting-phase knobs are fixed
-  defaults — stack depth K=10000, claim batch ceiling B=16, granularity C=4, LIFO-only
-  claims — with no runtime override handles.
+  defaults — per-consumer record capacity K=10000 (channel buffer ⌈capacity/Beff⌉ batch
+  slots), dispatch batch ceiling B=16, granularity C=4, FIFO walk order — with no runtime
+  override handles.

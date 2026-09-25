@@ -26,10 +26,10 @@ func (s *Searcher) ExtendTask(ctx context.Context, c cache.Sink,
 
 // Число полных дополнений p с ранним стопом на уровне totalCells-d: остаток
 // U = full\T answering'ется суммой W(canon(U,u))/orbitSize по u ∈ N(t)∩U из мемо-ридера.
-// Мемо читается безлоковым cache.Reader (ADR-031): count-фаза идёт после барьера генерации,
-// писателей нет. c == nil или 2d > totalCells → полный спуск без обращения.
+// Мемо читается безлоковым cache.View (ADR-031, план 16): count-фаза идёт после барьера
+// генерации и Seal, писателей нет. c == nil или 2d > totalCells → полный спуск без обращения.
 func (s *Searcher) CountPathsWithCacheReversal(ctx context.Context, p path.Path,
-    c *cache.Reader, d int) types.Result
+    c *cache.View, d int) types.Result
 ```
 
 ## Горячий DFS: рекурсивные методы

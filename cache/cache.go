@@ -2,9 +2,8 @@ package cache
 
 import (
 	"context"
+	"iter"
 	"sync"
-
-	"golang.org/x/sync/errgroup"
 
 	"knighttour/path"
 )
@@ -44,28 +43,29 @@ func shardIndex(p path.Path) int {
 	return int(h >> (64 - 7)) // numShards = 128
 }
 
-// cacheShard is one Cache shard: its map plus the RWMutex that lets Get read
-// concurrently with live Set writers.
+// cacheShard is one Cache shard: its map plus the writers-only Mutex — Set and
+// Staging.Flush are the only lock takers; sealed reads take none (plan 16).
 type cacheShard struct {
 	data map[path.Path]uint64
-	mu   sync.RWMutex
+	mu   sync.Mutex
 }
 
 // Cache is the counting pipeline's single sharded "canonical key → Σ orbitSize"
 // table (specs/cache.md, ADR-011/ADR-018): one type plays both pipeline roles —
 // the short-lived gen-A intermediate and the task-cache that stays alive
-// through the count phase and is read concurrently via Get while whole entries
-// are being written. Keys are D4-canonical prefixes (state, end); the writer
-// canonicalizes — this type knows nothing about symmetries. Zeros are never
-// stored: Set with a zero weight is a no-op. Reads are live only — Get, or a
-// direct walk under shard read locks via Each (plan 09); there is no per-shard
-// draining and no copying snapshot.
+// through the count phase. It follows the write → seal → read protocol: writers
+// contribute via Set/Staging until the calling contour stops them (a barrier
+// giving happens-before) and calls Seal; from then on every read goes through
+// the lock-free *View handle and no writer exists (specs/cache.md). Keys are
+// D4-canonical prefixes (state, end); the writer canonicalizes — this type
+// knows nothing about symmetries. Zeros are never stored: Set with a zero
+// weight is a no-op. There is no per-shard draining and no copying snapshot.
 type Cache struct {
 	shards [numShards]cacheShard
 }
 
 // NewCache returns an empty table (128 shards of map[path.Path]uint64 under
-// RWMutex, hashed by State via shardIndex).
+// Mutex, hashed by State via shardIndex).
 func NewCache() *Cache {
 	c := &Cache{}
 	for i := range c.shards {
@@ -91,7 +91,8 @@ func (c *Cache) Set(p path.Path, weight uint64) {
 // multiply) and only become visible under one Lock per touched shard at
 // Flush. It exists to cut the lock/wake churn of per-leaf Set on hot tables;
 // it stores no data of its own beyond the pending basket. Not thread-safe:
-// exactly one goroutine owns a Staging, concurrent Stagings and Get are safe.
+// exactly one goroutine owns a Staging; concurrent Stagings of distinct
+// goroutines are safe.
 type Staging struct {
 	cache   *Cache
 	baskets [numShards][]Entry // staged contributions per destination shard
@@ -141,94 +142,57 @@ func (s *Staging) Flush() {
 	s.pending = 0
 }
 
-// Reader is a lock-free read handle of a quiescent Cache (plan 15): direct
-// map lookups without any locking. Its precondition belongs to the calling
-// pipeline, not to this type — it must be created only once every writer is
-// done (the generation phase barrier) and used while no writer exists; Go
-// maps are safe for concurrent readers, so many Readers coexist freely.
-// Violating the precondition is a data race by contract — the same class as
-// Each's "no writers" rule.
-type Reader struct {
+// View is an immutable read handle of a sealed Cache (plan 16): lock-free Get,
+// Len and the All pull-walk, all reading the live maps without any locking.
+// Its precondition belongs to the calling pipeline, not to this type — it is
+// created only by Seal, once every writer is done, and used while no writer
+// exists; Go maps are safe for concurrent readers, so many Views (and many
+// walks) coexist freely. Violating the precondition is a data race by contract.
+type View struct {
 	cache *Cache
 }
 
-// Reader returns a lock-free read handle of c. Creating it after a barrier to
-// all writers (e.g. errgroup.Wait or ItemsCount) establishes happens-before
-// with every write the Reader will observe.
-func (c *Cache) Reader() *Reader { return &Reader{cache: c} }
+// Seal is the read barrier of the write → seal → read protocol: it returns a
+// lock-free read handle of c. Calling it after a barrier to all writers (e.g.
+// errgroup.Wait or a final Staging.Flush) establishes happens-before with every
+// write the View will observe. Repeated Seal yields independent handles over
+// the same table; no writer may exist while any View lives (specs/cache.md).
+func (c *Cache) Seal() *View { return &View{cache: c} }
 
 // Get looks the key up without locking; ok is false for an absent key.
-func (r *Reader) Get(p path.Path) (uint64, bool) {
-	sh := &r.cache.shards[shardIndex(p)]
+func (v *View) Get(p path.Path) (uint64, bool) {
+	sh := &v.cache.shards[shardIndex(p)]
 	weight, found := sh.data[p]
 	return weight, found
 }
 
-// Get reads a key concurrently with live writers (RLock). ok is false for an
-// absent key; misses are legal mid-run — counting correctness relies on the
-// phase barrier in the caller, not on visibility here.
-func (c *Cache) Get(p path.Path) (uint64, bool) {
-	sh := &c.shards[shardIndex(p)]
-	sh.mu.RLock()
-	weight, found := sh.data[p]
-	sh.mu.RUnlock()
-	return weight, found
-}
-
-// ItemsCount is the number of stored records; each shard is counted under its
-// own read lock.
-func (c *Cache) ItemsCount() int {
+// Len is the number of stored records; constant after Seal because no writer
+// exists any more — shards are summed without locking.
+func (v *View) Len() int {
 	total := 0
-	for i := range c.shards {
-		sh := &c.shards[i]
-		sh.mu.RLock()
-		total += len(sh.data)
-		sh.mu.RUnlock()
+	for i := range v.cache.shards {
+		total += len(v.cache.shards[i].data)
 	}
 	return total
 }
 
-// Each dispatches the count phase over every stored record without copying the
-// table (specs/cache.md, plan 09): one goroutine per shard, at most workers at
-// a time; workers < 1 clamps to the shard count (full parallelism — there is
-// never more to run). Per shard: ctx check → RLock → f for each record →
-// RUnlock. Data is NOT drained — Get keeps seeing every shard through the
-// whole walk, and dispatch allocates nothing (peak is the worker stacks). f
-// runs under the shard's read lock, legal only while no writer exists (phase
-// invariant); the shared RLock stays concurrent with Get of any shard,
-// including its own. The first error from f stops scheduling new shards and is
-// returned; a cancelled ctx ends the walk before the next shard and Each
-// returns ctx.Err().
-func (c *Cache) Each(ctx context.Context, workers int, f func(ctx context.Context, p path.Path, weight uint64) error) error {
-	// SetLimit(0) parks the first Go forever (zero-capacity semaphore); only
-	// negative limits are unbounded in errgroup. Clamp explicitly instead —
-	// more than one goroutine per shard would idle anyway.
-	if workers < 1 {
-		workers = numShards
-	}
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(workers)
-	for i := range c.shards {
-		sh := &c.shards[i]
-		g.Go(func() error {
-			if err := gctx.Err(); err != nil {
-				return err
+// All is the lock-free pull-walk over every record of the sealed table, with
+// no copying (specs/cache.md): entries come straight out of the live maps
+// under Seal's no-writers precondition. Order — shard 0..127, Go map order
+// within a shard; ctx is checked at each shard boundary, a terminated ctx
+// ends the walk there (a consumer gets a prefix). Breaking out of the range
+// stops the walk early and is not an error; the iterator has no error source.
+func (v *View) All(ctx context.Context) iter.Seq[Entry] {
+	return func(yield func(Entry) bool) {
+		for i := range v.cache.shards {
+			if ctx.Err() != nil {
+				return
 			}
-			return eachShard(sh, gctx, f)
-		})
-	}
-	return g.Wait()
-}
-
-// eachShard calls f for every record of one shard under its read lock; the
-// first non-nil f result aborts the rest of that shard.
-func eachShard(sh *cacheShard, ctx context.Context, f func(ctx context.Context, p path.Path, weight uint64) error) error {
-	sh.mu.RLock()
-	defer sh.mu.RUnlock()
-	for p, w := range sh.data {
-		if err := f(ctx, p, w); err != nil {
-			return err
+			for p, w := range v.cache.shards[i].data {
+				if !yield(Entry{Path: p, Weight: w}) {
+					return
+				}
+			}
 		}
 	}
-	return nil
 }

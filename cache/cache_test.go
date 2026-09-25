@@ -2,8 +2,6 @@ package cache
 
 import (
 	"context"
-	"errors"
-	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -15,6 +13,9 @@ import (
 	"knighttour/state"
 )
 
+// TestCacheSetGetAndZeroWeight pins Set's additive semantics and the sealed
+// View's hit/miss/Len over them (specs/cache.md): reads exist only through a
+// handle taken after the writers are done.
 func TestCacheSetGetAndZeroWeight(t *testing.T) {
 	tests := []struct {
 		setup     func(c *Cache)
@@ -68,165 +69,113 @@ func TestCacheSetGetAndZeroWeight(t *testing.T) {
 			if tt.setup != nil {
 				tt.setup(c)
 			}
-			val, found := c.Get(tt.query)
+			v := c.Seal() // writers done — barrier point
+			val, found := v.Get(tt.query)
 			assert.Equal(t, tt.wantVal, val)
 			assert.Equal(t, tt.wantFound, found)
-			assert.Equal(t, tt.wantItems, c.ItemsCount())
+			assert.Equal(t, tt.wantItems, v.Len())
 		})
 	}
 }
 
-// eachUnion walks c once via Each and folds the delivered records into a map,
-// asserting on the way that every record the callback sees is exactly what Get
-// returns for its key (specs/cache.md).
-func eachUnion(t *testing.T, c *Cache, workers int) map[path.Path]uint64 {
+// walkAll collects one full All walk of the sealed table into a map and
+// asserts on the way that every delivered record matches Get for its key and
+// no key is emitted twice (specs/cache.md).
+func walkAll(t *testing.T, v *View) map[path.Path]uint64 {
 	t.Helper()
-	m := make(map[path.Path]uint64)
-	var mu sync.Mutex
-	err := c.Each(context.Background(), workers, func(_ context.Context, p path.Path, w uint64) error {
-		stored, found := c.Get(p) // shared RLock: Get works from inside the walk
-		assert.Truef(t, found, "Get lost record %v", p)
-		assert.Equal(t, w, stored)
-		mu.Lock()
-		defer mu.Unlock()
-		_, dup := m[p]
-		assert.False(t, dup, "key emitted by two shards")
-		m[p] = w
-		return nil
-	})
-	require.NoError(t, err)
+	m := make(map[path.Path]uint64, v.Len())
+	for e := range v.All(context.Background()) {
+		stored, found := v.Get(e.Path)
+		assert.Truef(t, found, "Get lost record %v", e.Path)
+		assert.Equal(t, e.Weight, stored)
+		_, dup := m[e.Path]
+		assert.False(t, dup, "key emitted twice")
+		m[e.Path] = e.Weight
+	}
 	return m
 }
 
-// Each covers the whole table exactly once — no duplicates, no losses — with
-// workers clamped (0), a single worker and many, and leaves every record in
-// place: Get still sees it and a repeated walk is identical (specs/cache.md).
-func TestCacheEachCoversTable(t *testing.T) {
+// All covers the whole table exactly once — no duplicates, no losses — Len
+// equals the delivered count, and a repeated walk over the same handle sees
+// the identical set: the walk never drains or mutates (specs/cache.md).
+func TestViewAllCoversTable(t *testing.T) {
 	const n = 500
-	tests := []struct {
-		name    string
-		workers int
-	}{
-		{name: "zero workers clamped", workers: 0},
-		{name: "single worker", workers: 1},
-		{name: "many workers", workers: 8},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			c := NewCache()
-			for i := range n {
-				c.Set(path.New(state.State(i), i%17), uint64(i+1))
-			}
-
-			first := eachUnion(t, c, tt.workers)
-			assert.Len(t, first, n, "Each covers the table once")
-			assert.Equal(t, n, c.ItemsCount(), "Each must not drain the table")
-			assert.Equal(t, first, eachUnion(t, c, tt.workers), "repeated walk is identical (data stays)")
-		})
-	}
-}
-
-// Cancelling ctx stops the walk before the next shard: with a single worker at
-// most the shard in flight finishes, so strictly less than the full table is
-// delivered and Each returns ctx.Err() (specs/cache.md).
-func TestCacheEachCtxCancelStopsWalk(t *testing.T) {
 	c := NewCache()
-	const n = 2000
 	for i := range n {
-		c.Set(path.New(state.State(i), 0), uint64(i+1))
+		c.Set(path.New(state.State(i), i%17), uint64(i+1))
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	var seen int
-	err := c.Each(ctx, 1, func(_ context.Context, _ path.Path, _ uint64) error {
-		seen++
-		if seen == 1 {
-			cancel()
-		}
-		return nil
-	})
-	require.ErrorIs(t, err, context.Canceled)
-	assert.Positive(t, seen, "the shard in flight still delivers its records")
-	assert.Less(t, seen, n, "cancelled walk stops before the whole table")
+	v := c.Seal()
+	first := walkAll(t, v)
+	assert.Len(t, first, n, "All covers the table once")
+	assert.Equal(t, n, v.Len(), "All must not drain the table")
+	assert.Equal(t, first, walkAll(t, v), "repeated walk is identical (data stays)")
 }
 
-// The first error from f is returned by Each and stops scheduling new shards:
-// with a single worker the walk ends at exactly that record (specs/cache.md).
-func TestCacheEachStopsOnFirstError(t *testing.T) {
+// Breaking out of an All walk ends it there — a strict prefix shorter than the
+// full table, no panic, and the table intact (specs/cache.md: break is not an
+// error, the iterator has no error source).
+func TestViewAllBreakGivesPrefix(t *testing.T) {
 	c := NewCache()
 	const n = 100
 	for i := range n {
 		c.Set(path.New(state.State(i), 0), uint64(i+1))
 	}
 
-	wantErr := errors.New("callback failed")
-	var seen int
-	err := c.Each(context.Background(), 1, func(_ context.Context, _ path.Path, _ uint64) error {
-		seen++
-		return wantErr
-	})
-	require.ErrorIs(t, err, wantErr)
-	assert.Equal(t, 1, seen, "the first error stops the walk")
-}
-
-// walkOnce runs one full Each walk of c and reports how many records of st it
-// delivered plus the first callback error. A weight mismatch is surfaced as an
-// error so Each aborts that shard — safe because every reader drives its own
-// walk with a fresh context.
-func walkOnce(c *Cache, st state.State) (int, error) {
+	v := c.Seal()
 	seen := 0
-	err := c.Each(context.Background(), 4, func(_ context.Context, p path.Path, w uint64) error {
-		if p.State() != st {
-			return nil
-		}
-		if want := uint64(p.End() + 1); w != want {
-			return fmt.Errorf("weight for end %d: got %d want %d", p.End(), w, want)
-		}
+	for range v.All(context.Background()) {
 		seen++
-		return nil
-	})
-	return seen, err
+		if seen == 5 {
+			break
+		}
+	}
+	assert.Equal(t, 5, seen, "break ends the walk at that record")
+	assert.Equal(t, n, v.Len(), "a partial walk leaves the table intact")
 }
 
-// Concurrent Get and Each of one shard under -race: readers share the RLock
-// (no writers in the count phase), so every walk is consistent with the live
-// table and nothing is mutated. All keys share one State → one shard: walks
-// and Gets contend on exactly one read lock (specs/cache.md). n = 256 is the
-// whole uint8 end range — the distinct keys one State can hold.
-func TestCacheConcurrentGetAndEach(t *testing.T) {
+// A terminated ctx stops the All walk at a shard boundary: cancel mid-walk
+// delivers strictly fewer records than the full table, an already terminated
+// ctx delivers none (specs/cache.md).
+func TestViewAllCtxCancelStopsWalk(t *testing.T) {
 	c := NewCache()
-	const n = 256
-	const st = state.State(0x5F00FF00)
-	for e := range n {
-		c.Set(path.New(st, e), uint64(e+1))
+	const n = 2000
+	for i := range n {
+		c.Set(path.New(state.State(i), 0), uint64(i+1))
 	}
 
-	var missing, badWalks atomic.Int64
-	var wg sync.WaitGroup
-	for range 4 {
-		wg.Go(func() {
-			for i := range n {
-				if _, found := c.Get(path.New(st, i)); !found {
-					missing.Add(1)
+	tests := []struct {
+		name        string
+		cancelInRun bool // else cancel before the first iteration
+	}{
+		{name: "cancelled mid-walk", cancelInRun: true},
+		{name: "already cancelled", cancelInRun: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if !tt.cancelInRun {
+				cancel()
+			}
+
+			v := c.Seal()
+			seen := 0
+			for range v.All(ctx) {
+				seen++
+				if tt.cancelInRun {
+					cancel()
 				}
 			}
-		})
-		wg.Go(func() {
-			for range 50 {
-				seen, err := walkOnce(c, st)
-				if err != nil || seen != n {
-					badWalks.Add(1)
-				}
+			assert.Less(t, seen, n, "cancelled walk stops before the whole table")
+			if tt.cancelInRun {
+				assert.Positive(t, seen, "the shard in flight still delivers its records")
+			} else {
+				assert.Zero(t, seen, "a terminated ctx yields no records")
 			}
 		})
 	}
-	wg.Wait()
-
-	assert.Zero(t, missing.Load(), "Get never loses a record during concurrent walks")
-	assert.Zero(t, badWalks.Load(), "every walk sees all records with correct weights")
-	assert.Equal(t, n, c.ItemsCount(), "readers must not mutate the table")
 }
 
 // Sharding invariant (specs/cache.md): all ends of one State hash to one
@@ -247,9 +196,10 @@ func TestShardIndexIsStateOnly(t *testing.T) {
 	assert.Greater(t, len(seen), 1, "hash must spread distinct states")
 }
 
-// Concurrent Set/Get of disjoint key ranges under -race: every record written
-// is readable afterwards with the full summed weight.
-func TestCacheConcurrentSetGet(t *testing.T) {
+// Concurrent Set of overlapping keys under -race: every record written is
+// readable after the barrier with the full summed weight through a sealed
+// View (writers-only Mutex; reads exist only post-barrier).
+func TestCacheConcurrentSet(t *testing.T) {
 	const writers = 8
 	const perWriter = 2000
 
@@ -258,29 +208,29 @@ func TestCacheConcurrentSetGet(t *testing.T) {
 	for range writers {
 		wg.Go(func() {
 			for i := range perWriter {
-				k := path.New(state.State(i), 0) // same keys across writers → sums merge
-				c.Set(k, 1)
-				c.Get(k) // concurrent readers over live writers
+				c.Set(path.New(state.State(i), 0), 1) // same keys across writers → sums merge
 			}
 		})
 	}
 	wg.Wait()
 
-	assert.Equal(t, perWriter, c.ItemsCount(), "same keys merge across writers")
+	v := c.Seal()
+	assert.Equal(t, perWriter, v.Len(), "same keys merge across writers")
 	for i := range perWriter {
-		weight, found := c.Get(path.New(state.State(i), 0))
-		assert.True(t, found)
+		weight, found := v.Get(path.New(state.State(i), 0))
+		require.True(t, found)
 		assert.Equal(t, uint64(writers), weight)
 	}
 }
 
-// assertVisible checks that exactly want[path] entries of keys are visible in c
-// (right weight, found) and every other key misses.
-func assertVisible(t *testing.T, c *Cache, want map[path.Path]uint64, keys ...path.Path) {
+// assertVisible checks that exactly want[path] entries of keys are visible in
+// the sealed view (right weight, found) and every other key misses; Len bounds
+// the table to the visible set.
+func assertVisible(t *testing.T, v *View, want map[path.Path]uint64, keys ...path.Path) {
 	t.Helper()
 	stored := 0
 	for _, k := range keys {
-		w, found := c.Get(k)
+		w, found := v.Get(k)
 		wantW, wantFound := want[k]
 		assert.Equalf(t, wantFound, found, "visibility of %v", k)
 		if wantFound {
@@ -288,50 +238,62 @@ func assertVisible(t *testing.T, c *Cache, want map[path.Path]uint64, keys ...pa
 			stored++
 		}
 	}
-	assert.Equal(t, stored, c.ItemsCount(), "no records beyond the visible set")
+	assert.Equal(t, stored, v.Len(), "no records beyond the visible set")
 }
 
-// Staging buffers contributions until a flush boundary: invisible before it,
-// additive after (duplicates inside one batch collapse), zero weight is never
-// staged and does not consume the limit, auto-flush at the limit loses
-// nothing, and limit < 1 clamps to per-Set flushing (specs/cache.md).
+// stagedCount is the writer-side state a test may inspect in-package: entries
+// still buffered across all baskets (specs/cache.md: before the flush they
+// live in the Staging, not in the table).
+func stagedCount(s *Staging) int {
+	total := 0
+	for i := range s.baskets {
+		total += len(s.baskets[i])
+	}
+	return total
+}
+
+// Staging buffers contributions until a flush boundary: before it they sit in
+// the baskets, after Flush + Seal every emission is visible via View.Get
+// (duplicates inside one batch collapse), zero weight is never staged and does
+// not consume the limit, auto-flush at the limit loses nothing, and limit < 1
+// clamps to per-Set flushing (specs/cache.md).
 func TestStagingFlushBoundaries(t *testing.T) {
 	k1 := path.New(state.State(0b1), 1)
 	k2 := path.New(state.State(0b100), 2)
 
 	tests := []struct {
 		ops        func(s *Staging)
-		before     map[path.Path]uint64
 		afterFlush map[path.Path]uint64
 		name       string
+		wantStaged int
 		limit      int
 	}{
 		{
 			name:       "batch invisible until explicit flush",
 			limit:      100,
 			ops:        func(s *Staging) { s.Set(k1, 3); s.Set(k1, 4); s.Set(k2, 5) },
-			before:     map[path.Path]uint64{},
+			wantStaged: 3,
 			afterFlush: map[path.Path]uint64{k1: 7, k2: 5},
 		},
 		{
 			name:       "zero weight is no-op and does not consume the limit",
 			limit:      1,
 			ops:        func(s *Staging) { s.Set(k1, 0); s.Set(k1, 6) },
-			before:     map[path.Path]uint64{k1: 6}, // auto-flushed by the weight-6 Set alone
+			wantStaged: 0, // auto-flushed by the weight-6 Set alone; zero never staged
 			afterFlush: map[path.Path]uint64{k1: 6},
 		},
 		{
 			name:       "auto-flush at limit, tail buffered",
 			limit:      2,
 			ops:        func(s *Staging) { s.Set(k1, 1); s.Set(k2, 2); s.Set(k1, 3) },
-			before:     map[path.Path]uint64{k1: 1, k2: 2},
+			wantStaged: 1,
 			afterFlush: map[path.Path]uint64{k1: 4, k2: 2},
 		},
 		{
 			name:       "limit clamped to one flushes per Set",
 			limit:      0,
 			ops:        func(s *Staging) { s.Set(k1, 2) },
-			before:     map[path.Path]uint64{k1: 2},
+			wantStaged: 0,
 			afterFlush: map[path.Path]uint64{k1: 2},
 		},
 	}
@@ -341,18 +303,19 @@ func TestStagingFlushBoundaries(t *testing.T) {
 			c := NewCache()
 			s := c.NewStaging(tt.limit)
 			tt.ops(s)
-			assertVisible(t, c, tt.before, k1, k2)
+			assert.Equal(t, tt.wantStaged, stagedCount(s), "unflushed contributions stay in the baskets")
+
 			s.Flush()
-			assertVisible(t, c, tt.afterFlush, k1, k2)
+			assertVisible(t, c.Seal(), tt.afterFlush, k1, k2)
 			s.Flush() // idempotent on drained baskets
-			assertVisible(t, c, tt.afterFlush, k1, k2)
+			assertVisible(t, c.Seal(), tt.afterFlush, k1, k2)
 		})
 	}
 }
 
-// Concurrent Staging writers (one per goroutine) over overlapping keys plus
-// concurrent Get under -race: every key sums across all writers — flush
-// boundaries lose nothing and batched writes stay visible to readers.
+// Concurrent Staging writers (one per goroutine) over overlapping keys under
+// -race: after the barrier and a single Seal every key sums across all
+// writers — flush boundaries lose nothing.
 func TestStagingConcurrentWriters(t *testing.T) {
 	const writers = 8
 	const perWriter = 1000
@@ -364,49 +327,58 @@ func TestStagingConcurrentWriters(t *testing.T) {
 			s := c.NewStaging(64)
 			defer s.Flush()
 			for i := range perWriter {
-				k := path.New(state.State(i), 0) // same keys across writers → sums merge
-				s.Set(k, 1)
-				c.Get(k) // readers over live batched writers
+				s.Set(path.New(state.State(i), 0), 1) // same keys across writers → sums merge
 			}
 		})
 	}
 	wg.Wait()
 
-	assert.Equal(t, perWriter, c.ItemsCount())
+	v := c.Seal()
+	assert.Equal(t, perWriter, v.Len())
 	for i := range perWriter {
-		weight, found := c.Get(path.New(state.State(i), 0))
+		weight, found := v.Get(path.New(state.State(i), 0))
 		require.True(t, found)
 		assert.Equal(t, uint64(writers), weight)
 	}
 }
 
-// Reader is the lock-free post-barrier handle: its hit/miss and weights match
-// Get on a table that no longer has writers, and concurrent Readers under
-// -race observe one identical snapshot (specs/cache.md).
-func TestReaderMatchesGetConcurrently(t *testing.T) {
+// Concurrent Views of one sealed table under -race: independent Seal handles,
+// parallel Get and All walks all observe one identical snapshot — reads take
+// no locks because no writer exists (specs/cache.md).
+func TestViewConcurrentHandlesAgree(t *testing.T) {
 	c := NewCache()
 	const n = 2000
 	for i := range n {
 		c.Set(path.New(state.State(i), i%3), uint64(i+1)) // writers done — barrier point
 	}
 
-	var mismatches atomic.Int64
+	var mismatches, lostWalks atomic.Int64
 	var wg sync.WaitGroup
 	for range 4 {
-		r := c.Reader()
+		v := c.Seal()
 		wg.Go(func() {
 			for i := range n {
-				gotW, gotOK := r.Get(path.New(state.State(i), i%3))
-				wantW, wantOK := c.Get(path.New(state.State(i), i%3))
-				if gotW != wantW || gotOK != wantOK {
+				gotW, gotOK := v.Get(path.New(state.State(i), i%3))
+				if !gotOK || gotW != uint64(i+1) {
 					mismatches.Add(1)
+				}
+			}
+		})
+		wg.Go(func() {
+			for range 50 {
+				seen := make(map[path.Path]uint64, n)
+				for e := range v.All(context.Background()) {
+					seen[e.Path] = e.Weight
+				}
+				if len(seen) != n || seen[path.New(state.State(7), 1)] != 8 {
+					lostWalks.Add(1)
 				}
 			}
 		})
 	}
 	wg.Wait()
 
-	assert.Zero(t, mismatches.Load(), "Reader must agree with Get on a quiescent table")
-	_, found := c.Reader().Get(path.New(state.State(n+7), 0))
-	assert.False(t, found, "miss stays (0,false)")
+	assert.Zero(t, mismatches.Load(), "every View agrees with the written weights")
+	assert.Zero(t, lostWalks.Load(), "every walk sees the whole snapshot")
+	assert.Equal(t, n, c.Seal().Len(), "reads must not mutate the table")
 }

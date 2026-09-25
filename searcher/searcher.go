@@ -74,7 +74,7 @@ func (s *Searcher) ExtendTask(ctx context.Context, c cache.Sink, p path.Path, we
 // descent without any cache access (the reversal duality is unreachable).
 // Statistics: TotalPathsFound, CacheHits/CacheMisses per lookup, pruning by
 // reason.
-func (s *Searcher) CountPathsWithCacheReversal(ctx context.Context, p path.Path, c *cache.Reader, d int) (result types.Result) {
+func (s *Searcher) CountPathsWithCacheReversal(ctx context.Context, p path.Path, c *cache.View, d int) (result types.Result) {
 	stopLevel := -1 // disabled sentinel: full descent
 	if c != nil && 2*d <= s.graph.GetTotalCells() {
 		stopLevel = s.graph.GetTotalCells() - d
@@ -126,7 +126,7 @@ func (s *Searcher) dfsTask(ctx context.Context, st state.State, end, depth int, 
 // dfsCount is the reversal count-DFS: full descent (a full board counts 1)
 // unless stopLevel ≥ 0 and the visit count hits it exactly, where Completions
 // answers through the task cache. Steps grow bits one at a time, so == suffices.
-func (s *Searcher) dfsCount(ctx context.Context, st state.State, end, stopLevel int, c *cache.Reader, res *types.Result) int {
+func (s *Searcher) dfsCount(ctx context.Context, st state.State, end, stopLevel int, c *cache.View, res *types.Result) int {
 	if ctx.Err() != nil {
 		return 0
 	}
@@ -165,7 +165,7 @@ func (s *Searcher) dfsCount(ctx context.Context, st state.State, end, stopLevel 
 // fiber — W = orbitSize·h(U,u) — hence the exact division (specs/searcher.md,
 // ADR-011). Missing entries contribute 0 (no such prefix ⇒ h == 0); every
 // lookup is attributed to res without atomics (one Result per worker).
-func (s *Searcher) completions(unvisited state.State, end int, c *cache.Reader, res *types.Result) int {
+func (s *Searcher) completions(unvisited state.State, end int, c *cache.View, res *types.Result) int {
 	cand := s.graph.GetNeighborMask(end).Intersect(unvisited)
 	states := s.sym.TransformStates(unvisited)
 

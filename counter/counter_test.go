@@ -4,8 +4,6 @@ import (
 	"context"
 	"runtime/metrics"
 	"slices"
-	"sync"
-	"sync/atomic"
 	"testing"
 	"time"
 
@@ -16,6 +14,7 @@ import (
 	"knighttour/graph"
 	"knighttour/monitoring"
 	"knighttour/path"
+	"knighttour/state"
 )
 
 func TestSequentalCount(t *testing.T) {
@@ -137,9 +136,9 @@ func TestWorkerInvariance(t *testing.T) {
 }
 
 // A terminated context — cancelled or expired — must end the pipeline as a
-// partial run without a panic (specs/counter.md): both Cache.Each walks treat
-// any ctx termination alike (counting stops producing and its consumers drain
-// the closed stack without counting), only non-ctx errors are bugs.
+// partial run without a panic (specs/counter.md): both All walks treat any ctx
+// termination alike (counting stops producing and its consumers drain the
+// closed channel without counting), only non-ctx errors are bugs.
 func TestTerminatedContextPartialRun(t *testing.T) {
 	tests := []struct {
 		ctxFunc func() context.Context
@@ -170,17 +169,15 @@ func TestTerminatedContextPartialRun(t *testing.T) {
 	}
 }
 
-// tableWeight sums every record's weight via a single-worker Each walk,
-// asserting positivity along the way (specs/cache.md: zeros are never stored).
+// tableWeight sums every record's weight via one sealed All walk, asserting
+// positivity along the way (specs/cache.md: zeros are never stored).
 func tableWeight(t *testing.T, c *cache.Cache) uint64 {
 	t.Helper()
 	total := uint64(0)
-	err := c.Each(context.Background(), 1, func(_ context.Context, _ path.Path, weight uint64) error {
-		assert.Positive(t, weight, "weight must be positive")
-		total += weight
-		return nil
-	})
-	require.NoError(t, err)
+	for e := range c.Seal().All(context.Background()) {
+		assert.Positive(t, e.Weight, "weight must be positive")
+		total += e.Weight
+	}
 	return total
 }
 
@@ -306,7 +303,7 @@ func orDefault(value, def int) int {
 	return value
 }
 
-// The effective flush/claim granularity Beff of plan 13 is pinned at its formula
+// The effective dispatch granularity Beff of plan 13 is pinned at its formula
 // boundaries (specs/counter.md): per-record while records ≤ consumers·C, ceiling B
 // once records ≥ B·consumers·C. The rows are the measured 6×6 regression shapes and
 // the saturation edge at workers = 14 (integer division); the knobs are explicit
@@ -344,53 +341,66 @@ func TestEffectiveBatch(t *testing.T) {
 	}
 }
 
-// A table below the batch ceiling — the plan-13 regression shapes — is delivered one
-// record per claim (specs/counter.md): a stack wired with effectiveBatch hands out
-// single entries while the formula is active and full B-sized claims once saturated.
-func TestTaskStackClaimsFollowEffectiveBatch(t *testing.T) {
+// dispatchProbe streams a table of n records (distinct keys, weights 1..n)
+// through dispatchEntries into a channel of bufferSlots batch slots and one
+// consumer, returning the delivered weights in arrival order. Batch sizes are
+// pinned on the way: never above Beff, at most one short tail — whole-slot
+// sends only (specs/counter.md).
+func dispatchProbe(tb testing.TB, n, batch, bufferSlots int) []uint64 {
+	tb.Helper()
+	c := cache.NewCache()
+	for i := range n {
+		c.Set(path.New(state.State(i), 0), uint64(i+1))
+	}
+	view := c.Seal()
+	require.Equal(tb, n, view.Len())
+
+	ch := make(chan entryBatch, bufferSlots)
+	go func() {
+		dispatchEntries(context.Background(), view, batch, ch)
+		close(ch) // the walk is done — mirrors countTasks.
+	}()
+
+	var got []uint64
+	batches := 0
+	for b := range ch {
+		batches++
+		require.Positive(tb, b.n, "an empty batch never ships")
+		assert.LessOrEqual(tb, b.n, batch, "a batch never exceeds Beff")
+		for _, e := range b.items[:b.n] {
+			got = append(got, e.Weight)
+		}
+	}
+	assert.Equal(tb, (n+batch-1)/batch, batches, "full batches plus at most one tail")
+	return got
+}
+
+// The dispatch channel delivers every record exactly once at any buffer size —
+// a single slot forces every send to wait for the consumer's drain (whole-slot
+// backpressure, specs/counter.md) — and per-record Beff ships one record per
+// batch, the small-table shape of the plan-13 regressions.
+func TestDispatchEntriesExactOnceUnderBackpressure(t *testing.T) {
 	tests := []struct {
-		name      string
-		records   int
-		wantClaim int
+		name        string
+		n           int
+		batch       int
+		bufferSlots int
 	}{
-		{name: "6x6 d1 shape, per record", records: 6, wantClaim: 1},
-		{name: "6x6 d2 shape, per record", records: 20, wantClaim: 1},
-		{name: "6x6 d3 shape, per record", records: 73, wantClaim: 1},
-		{name: "saturated table, full batch", records: 896, wantClaim: dispatchClaimBatch},
+		{name: "full batches, buffer of one slot", n: 1024, batch: dispatchClaimBatch, bufferSlots: 1},
+		{name: "full batches, buffer of two slots", n: 1024, batch: dispatchClaimBatch, bufferSlots: 2},
+		{name: "full batches, buffer of five slots", n: 1000, batch: dispatchClaimBatch, bufferSlots: 5},
+		{name: "per-record Beff, buffer of one slot", n: 6, batch: 1, bufferSlots: 1},
 	}
 
-	const workers = 14
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			consumers := max(min(workers, tt.records), 1)
-			batch := effectiveBatch(tt.records, consumers, dispatchClaimBatch, dispatchGranularityC)
-			require.Equal(t, tt.wantClaim, batch, "the formula must produce the claimed granularity")
-
-			stack := newTaskStack(max(min(consumers*dispatchStackCapacity, tt.records), 1), batch)
-			flush := make([]cache.Entry, batch)
-			for range tt.records / batch {
-				stack.push(flush)
+			got := dispatchProbe(t, tt.n, tt.batch, tt.bufferSlots)
+			want := make([]uint64, tt.n)
+			for i := range want {
+				want[i] = uint64(i + 1)
 			}
-			if rest := tt.records % batch; rest > 0 {
-				stack.push(flush[:rest])
-			}
-			stack.close()
-
-			scratch := make([]cache.Entry, 0, batch)
-			delivered := 0
-			for {
-				var ok bool
-				scratch, ok = stack.pop(scratch[:0])
-				if !ok {
-					break
-				}
-				assert.LessOrEqual(t, len(scratch), batch, "a claim never exceeds Beff")
-				if tt.wantClaim == 1 {
-					assert.Len(t, scratch, 1, "the active formula delivers per record")
-				}
-				delivered += len(scratch)
-			}
-			assert.Equal(t, tt.records, delivered, "every record delivered exactly once")
+			slices.Sort(got)
+			assert.Equal(t, want, got, "every record delivered exactly once at %d buffer slots", tt.bufferSlots)
 		})
 	}
 }
@@ -407,25 +417,25 @@ func taskCacheAtDepth(c *Counter, ctx context.Context, depth int) *cache.Cache {
 }
 
 // sequentialTotal computes the Σ w·f(task) reference of a whole table with a
-// single-worker walk — the baseline the stack dispatch must reproduce. The
+// single sealed walk — the baseline the channel dispatch must reproduce. The
 // 5x5 total is asserted too, or every dispatch equality against it is vacuous.
 func sequentialTotal(t *testing.T, c *Counter, ctx context.Context, taskCache *cache.Cache, depth int) uint64 {
 	t.Helper()
+	memo := taskCache.Seal()
 	want := uint64(0)
-	require.NoError(t, taskCache.Each(ctx, 1, func(_ context.Context, p path.Path, w uint64) error {
-		res := c.searcher.CountPathsWithCacheReversal(ctx, p, taskCache.Reader(), depth)
-		want += uint64(res.TotalPathsFound) * w
-		return nil
-	}))
+	for e := range memo.All(ctx) {
+		res := c.searcher.CountPathsWithCacheReversal(ctx, e.Path, memo, depth)
+		want += uint64(res.TotalPathsFound) * e.Weight
+	}
 	assert.Equal(t, uint64(1728), want, "the sequential reference must count the whole 5x5 tour total")
 	return want
 }
 
-// The counting stack dispatch delivers every task-cache record to the
+// The counting channel dispatch delivers every task-cache record to the
 // consumers exactly once (specs/counter.md): the parallel total equals the
-// sequential Σ w·f(task) reference and the phase completes exactly ItemsCount
+// sequential Σ w·f(task) reference and the phase completes exactly View.Len()
 // tasks, whatever the worker count — including a below-ceiling table with the
-// Beff formula active. LIFO is the only claim order (ADR-020).
+// Beff formula active. FIFO walk order is the contract of plan 16.
 func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -440,7 +450,7 @@ func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			taskCache := taskCacheAtDepth(c, ctx, tt.depth)
-			items := taskCache.ItemsCount()
+			items := taskCache.Seal().Len()
 			require.Positive(t, items)
 			if tt.depth == 1 {
 				require.Less(t, items, dispatchClaimBatch, "the table must stay below the batch ceiling")
@@ -450,7 +460,7 @@ func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
 
 			for _, workers := range []int{1, 4, 8} {
 				fm := monitoring.NewFakeMonitor()
-				got := c.countTasks(ctx, fm, workers, taskCache, tt.depth, dispatchStackCapacity)
+				got := c.countTasks(ctx, fm, workers, taskCache, tt.depth, dispatchCapacityPerConsumer)
 				assert.Equal(t, want, got, "workers=%d: dispatch must not drop or duplicate records", workers)
 				counting := fm.Phase("counting")
 				assert.Equal(t, uint64(items), counting.Completed, "workers=%d: every record counted exactly once", workers)
@@ -460,31 +470,31 @@ func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
 	}
 }
 
-// A stack far smaller than the record count makes every full-stack flush block
-// under the shard RLock until the consumers drain; that must neither deadlock
-// nor change the total (specs/counter.md), and stackK is the explicit seam of
+// A buffer far smaller than the record count makes every send block until the
+// consumers drain a whole slot; that must neither deadlock nor change the
+// total (specs/counter.md), and capacityPerConsumer is the explicit seam of
 // countTasks. The gated 5x5 depth-4 table (forced-chain write gate pruned its
 // dead keys, ADR-030) holds a couple dozen records: with workers = 8 the Beff
-// formula gives per-record delivery and K = 1 caps the stack at consumers×K
-// slots — below the record count, so flushes block; with a lone consumer the
+// formula gives per-record delivery and K = 1 caps the capacity at consumers
+// records — below the record count, so sends block; with a lone consumer the
 // effective batch is a handful of records and K lands the capacity exactly on
-// one batch, so every flush waits for a drain.
+// one batch slot, so every send waits for a drain.
 func TestCountTasksForcedOverflow(t *testing.T) {
 	tests := []struct {
 		name    string
 		workers int
 		k       int // 0 = derive: lone-consumer capacity of exactly one batch
 	}{
-		{name: "K=1, stack of consumers slots", workers: 8, k: 1},
-		{name: "capacity of exactly one batch", workers: 1, k: 0},
+		{name: "K=1, capacity of consumers records", workers: 8, k: 1},
+		{name: "capacity of exactly one batch slot", workers: 1, k: 0},
 	}
 
 	const depth = 4
 	c := NewCounter(graph.New(5))
 	ctx := context.Background()
 	taskCache := taskCacheAtDepth(c, ctx, depth)
-	items := taskCache.ItemsCount()
-	require.Greater(t, items, 8, "the overflow scenario needs more records than the K=1 stack slots")
+	items := taskCache.Seal().Len()
+	require.Greater(t, items, 8, "the overflow scenario needs more records than the K=1 capacity")
 	want := sequentialTotal(t, c, ctx, taskCache, depth)
 
 	for _, tt := range tests {
@@ -493,121 +503,9 @@ func TestCountTasksForcedOverflow(t *testing.T) {
 			batch := effectiveBatch(items, consumers, dispatchClaimBatch, dispatchGranularityC)
 			fm := monitoring.NewFakeMonitor()
 			got := c.countTasks(ctx, fm, tt.workers, taskCache, depth, orDefault(tt.k, batch))
-			assert.Equal(t, want, got, "workers=%d: forced overflow must neither deadlock nor change the total", tt.workers)
+			assert.Equal(t, want, got, "workers=%d: forced backpressure must neither deadlock nor change the total", tt.workers)
 		})
 	}
-}
-
-// The stack is the phase's only hand-off (specs/counter.md): concurrent
-// producers must deliver every record exactly once to a single consumer at any
-// capacity — capacity 1 forces every flush through a full-stack block, and a
-// batch wider than the capacity splits it across grabs.
-func TestTaskStackExactOnce(t *testing.T) {
-	tests := []struct {
-		name     string
-		capacity int
-	}{
-		{name: "capacity 1, every flush blocks", capacity: 1},
-		{name: "capacity 2", capacity: 2},
-		{name: "capacity 5", capacity: 5},
-	}
-
-	const producers, perProducer = 4, 256
-	total := producers * perProducer
-	want := make([]uint64, total)
-	for i := range want {
-		want[i] = uint64(i)
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			stack := newTaskStack(tt.capacity, 16)
-			var lane atomic.Uint64
-			var wg sync.WaitGroup
-			wg.Add(producers)
-			for range producers {
-				go func() {
-					defer wg.Done()
-					buf := make([]cache.Entry, 0, 16)
-					for range perProducer / 16 {
-						for range 16 {
-							i := lane.Add(1) - 1
-							buf = append(buf, cache.Entry{Path: path.Path{}, Weight: i})
-						}
-						stack.push(buf)
-						buf = buf[:0]
-					}
-				}()
-			}
-			go func() {
-				wg.Wait()
-				stack.close()
-			}()
-
-			var got []uint64
-			scratch := make([]cache.Entry, 0, 16)
-			for {
-				var ok bool
-				scratch, ok = stack.pop(scratch[:0])
-				if !ok {
-					break
-				}
-				for _, e := range scratch {
-					got = append(got, e.Weight)
-				}
-			}
-			slices.Sort(got)
-			assert.Equal(t, want, got, "every record delivered exactly once at capacity %d", tt.capacity)
-		})
-	}
-}
-
-// LIFO is the single claim order of the contract (specs/counter.md, ADR-020):
-// on one fixed push/pop sequence the stack hands out the newest entries first.
-// Every pop reuses the same scratch buffer and pushes reuse freed slots, as
-// consumers do.
-func TestTaskStackClaimsLIFO(t *testing.T) {
-	const capacity, batch = 4, 2
-	stack := newTaskStack(capacity, batch)
-	scratch := make([]cache.Entry, 0, batch)
-
-	claim := func() []uint64 {
-		var ok bool
-		scratch, ok = stack.pop(scratch[:0])
-		if !ok {
-			return nil
-		}
-		assert.LessOrEqual(t, len(scratch), batch, "a claim never exceeds the batch size")
-		return weightsOf(scratch)
-	}
-
-	stack.push(entriesOf(1, 2, 3)) // three of four slots live
-	claims := make([][]uint64, 0, 3)
-	claims = append(claims, claim(), claim())
-	stack.push(entriesOf(4, 5)) // reuses the slots freed by the odd claim
-	claims = append(claims, claim())
-	stack.close()
-
-	assert.Equal(t, [][]uint64{{2, 3}, {1}, {4, 5}}, claims)
-	assert.Nil(t, claim(), "closed and drained ends the consumer loop")
-}
-
-// entriesOf builds a flush batch from weights, paths irrelevant to ordering.
-func entriesOf(weights ...uint64) []cache.Entry {
-	out := make([]cache.Entry, len(weights))
-	for i, w := range weights {
-		out[i] = cache.Entry{Weight: w}
-	}
-	return out
-}
-
-// weightsOf flattens the weights of a claimed batch.
-func weightsOf(batch []cache.Entry) []uint64 {
-	out := make([]uint64, len(batch))
-	for i, e := range batch {
-		out[i] = e.Weight
-	}
-	return out
 }
 
 // cancelSpyMonitor cancels its context the first time any paths are reported
@@ -626,7 +524,7 @@ func (m *cancelSpyMonitor) ReportPathsFound(count int) {
 }
 
 // Cancelling exactly at the first counted task leaves a partial total without
-// a panic: the stack is drained without counting, so with a single consumer
+// a panic: buffered batches drain without counting, so with a single consumer
 // exactly one task completes (specs/counter.md).
 func TestCancelDuringCountingGivesPartialTotal(t *testing.T) {
 	c := NewCounter(graph.New(5))
@@ -643,5 +541,5 @@ func TestCancelDuringCountingGivesPartialTotal(t *testing.T) {
 	})
 	assert.LessOrEqual(t, got, full, "a partial total never exceeds the full one")
 	counting := spy.Phase("counting")
-	assert.Equal(t, uint64(1), counting.Completed, "the stack entries after the first counted task are dropped without counting")
+	assert.Equal(t, uint64(1), counting.Completed, "the batches after the first counted task are drained without counting")
 }
