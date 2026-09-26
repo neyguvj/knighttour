@@ -90,7 +90,8 @@ go test -v -run='^$' -bench='BenchmarkCountAllTours/size[56]' -benchmem ./counte
   `SetGCPercent(0)`/`-gc-percent 0`, не env.
 - Любое изменение hot-path обязано прикладывать before/after числа (`make bench` /
   `make bench-size`) — нельзя заявлять выигрыш без измерения.
-- A/B фичи меряется против базы `merge-base HEAD origin/main`, снятой в отдельном base-worktree с
+- A/B фичи меряется против базы `merge-base HEAD main` (локальный `main` может быть впереди отстающего
+  `origin/main`), снятой в отдельном base-worktree с
   уникальным именем (фича живёт в своей worktree-ветке, переключателя-флага нет — ADR-021). Долгие
   точки (7×7) сериализуются глобальным `flock ../kt-bench.lock`: параллельные прогоны разных фич
   искажают тайминги и peak RSS. Механика — skill `workflow`; инвокация тяжёлых целей без flock блокируется гейтом G9 (`specs/gates.md`, ADR-025).

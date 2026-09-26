@@ -929,9 +929,9 @@ function staleSpecInstruction(target: string, specRel: string): string {
   );
 }
 
-/** `merge-base HEAD origin/main` (the A/B base of skill workflow), falling back to local `main`. */
+/** `merge-base HEAD main` (the A/B base of skill workflow), falling back to `origin/main`. */
 function branchBase(root: string): string | undefined {
-  for (const ref of ["origin/main", "main"]) {
+  for (const ref of ["main", "origin/main"]) {
     const sha = gitInTree(root, ["merge-base", "HEAD", ref])?.trim();
     if (sha !== undefined && sha !== "") return sha;
   }

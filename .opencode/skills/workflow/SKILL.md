@@ -21,9 +21,16 @@ description: Git-механика branch-per-feature (ADR-021) — открыт�
 
 ```bash
 git fetch
-git worktree add ../kt-<NN>-<slug> -b <NN>-<slug> origin/main
+# База — актуальный кончик main, НЕ origin/main вслепую: push только по явному запросу,
+# локальный main может быть впереди origin (незапушенные слияния) — и тогда база устарела.
+git status --porcelain                   # пусто; иначе попросить освободить main
+git merge --ff-only origin/main          # отстал → ff; впереди/равен → "Already up to date"
+git worktree add ../kt-<NN>-<slug> -b <NN>-<slug> main
 WT=$(cd ../kt-<NN>-<slug> && pwd)       # пин: все операции фичи — только здесь
 ```
+
+`--ff-only` упал — значит main и origin разошлись (rebase/force-push): стоп, разбор с пользователем,
+не «разрешать» слиянием. Свободные номера планов/ADR считать по этому же актуальному main.
 
 Контракт WORKTREE (действует до самого закрытия):
 
@@ -38,13 +45,14 @@ WT=$(cd ../kt-<NN>-<slug> && pwd)       # пин: все операции фич
 
 ## Замер A/B (без флага)
 
-База сравнения — `merge-base HEAD origin/main` (не `HEAD~1`; фича может быть многокоммитной).
+База сравнения — `merge-base HEAD main` (не `HEAD~1` и не `origin/main`, который может отставать;
+фича может быть многокоммитной).
 Каждый прогон в своём процессе; base-worktree с уникальным именем, чтобы параллельные фичи не
 сталкивались. Долгие точки (`make bench`/`bench-deep` на 7×7) сериализуются глобальным lock'ом —
 параллельные прогоны искажают тайминги и peak RSS:
 
 ```bash
-BASE=$(git merge-base HEAD origin/main)
+BASE=$(git merge-base HEAD main)
 git worktree add ../kt-base-<NN>-<slug> "$BASE"
 flock ../kt-bench.lock make bench-size N=<n> DEPTHS=<d>   # для HEAD и для базы по очереди
 git worktree remove ../kt-base-<NN>-<slug>

@@ -31,8 +31,9 @@ description: Полный пайплайн spec-first за тонким дисп
 Затем зафиксируй изоляцию (ADR-021/024). Сессия остаётся в основном репозитории — перезапуск не нужен:
 
 - Если для этой задачи WT уже зафиксирован ранее (или текущая ветка не `main`/`master`) — работай в нём.
-- Иначе возьми номер плана и slug, затем
-  `git fetch && git worktree add ../kt-<NN>-<slug> -b <NN>-<slug> origin/main` и зафиксируй
+- Иначе возьми номер плана и slug, затем обнови main (`git fetch` + `git merge --ff-only origin/main`;
+  push — только по явному запросу, локальный `main` может быть впереди origin, вслепую от `origin/main`
+  не ветвиться) и `git worktree add ../kt-<NN>-<slug> -b <NN>-<slug> main`, зафиксируй
   `WT=$(cd ../kt-<NN>-<slug> && pwd)`. С этого момента каждый bash — с cwd=`$WT` (параметр
   `workdir`) или `git -C "$WT"`, файлы — абсолютными путями под `$WT`, и каждый промпт субагента
   начинается со строки `WORKTREE: <путь>` (контракт — skill `workflow`). Не работай поверх `main`.
@@ -63,7 +64,7 @@ MINOR не блокируют — собирай их в список финал
 ## Фаза 3 — Бенчмарки (если изменение hot-path или план требует метрик)
 
 Вызови subagent `benchmarker` с изменёнными пакетами, целевыми точками (`N=… DEPTHS=…`) и
-`BASE_REF = merge-base HEAD origin/main` (не `HEAD~1`). Его `QUESTION:` — релеить. Вердикт
+`BASE_REF = merge-base HEAD main` (не `HEAD~1` и не отстающий `origin/main`). Его `QUESTION:` — релеить. Вердикт
 WIN/REGRESSION/NOISE и путь ADR — в финальный отчёт. REGRESSION к плановому изменению → стоп,
 обсудить с пользователем.
 
@@ -76,7 +77,7 @@ README: триггеры обновления (skill `readme-writing`) опре�
 
 Только при `APPROVED` + зелёном `make check` (не уверен — запусти сам). Иначе не закрывай, причину
 — в отчёт. Сначала зафиксируй фичу в feature-ветке: покажи `git status --short` и
-`git diff --stat $(git merge-base HEAD origin/main)`, затем `git add` поимённо + `git commit`.
+`git diff --stat $(git merge-base HEAD main)`, затем `git add` поимённо + `git commit`.
 
 Спроси tool `question`: закрыть как принято / отклонить / пропустить. Дальнейшую git-механику
 (`main` занят основным деревом — слияние только через `$MAIN`) выполняй по skill `workflow` → Закрытие:

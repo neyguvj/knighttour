@@ -16,7 +16,8 @@ description: Лёгкий spec-first путь в одном контексте (
 `git rev-parse --abbrev-ref HEAD`:
 
 - не `main`/`master` → ты уже в worktree фичи, продолжай к ШАГУ 1.
-- на `main`/`master` → `git fetch && git worktree add ../kt-<NN>-<slug> -b <NN>-<slug> origin/main`,
+- на `main`/`master` → `git fetch && git merge --ff-only origin/main && git worktree add ../kt-<NN>-<slug> -b <NN>-<slug> main`
+  (локальный `main` может быть впереди отстающего `origin/main` — база всегда актуальный `main`),
   зафиксируй `WT=$(cd ../kt-<NN>-<slug> && pwd)` и продолжай в ЭТОЙ же сессии (ADR-024): все команды —
   с cwd=`$WT` (параметр `workdir`) или `git -C "$WT"`, файлы — абсолютными путями под `$WT`
   (контракт WORKTREE, skill `workflow`). Не работай поверх `main`.

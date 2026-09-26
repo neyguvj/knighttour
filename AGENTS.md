@@ -22,8 +22,10 @@ branch is merged, "off" means it is not. Runtime input flags (`-size`, `-workers
 
 Lifecycle (all three commands follow it):
 
-1. **Open:** an accepted plan → `git fetch` → `git worktree add ../kt-<NN>-<slug> -b <NN>-<slug>
-   origin/main`, then pin `WT=$(cd ../kt-<NN>-<slug> && pwd)` and keep working in the same session —
+1. **Open:** an accepted plan → `git fetch` → refresh local `main` (`git merge --ff-only origin/main`;
+   push is explicit, so local `main` may be *ahead* of origin — branch from the up-to-date local `main`,
+   never blindly from `origin/main`) → `git worktree add ../kt-<NN>-<slug> -b <NN>-<slug> main`,
+   then pin `WT=$(cd ../kt-<NN>-<slug> && pwd)` and keep working in the same session —
    no restart, no `cd` (ADR-024). Plan, spec, code, tests and the ADR draft live only in that worktree;
    `main` stays unaware until close. Branch name `<NN>-<slug>` from the plan number; `/quick` without
    a plan uses `chore/<slug>`.
@@ -32,7 +34,7 @@ Lifecycle (all three commands follow it):
    plus the directive "run all commands in WORKTREE". The main tree is read-only while a feature
    worktree exists (gate G8, ADR-024). Features proceed in parallel, isolated by worktree — name the
    WT in each subagent prompt.
-3. **Measure:** A/B base is `merge-base HEAD origin/main`; the benchmarker uses a uniquely named
+3. **Measure:** A/B base is `merge-base HEAD main`; the benchmarker uses a uniquely named
    base worktree and serializes long points under `flock ../kt-bench.lock`.
 4. **Close:**
    - *Accepted (WIN):* squash onto current `main` (`git merge --squash`), push only on explicit
