@@ -2,11 +2,9 @@ package counter
 
 import (
 	"context"
+	"iter"
 	"runtime/debug"
-	"sync"
 	"sync/atomic"
-
-	"golang.org/x/sync/errgroup"
 
 	"knighttour/cache"
 	"knighttour/graph"
@@ -14,6 +12,7 @@ import (
 	"knighttour/path"
 	"knighttour/searcher"
 	"knighttour/symmetry"
+	"knighttour/workerpool"
 )
 
 // TwoPhaseBaseDepth is the intermediate table depth of generation phase A.
@@ -132,45 +131,31 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 	return c.countTasks(ctx, monitor, workers, taskCache, precomputeDepth, dispatchCapacityPerConsumer)
 }
 
-// extendTasks runs phase B (specs/counter.md): chunk workers extend every
-// intermediate entry to the target depth and write leaves into a fresh
+// extendTasks runs phase B (specs/counter.md): a workerpool.Run crew extends
+// every intermediate entry to the target depth and writes leaves into a fresh
 // task-cache through a private Staging each (batched writes, ADR-031). The
-// returned table is not yet sealed — the caller stops all writers via the
-// errgroup barrier before counting.
+// returned table is not yet sealed — the caller stops all writers via the Run
+// barrier before counting.
 func (c *Counter) extendTasks(ctx context.Context, monitor monitoring.Monitor, workers int, intermediate []cache.Entry, precomputeDepth int) *cache.Cache {
 	monitor.BeginPhase("gen B")
 	monitor.AddTasks(len(intermediate))
 
 	taskCache := cache.NewCache()
-	nextEntry := atomic.Int64{}
-	// Chunk workers (not g.Go per entry): the atomic index keeps claim
-	// contention an order of magnitude below the task count.
-	g, gctx := errgroup.WithContext(ctx)
-	for range min(len(intermediate), workers) {
-		g.Go(func() error {
-			// One private Staging per worker (plan 15); the deferred Flush
-			// runs on every exit path — exhausted worklist or cancelled ctx —
-			// so buffered leaves are no less visible than direct writes.
-			staging := taskCache.NewStaging(stagingFlushLimit)
-			defer staging.Flush()
-			for {
-				i := int(nextEntry.Add(1)) - 1
-				if i >= len(intermediate) {
-					return nil
-				}
-				select {
-				case <-gctx.Done():
-					return nil
-				default:
-				}
-				e := intermediate[i]
-				result := c.searcher.ExtendTask(gctx, staging, e.Path, e.Weight, precomputeDepth)
-				monitor.ReportSubtask(&result)
-				monitor.ReportTaskCompleted()
-			}
-		})
-	}
-	_ = g.Wait()
+	// Chunk workers claiming indices from one atomic cursor: claim contention
+	// stays an order of magnitude below the task count (ADR-031).
+	workerpool.New(workers).Run(ctx, len(intermediate), func(ctx context.Context, idx iter.Seq[int]) {
+		// One private Staging per worker (plan 15); the deferred Flush runs on
+		// every exit path — exhausted worklist or cancelled ctx — so buffered
+		// leaves are no less visible than direct writes.
+		staging := taskCache.NewStaging(stagingFlushLimit)
+		defer staging.Flush()
+		for i := range idx {
+			e := intermediate[i]
+			result := c.searcher.ExtendTask(ctx, staging, e.Path, e.Weight, precomputeDepth)
+			monitor.ReportSubtask(&result)
+			monitor.ReportTaskCompleted()
+		}
+	})
 
 	return taskCache
 }
@@ -197,20 +182,21 @@ type entryBatch struct {
 	items [dispatchClaimBatch]cache.Entry
 }
 
-// countTasks is the reversal counting phase (specs/counter.md, plans 13+16):
+// countTasks is the reversal counting phase (specs/counter.md, plans 13+16+17):
 // after the generation barrier the task-cache is sealed once — the same View
 // serves the early-stop memo (Get) and the dispatch walk (All). A single
 // producer copies records out of All into fixed-size batches on a bounded
 // FIFO channel; consumer goroutines run the early-stop count-DFS for every
 // delivered record off any lock, folding w · f(task) into the shared total.
-// Backpressure: a producer finding the buffer full blocks until one whole
-// slot frees (no partial fills); deadlock-free because consumers never wait
-// for anything but close and always drain. A terminated context ends the walk
-// at the next shard boundary, drops the tail batch and closes the channel;
-// consumers then skip every remaining task (ctx.Err() check in countOneTask)
-// — partial total, no panic. capacityPerConsumer is the per-consumer record
-// depth K: production passes dispatchCapacityPerConsumer, tests force
-// backpressure with a smaller value.
+// The mechanics — one buffered channel, close after the walk, consumers that
+// drain until close — are workerpool.Fanout; its deadlock-free contract is
+// exactly the phase's: the producer blocks only on sends and consumers never
+// wait for anything but close. A terminated context ends the walk at the next
+// shard boundary, drops the tail batch and closes the channel; consumers then
+// skip every remaining task (ctx.Err() check in countOneTask) — partial
+// total, no panic. capacityPerConsumer is the per-consumer record depth K:
+// production passes dispatchCapacityPerConsumer, tests force backpressure
+// with a smaller value.
 func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, workers int, taskCache *cache.Cache, precomputeDepth, capacityPerConsumer int) uint64 {
 	monitor.BeginPhase("counting")
 	// Seal is the barrier read: every gen-B writer finished before this call,
@@ -225,21 +211,17 @@ func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, wo
 	// big ones keep the K-deep backpressure bound per consumer, expressed in
 	// whole batch slots (specs/counter.md). ceil-division keeps ≥ 1 slot.
 	capacity := max(min(consumers*capacityPerConsumer, records), 1)
-	ch := make(chan entryBatch, (capacity+batch-1)/batch)
 
 	var total atomic.Uint64
-	var wg sync.WaitGroup
-	wg.Add(consumers)
-	for range consumers {
-		go func() {
-			defer wg.Done()
-			c.countBatchTasks(ctx, monitor, view, precomputeDepth, ch, &total)
-		}()
-	}
-
-	dispatchEntries(ctx, view, batch, ch)
-	close(ch) // the walk is done — every producer is finished.
-	wg.Wait()
+	workerpool.Fanout(ctx, consumers, (capacity+batch-1)/batch,
+		func(ctx context.Context, out chan<- entryBatch) {
+			dispatchEntries(ctx, view, batch, out)
+		},
+		func(ctx context.Context, b entryBatch) {
+			for _, e := range b.items[:b.n] {
+				c.countOneTask(ctx, monitor, view, precomputeDepth, e.Path, e.Weight, &total)
+			}
+		})
 
 	return total.Load()
 }
@@ -282,18 +264,6 @@ func sendBatch(ctx context.Context, ch chan<- entryBatch, b *entryBatch) bool {
 	}
 }
 
-// countBatchTasks is one counting consumer: it drains batches off ch until the
-// channel closes, running the early-stop count-DFS for every record of every
-// batch off any lock. A terminated context makes countOneTask skip its tasks,
-// so buffered batches drain without counting (partial-run semantics).
-func (c *Counter) countBatchTasks(ctx context.Context, monitor monitoring.Monitor, memo *cache.View, precomputeDepth int, ch <-chan entryBatch, total *atomic.Uint64) {
-	for b := range ch {
-		for _, e := range b.items[:b.n] {
-			c.countOneTask(ctx, monitor, memo, precomputeDepth, e.Path, e.Weight, total)
-		}
-	}
-}
-
 // countOneTask runs the early-stop count-DFS for a single task and folds its
 // weighted path count and per-task statistics into the shared counters. It is
 // invoked from a counting consumer, off every lock; a terminated context
@@ -313,7 +283,7 @@ func (c *Counter) countOneTask(ctx context.Context, monitor monitoring.Monitor, 
 // generateIntermediate runs phase A: DFS from every canonical start group to
 // base = min(precomputeDepth, TwoPhaseBaseDepth), writing D4-canonical
 // prefixes directly into an intermediate cache.Cache via Set (specs/counter.md,
-// ADR-018). After the errgroup barrier stops all writers, the table is
+// ADR-018). After the workerpool.Run barrier stops all writers, the table is
 // materialized into phase B's independent-task worklist and dropped to the GC.
 func (c *Counter) generateIntermediate(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) []cache.Entry {
 	monitor.BeginPhase("gen A")
@@ -322,26 +292,22 @@ func (c *Counter) generateIntermediate(ctx context.Context, monitor monitoring.M
 	monitor.AddTasks(len(groups))
 
 	base := min(precomputeDepth, TwoPhaseBaseDepth)
-	// gctx, not ctx: errgroup cancels its derived context on every Wait, so
-	// the post-barrier materialization walk must run on the parent.
-	g, gctx := errgroup.WithContext(ctx)
-	g.SetLimit(workers)
-	for _, group := range groups {
-		p := group.Canonical
-		g.Go(func() error {
-			result := c.searcher.GenerateTasks(gctx, intermediate, p, uint64(group.OrbitSize), base)
+	// The crew claims groups off one atomic cursor — the same ceiling as the
+	// old per-group spawn under SetLimit(workers): min(workers, len(groups)).
+	workerpool.New(workers).Run(ctx, len(groups), func(ctx context.Context, idx iter.Seq[int]) {
+		for i := range idx {
+			group := groups[i]
+			result := c.searcher.GenerateTasks(ctx, intermediate, group.Canonical, uint64(group.OrbitSize), base)
 			monitor.ReportSubtask(&result)
 			monitor.ReportTaskCompleted()
-			return nil
-		})
-	}
-	_ = g.Wait()
+		}
+	})
 
 	return materializeWorklist(ctx, intermediate)
 }
 
-// materializeWorklist seals the gen-A table (its writers stopped at the
-// errgroup barrier) and flattens it into the phase-B worklist with a single
+// materializeWorklist seals the gen-A table (its writers stopped at the Run
+// barrier) and flattens it into the phase-B worklist with a single
 // All walk into a Len-sized slice — no intermediate copies beyond the slice
 // itself (specs/counter.md). A terminated context leaves the partial worklist
 // (partial-run semantics; the iterator has no other failure mode).

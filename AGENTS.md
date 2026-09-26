@@ -236,6 +236,12 @@ Reusable utilities live in `tools/` (Python 3, stdlib-only), described in `specs
   - `DefaultPrecomputeDepth(size)` – per-board default split depth
   - `SetGCPercent(p)` – GOGC for the counting pipeline duration (ADR-014); applied on
     entry and restored on exit
+- **workerpool/** – Fixed-crew concurrency mechanics shared by the phases (plan 17), domain-free:
+  `Pool.Run(ctx, n, worker)` spawns min(workers,n) goroutines claiming indices 0..n-1 from one
+  atomic cursor (ctx checked before each claim; Wait barrier) and `Fanout[T](ctx, consumers,
+  bufSize, produce, consume)` streams values over one buffered channel (produce on the caller's
+  goroutine, close after it returns, consumers drain). No error plumbing, no derived contexts —
+  cancellation only; phase policy (batch/capacity formulas, clamps) stays in counter
 - **pruner/** – Stateless necessary-condition pruning (L0 local dead-end + L1 global checks):
   - `Pruner` – `ShouldPruneAfterVisit()` (hot O(deg) check, returns first prune Reason)
 - **cache/** – One sharded weight table `Cache` (128 shards, hashed by State only; ADR-018):

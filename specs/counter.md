@@ -4,8 +4,9 @@
 
 Высокоуровневый контур подсчёта: двухфазная генерация префиксов в task-cache и count-фаза
 с ранним стопом через мемо по точному состоянию (ADR-011, единственный конвейер — ADR-016).
-Параллелизм, симметрии стартов и мониторинг — общие для фаз. `ParallelCountWithDepth` — тонкий
-оркестратор: GC-scope и три шага `generateIntermediate` → `extendTasks` → `countTasks`.
+Механика параллелизма фаз — пакет `workerpool` (`Run`/`Fanout`, specs/workerpool.md), симметрии
+стартов и мониторинг — общие для фаз. `ParallelCountWithDepth` — тонкий оркестратор: GC-scope и
+три шага `generateIntermediate` → `extendTasks` → `countTasks`.
 
 ## Публичный API
 
@@ -48,26 +49,30 @@ GOGC на время конвейера сохраняется (ADR-014).
 
 ## Алгоритм (три фазы)
 
-1. **gen A** (`generateIntermediate`) — параллельно по каноническим стартовым группам
-   (`errgroup` + `SetLimit(workers)`): `searcher.GenerateTasks(ctx, intermediate, canonical,
-   orbitSize, a)`, где `a = min(precomputeDepth, TwoPhaseBaseDepth)` и `intermediate` — экземпляр
-   `cache.Cache`; воркеры пишут напрямую через `Set` (промежуточная буферизация записей не нужна:
-   таблица мала, фаза — мкс/мс). Писателей останавливает барьер errgroup, затем таблица
+1. **gen A** (`generateIntermediate`) — параллельно по каноническим стартовым группам через
+   `workerpool.Pool.Run` (`min(workers, len(groups))` воркеров, задачи тянутся атомарным курсором):
+   `searcher.GenerateTasks(ctx, intermediate, canonical, orbitSize, a)`, где
+   `a = min(precomputeDepth, TwoPhaseBaseDepth)` и `intermediate` — экземпляр `cache.Cache`;
+   воркеры пишут напрямую через `Set` (промежуточная буферизация записей не нужна:
+   таблица мала, фаза — мкс/мс). Писателей останавливает барьер `Run`, затем таблица
    запечатывается (`Seal`) и worklist фазы B материализуется обходом `All(ctx)` в срез,
    предвыделенный по `View.Len()`; сама таблица затем выбрасывается (ADR-018).
-2. **gen B** (`extendTasks`) — чанк-воркеры (`min(len(entries), workers)`, задачи тянутся
-   атомарным индексом), каждая задача — `searcher.ExtendTask(...)`; воркер пишет во второй
-   `cache.Cache` task-cache через собственный `cache.Staging` (батч-запись, ADR-031): флеш по
-   лимиту буфера и обязательный `Flush` на выходе воркера — в том числе при отменённом ctx, чтобы
-   видимость записанных листьев не хуже прямой записи. При `precomputeDepth ≤ TwoPhaseBaseDepth`
-   фаза вырождается — запись самой записи (тоже через Staging). Листья обеих таблиц проходят
+2. **gen B** (`extendTasks`) — `workerpool.Pool.Run` по worklist (`min(len(entries), workers)`
+   воркеров, задачи тянутся атомарным курсором), каждая задача — `searcher.ExtendTask(...)`;
+   собственный `cache.Staging` (батч-запись, ADR-031) создаётся и флешится в теле воркера вокруг
+   цикла по курсору: флеш по лимиту буфера и обязательный `Flush` на выходе воркера — в том числе
+   при отменённом ctx, чтобы видимость записанных листьев не хуже прямой записи. При
+   `precomputeDepth ≤ TwoPhaseBaseDepth` фаза вырождается — запись самой записи (тоже через
+   Staging). Листья обеих таблиц проходят
    L2-гейт записи в `dfsTask` (specs/searcher.md, ADR-030): ключи с нулевым числом дополнений не
    пишутся — task-cache содержит только задачи с ненулевым потенциалом вклада в итог.
-3. **counting** (`countTasks`) — диспатч через безаллокационный батч-канал (план 16). После
-    барьера генерации task-cache запечатывается один раз (`Seal`): тот же `View` даёт и мемо
-    раннего стопа (`Get`), и обход-продюсер (`All(ctx)`); писателей больше нет по предусловию
+3. **counting** (`countTasks`) — диспатч через `workerpool.Fanout[entryBatch]` поверх
+   безаллокационного батч-канала (план 16; план 17): `produce` — обход-продюсер, `consume` —
+   счёт одной пачки; `close` канала — по возврате produce, дренаж до close — за пулом. После
+   барьера генерации task-cache запечатывается один раз (`Seal`): тот же `View` даёт и мемо
+   раннего стопа (`Get`), и обход-продюсер (`All(ctx)`); писателей больше нет по предусловию
    `Seal` (specs/cache.md). `records = view.Len()`; консьюмеры — `min(workers, records) ≥ 1`
-   горутин. Эффективный батч `Beff = min(B, max(1, записей/(консьюмеры·C)))` считается один раз
+   горутин (clamp считает counter — фазовая политика). Эффективный батч `Beff = min(B, max(1, записей/(консьюмеры·C)))` считается один раз
    на старте фазы; `B` — потолок батча (фиксированно 16), `C = 4` — нижняя граница числа снятий
    на консьюмера (ADR-019). Элемент канала — батч: заголовок `n` + массив `B` копий `cache.Entry`
    (392 Б); всегда `Beff ≤ B`. Буфер предвыделен: `ceil(capacity/Beff)` слотов, где
@@ -133,5 +138,6 @@ sequential == parallel; инвариантность к числу воркер�
 
 ## Связанные
 
-ADR-011, ADR-013, ADR-014, ADR-016, ADR-017, ADR-019, ADR-031; план 16; `specs/searcher.md`,
-`specs/cache.md`, `specs/monitoring.md`. Методология замеров — `specs/benchmarks.md`.
+ADR-011, ADR-013, ADR-014, ADR-016, ADR-017, ADR-019, ADR-031; планы 16, 17; `specs/searcher.md`,
+`specs/cache.md`, `specs/monitoring.md`, `specs/workerpool.md`. Методология замеров —
+`specs/benchmarks.md`.

@@ -154,9 +154,10 @@ type View struct {
 
 // Seal is the read barrier of the write → seal → read protocol: it returns a
 // lock-free read handle of c. Calling it after a barrier to all writers (e.g.
-// errgroup.Wait or a final Staging.Flush) establishes happens-before with every
-// write the View will observe. Repeated Seal yields independent handles over
-// the same table; no writer may exist while any View lives (specs/cache.md).
+// workerpool.Run/Fanout returning, with each worker's final Staging.Flush)
+// establishes happens-before with every write the View will observe. Repeated
+// Seal yields independent handles over the same table; no writer may exist
+// while any View lives (specs/cache.md).
 func (c *Cache) Seal() *View { return &View{cache: c} }
 
 // Get looks the key up without locking; ok is false for an absent key.
