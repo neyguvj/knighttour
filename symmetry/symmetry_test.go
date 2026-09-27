@@ -36,7 +36,7 @@ func TestNewSymmetry(t *testing.T) {
 				t.Fatal("NewSymmetry returned nil")
 			}
 			assert.Equal(t, tt.size, s.size, "size")
-			assert.Len(t, GetSymmetries(tt.size), numTransforms, "number of transforms")
+			assert.Len(t, GetSymmetries(), numTransforms, "number of transforms")
 			totalCells := tt.size * tt.size
 			assert.Len(t, s.canonical, totalCells, "canonical length")
 			assert.Len(t, s.orbitSize, totalCells, "orbitSize length")
@@ -51,21 +51,7 @@ func TestNewSymmetry(t *testing.T) {
 }
 
 func TestGetSymmetries(t *testing.T) {
-	tests := []struct {
-		name    string
-		size    int
-		wantLen int
-	}{
-		{"5x5 board", 5, 8},
-		{"6x6 board", 6, 8},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			syms := GetSymmetries(tt.size)
-			assert.Len(t, syms, tt.wantLen, "number of symmetries")
-		})
-	}
+	assert.Len(t, GetSymmetries(), numTransforms, "number of symmetries")
 }
 
 func TestApplyTransform(t *testing.T) {
@@ -122,7 +108,7 @@ func TestApplyTransform(t *testing.T) {
 }
 
 func TestApplyTransformStatic(t *testing.T) {
-	syms := GetSymmetries(5)
+	syms := GetSymmetries()
 
 	tests := []struct {
 		name     string

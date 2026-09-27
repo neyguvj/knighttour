@@ -32,20 +32,17 @@ func (s State) Intersect(mask State) State // s & mask
 func (s State) Union(mask State) State     // s | mask
 func (s State) AndNot(mask State) State    // s &^ mask
 func (s State) Invert(cellsCount int) State   // инверсия в пределах cellsCount битов
-func (s State) GetUnvisitedMask(cellsCount int) State
+                                              // (она же маска непосещённых)
 
 // обход
 func (s State) AllVisited() iter.Seq[int]  // позиции установленных битов по возрастанию
 func (s State) String() string             // двоичное представление
 ```
 
-Удобство-алиасы (исторически, вне горячего пути): `IsBitSet` (= IsVisited),
-`UnvisitedMask` (= GetUnvisitedMask), `ShiftLeft`/`ShiftRight`, `IsHalfway`/`HalfwayPoint`.
-
 ## Инварианты
 
 - Все операции не мутируют приёмник и возвращают новый `State` (value type).
-- `Invert`/`GetUnvisitedMask` обнуляют биты выше `cellsCount` — за доской «мусора» нет.
+- `Invert` обнуляет биты выше `cellsCount` — за доской «мусора» нет.
 - Нумерация клеток row-major: `index = row*size + col`.
 
 ## Ограничения и edge cases
@@ -56,7 +53,7 @@ func (s State) String() string             // двоичное представ�
 ## Тесты
 
 `state/state_test.go`: создание/Visit/Unvisit, IsVisited/IsUnvisited, IsFull full vs
-partial, CountBits паттернов, маски Intersect/Union/AndNot/Invert/GetUnvisitedMask,
+partial, CountBits паттернов, маски Intersect/Union/AndNot/Invert,
 TrailingZeroBits, AllVisited, String — по одному табличному тесту на операцию.
 
 ## Связанные

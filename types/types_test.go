@@ -8,24 +8,6 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestResultAdd(t *testing.T) {
-	r := Result{TotalPathsFound: 5, CacheWrites: 3, CacheHits: 4, PrunedDeadEnd: 4}
-	other := Result{TotalPathsFound: 7, CacheWrites: 1, CacheHits: 2, CacheMisses: 6, PrunedDisconn: 6, PrunedEndpoints: 2, PrunedForcedChain: 5}
-
-	r.Add(&other)
-
-	assert.Equal(t, Result{
-		TotalPathsFound:   12,
-		CacheWrites:       4,
-		CacheHits:         6,
-		CacheMisses:       6,
-		PrunedDeadEnd:     4,
-		PrunedDisconn:     6,
-		PrunedEndpoints:   2,
-		PrunedForcedChain: 5,
-	}, r)
-}
-
 func TestResultCountPrune(t *testing.T) {
 	tests := []struct {
 		fieldOf func(*Result) int

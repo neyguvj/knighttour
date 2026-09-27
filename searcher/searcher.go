@@ -36,10 +36,10 @@ func NewSearcher(g *graph.Graph, sym *symmetry.Symmetry) *Searcher {
 // c as its D4-canonical placement (state, end) with the group's orbit weight —
 // both the gen-A intermediate table and the task-cache go this way (ADR-018).
 // A leaf is written only when it passes the write gate; gate cuts are counted
-// in the Result breakdown. SholdSkip starts emit nothing. Statistics:
+// in the Result breakdown. ShouldSkip starts emit nothing. Statistics:
 // CacheWrites counts written prefixes.
 func (s *Searcher) GenerateTasks(ctx context.Context, c cache.Sink, start int, orbitSize uint64, depth int) (result types.Result) {
-	if s.graph.SholdSkip(start) {
+	if s.graph.ShouldSkip(start) {
 		return result
 	}
 	s.dfsTask(ctx, state.NewState(start), start, depth, orbitSize, c, &result)
@@ -54,7 +54,7 @@ func (s *Searcher) GenerateTasks(ctx context.Context, c cache.Sink, start int, o
 // exactly the phase-A leaf of the same key/par, already gated by the same
 // check; descending further would lose its record. Below the threshold leaves
 // are written canonicalized like in GenerateTasks, passing the gate there.
-// No SholdSkip check: roots were filtered by phase A.
+// No ShouldSkip check: roots were filtered by phase A.
 func (s *Searcher) ExtendTask(ctx context.Context, c cache.Sink, p path.Path, weight uint64, depth int) (result types.Result) {
 	if p.State().CountBits() >= depth {
 		c.Set(p, weight)

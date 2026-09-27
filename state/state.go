@@ -45,33 +45,12 @@ func (s State) IsUnvisited(pos int) bool {
 	return !s.IsVisited(pos)
 }
 
-func (s State) GetUnvisitedMask(cellsCount int) State {
-	boardMask := State((1 << cellsCount) - 1)
-	return boardMask & ^s
-}
-
-func (s State) UnvisitedMask(cellsCount int) State {
-	return s.GetUnvisitedMask(cellsCount)
-}
-
 func (s State) Intersect(mask State) State {
 	return s & mask
 }
 
-func (s State) ShiftLeft(n int) State {
-	return s << uint64(n)
-}
-
-func (s State) IsBitSet(pos int) bool {
-	return s.IsVisited(pos)
-}
-
 func (s State) Union(mask State) State {
 	return s | mask
-}
-
-func (s State) ShiftRight(n int) State {
-	return s >> uint64(n)
 }
 
 func (s State) IsEmpty() bool {
@@ -99,27 +78,6 @@ func (s State) AndNot(mask State) State {
 func (s State) Invert(cellsCount int) State {
 	fullMask := State((1 << cellsCount) - 1)
 	return fullMask & ^s
-}
-
-func (s State) IsHalfway(cellsCount int) bool {
-	if cellsCount%2 == 0 {
-		return s.CountBits() <= cellsCount/2
-	}
-	return s.CountBits() <= (cellsCount+1)/2
-}
-
-func (s State) HalfwayPoint(cellsCount int) int {
-	if cellsCount%2 == 0 {
-		return cellsCount / 2
-	}
-	count := s.CountBits()
-	if count == (cellsCount-1)/2 {
-		return (cellsCount - 1) / 2
-	}
-	if count == (cellsCount+1)/2 {
-		return (cellsCount + 1) / 2
-	}
-	return -1
 }
 
 func (s State) String() string {

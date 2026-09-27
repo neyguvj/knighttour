@@ -28,7 +28,7 @@ func NewSymmetry(size int) *Symmetry {
 
 	totalCells := size * size
 
-	closures := GetSymmetries(size)
+	closures := GetSymmetries()
 	for t, f := range closures {
 		for pos := range totalCells {
 			x, y := pos/size, pos%size
@@ -73,16 +73,6 @@ type CanonicalGroup struct {
 
 func (s *Symmetry) GetCanonicalGroups() []CanonicalGroup {
 	return s.groups
-}
-
-func (s *Symmetry) GetCanonicalGroupByPosition(pos int) CanonicalGroup {
-	canonicalPos := s.GetCanonicalPosition(pos)
-	for _, g := range s.groups {
-		if g.Canonical == canonicalPos {
-			return g
-		}
-	}
-	return s.groups[0]
 }
 
 // Canonicalize returns the canonical representative of the D4 orbit of the
@@ -197,7 +187,7 @@ func (s *Symmetry) buildCanonicalGroups() []CanonicalGroup {
 	return groups
 }
 
-func GetSymmetries(size int) []Transform {
+func GetSymmetries() []Transform {
 	return []Transform{
 		func(x, y, s int) (int, int) { return x, y },
 		func(x, y, s int) (int, int) { return y, s - 1 - x },

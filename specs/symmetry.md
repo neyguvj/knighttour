@@ -25,7 +25,7 @@
 const NumTransforms = 8
 
 type Transform func(x, y, size int) (int, int)
-func GetSymmetries(size int) []Transform      // 8 преобразований (только при построении LUT)
+func GetSymmetries() []Transform              // 8 преобразований (только при построении LUT)
 
 type CanonicalGroup struct {
     Positions []int
@@ -40,7 +40,6 @@ func (s *Symmetry) GetCanonicalPosition(pos int) int
 func (s *Symmetry) IsCanonicalPosition(pos int) bool
 func (s *Symmetry) GetOrbitSize(pos int) int
 func (s *Symmetry) GetCanonicalGroups() []CanonicalGroup
-func (s *Symmetry) GetCanonicalGroupByPosition(pos int) CanonicalGroup
 
 // D4-канонизация пары (state, end) -> path.Path
 func (s *Symmetry) Canonicalize(st state.State, end int) path.Path

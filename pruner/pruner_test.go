@@ -589,7 +589,7 @@ func TestShouldPruneState_D4Equivariant(t *testing.T) {
 	for _, size := range []int{5, 6} {
 		g := graph.New(size)
 		p := New(g)
-		tfs := symmetry.GetSymmetries(size)
+		tfs := symmetry.GetSymmetries()
 
 		fired := 0
 		for range 20000 {

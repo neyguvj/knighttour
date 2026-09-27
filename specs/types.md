@@ -28,7 +28,6 @@ type Result struct {
     PrunedForcedChain int // гейт записи: цикл/перегруз обязательных цепочек (генерационные фазы)
 }
 
-func (r *Result) Add(other *Result)         // покомпонентное сложение (pointer — wide block)
 func (r *Result) CountPrune(reason pruner.Reason) // горячий путь: ровно один инкремент вида
 func (r *Result) Finalize()                 // Pruned = Σ видов; один раз перед возвратом
 ```
@@ -43,13 +42,13 @@ func (r *Result) Finalize()                 // Pruned = Σ видов; один 
 
 ## Ограничения и edge cases
 
-- Все поля экспортированы; логика минимальна (сложение/инкремент).
+- Все поля экспортированы; логика минимальна (инкремент/сводка).
 - `TotalPathsFound`, `CacheHits/CacheMisses` заполняет только count-фаза (reversal
   count-DFS); генерационные методы их не касаются.
 
 ## Тесты
 
-`types/types_test.go`: `TestResultAdd` (покомпонентно), `TestResultCountPrune`
+`types/types_test.go`: `TestResultCountPrune`
 (вид → поле, `NoReason` no-op), `Finalize` (агрегат = сумма видов).
 
 ## Связанные

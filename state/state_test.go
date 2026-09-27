@@ -137,43 +137,6 @@ func TestIsUnvisited(t *testing.T) {
 	}
 }
 
-func TestGetUnvisitedMask(t *testing.T) {
-	tests := []struct {
-		name     string
-		state    State
-		cells    int
-		expected State
-	}{
-		{"empty state", 0, 5, 31},
-		{"all visited", 31, 5, 0},
-		{"one visited", 1, 5, 30},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.state.GetUnvisitedMask(tt.cells), "GetUnvisitedMask(%d)", tt.cells)
-		})
-	}
-}
-
-func TestUnvisitedMask(t *testing.T) {
-	tests := []struct {
-		name     string
-		state    State
-		cells    int
-		expected State
-	}{
-		{"empty state", 0, 5, 31},
-		{"all visited", 31, 5, 0},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.state.UnvisitedMask(tt.cells), "UnvisitedMask(%d)", tt.cells)
-		})
-	}
-}
-
 func TestIntersect(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -208,62 +171,6 @@ func TestUnion(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, tt.state.Union(tt.mask), "Union(%v)", tt.mask)
-		})
-	}
-}
-
-func TestShiftLeft(t *testing.T) {
-	tests := []struct {
-		name     string
-		state    State
-		n        int
-		expected State
-	}{
-		{"shift by 0", 5, 0, 5},
-		{"shift by 1", 5, 1, 10},
-		{"shift by 3", 1, 3, 8},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.state.ShiftLeft(tt.n), "ShiftLeft(%d)", tt.n)
-		})
-	}
-}
-
-func TestShiftRight(t *testing.T) {
-	tests := []struct {
-		name     string
-		state    State
-		n        int
-		expected State
-	}{
-		{"shift by 0", 5, 0, 5},
-		{"shift by 1", 8, 1, 4},
-		{"shift by 2", 16, 2, 4},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.state.ShiftRight(tt.n), "ShiftRight(%d)", tt.n)
-		})
-	}
-}
-
-func TestIsBitSet(t *testing.T) {
-	tests := []struct {
-		name     string
-		state    State
-		pos      int
-		expected bool
-	}{
-		{"bit set", 1, 0, true},
-		{"bit not set", 1, 1, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.state.IsBitSet(tt.pos), "IsBitSet(%d)", tt.pos)
 		})
 	}
 }
@@ -339,50 +246,6 @@ func TestInvert(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, tt.state.Invert(tt.cells), "Invert(%d)", tt.cells)
-		})
-	}
-}
-
-func TestIsHalfway(t *testing.T) {
-	tests := []struct {
-		name     string
-		state    State
-		cells    int
-		expected bool
-	}{
-		{"empty state 25", 0, 25, true},
-		{"12 bits 25 (less than half)", State((1 << 12) - 1), 25, true},
-		{"13 bits 25 (equal to half for odd)", State((1 << 13) - 1), 25, true},
-		{"all 25", State((1 << 25) - 1), 25, false},
-		{"empty state 36", 0, 36, true},
-		{"18 bits 36 (exactly half)", State((1 << 18) - 1), 36, true},
-		{"all 36", (1<<36 - 1), 36, false},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.state.IsHalfway(tt.cells), "IsHalfway(%d)", tt.cells)
-		})
-	}
-}
-
-func TestHalfwayPoint(t *testing.T) {
-	tests := []struct {
-		name     string
-		state    State
-		cells    int
-		expected int
-	}{
-		{"empty state 25 (odd, no bits)", 0, 25, -1},
-		{"12 bits 25", State((1 << 12) - 1), 25, 12},
-		{"13 bits 25", State((1 << 13) - 1), 25, 13},
-		{"empty state 36 (even always returns half)", 0, 36, 18},
-		{"18 bits 36 (exactly half)", State((1 << 18) - 1), 36, 18},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, tt.state.HalfwayPoint(tt.cells), "HalfwayPoint(%d)", tt.cells)
 		})
 	}
 }

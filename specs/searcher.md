@@ -15,7 +15,7 @@ func NewSearcher(g *graph.Graph, sym *symmetry.Symmetry) *Searcher
 // запись Canonicalize(state,end) с весом orbitSize в переданный sink (cache.Sink: таблица
 // напрямую или батч-Staging — выбор за вызывающим контуром), если лист прошёл гейт записи
 // (см. ниже). Пишет и промежуточную таблицу фазы A (малая глубина), и task-cache (ADR-018).
-// SholdSkip(start) → пустой результат (фильтр чётности нечётных досок).
+// ShouldSkip(start) → пустой результат (фильтр чётности нечётных досок).
 func (s *Searcher) GenerateTasks(ctx context.Context, c cache.Sink,
     start int, orbitSize uint64, depth int) types.Result
 
@@ -87,7 +87,7 @@ specs/pruner.md), то пропуск записи итог `Σ W·f` не ме�
 - `GenerateTasks`/`ExtendTask` пишут канонические префиксы глубины `depth`; `ExtendTask` при
   `CountBits(p.State()) >= depth` пишет сам `p` с весом `weight` — иначе вырожденная фаза B
   (precomputeDepth ≤ base) теряла бы записи; ниже порога спуск продолжается и листья пишутся
-  канонизованными. `SholdSkip` в `ExtendTask` не проверяется: корни отфильтрованы фазой A.
+  канонизованными. `ShouldSkip` в `ExtendTask` не проверяется: корни отфильтрованы фазой A.
 - Тождество count-фазы: `total = Σ_tasks W(task) · f(task)`, где `f` — count-DFS со стопом
   на уровне `totalCells − d`; мемо отвечает по **точному** состоянию, деление `W/orbitSize`
   точно, т.к. вес ключа — сумма размеров орбит (ADR-011). Гейт записи множество задач сокращает
@@ -103,7 +103,7 @@ specs/pruner.md), то пропуск записи итог `Σ W·f` не ме�
 
 `searcher/searcher_test.go`: независимый brute-force == 1728 на 5×5; `GenerateTasks` с
 `depth=totalCells` → сумма весов по группам == эталон (гейт на пустом остатке ничего не режет);
-записи = префиксы глубины depth (веса кратно орбите), `depth=0` — одна запись, `SholdSkip`-старт
+записи = префиксы глубины depth (веса кратно орбите), `depth=0` — одна запись, `ShouldSkip`-старт
 не пишет ничего. Reversal: таблично по всем допустимым d на 5×5 —
 `Σ w·CountPathsWithCacheReversal(task)` по task-cache из `GenerateTasks` == brute-force;
 вырожденный `ExtendTask(bits==depth)` пишет запись как есть; `c == nil` и `2d > totalCells` →

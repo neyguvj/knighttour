@@ -192,7 +192,7 @@ func TestGenerateIntermediateWeightsMatchOrbits(t *testing.T) {
 	// so total weight must equal CacheWrites * OrbitSize regardless of merging.
 	expectedWeight := 0
 	for _, group := range counter.symmetry.GetCanonicalGroups() {
-		if g.SholdSkip(group.Canonical) {
+		if g.ShouldSkip(group.Canonical) {
 			continue
 		}
 

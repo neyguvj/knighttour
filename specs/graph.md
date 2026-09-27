@@ -15,10 +15,10 @@ func (g *Graph) GetTotalCells() int     // N²
 func (g *Graph) GetNeighbors(pos int) []int        // соседи клетки pos (0..N²-1)
 func (g *Graph) GetDegree(pos int) int             // len(GetNeighbors(pos))
 func (g *Graph) GetNeighborMask(pos int) state.State // битовая маска соседей
-func (g *Graph) SholdSkip(pos int) bool            // фильтр чётности для нечётных досок
+func (g *Graph) ShouldSkip(pos int) bool            // фильтр чётности для нечётных досок
 ```
 
-`SholdSkip(pos)` возвращает `true`, если `size%2 != 0 && pos%2 != 0` — старты этого
+`ShouldSkip(pos)` возвращает `true`, если `size%2 != 0 && pos%2 != 0` — старты этого
 цвета дают нулевой вклад на нечётной доске (см. ADR-009).
 
 ## Инварианты

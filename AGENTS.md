@@ -220,7 +220,7 @@ Reusable utilities live in `tools/` (Python 3, stdlib-only), described in `specs
   `counter.DefaultGCPercentReversal`, 0 = leave runtime GC untouched)
 - **graph/** – `Graph` struct with precomputed knight moves on an N×N board
   - Neighbors in fixed possibleMoves order (no special sorting)
-  - Methods: `GetNeighbors()`, `GetDegree()`, `GetNeighborMask()`, `SholdSkip()` (color parity skip for odd boards)
+  - Methods: `GetNeighbors()`, `GetDegree()`, `GetNeighborMask()`, `ShouldSkip()` (color parity skip for odd boards)
 - **state/** – `State` type (uint64 bitboard) tracking visited positions
   - Bit manipulation operations: Visit, Unvisit, IsVisited, CountBits, Intersect, Union, Invert, AllVisited
 - **path/** – `Path` value type (state + end); the single key of every table

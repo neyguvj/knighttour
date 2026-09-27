@@ -59,7 +59,7 @@ func TestNaiveBruteForceMatchesKnownTotal(t *testing.T) {
 
 // GenerateTasks at depth = totalCells: every leaf is a full tour, so the summed
 // orbit weights must reproduce the known total (D4-invariance of tour counts
-// makes per-group weighting exact; SholdSkip starts contribute zero tours).
+// makes per-group weighting exact; ShouldSkip starts contribute zero tours).
 func TestFullCountViaGenerateTasksMatchesKnownTotal(t *testing.T) {
 	g := graph.New(5)
 	sym := symmetry.NewSymmetry(5)
@@ -260,7 +260,7 @@ func TestReversalStopLookupsHappenAtStopLevel(t *testing.T) {
 	assert.Equal(t, cand.CountBits()-want, res.CacheMisses)
 }
 
-// SholdSkip starts contribute nothing to the task cache (odd-board parity).
+// ShouldSkip starts contribute nothing to the task cache (odd-board parity).
 func TestGenerateTasksSkipsWrongColor(t *testing.T) {
 	g := graph.New(5)
 	sym := symmetry.NewSymmetry(5)
@@ -268,7 +268,7 @@ func TestGenerateTasksSkipsWrongColor(t *testing.T) {
 
 	var skipped = -1
 	for p := range g.GetTotalCells() {
-		if g.SholdSkip(p) {
+		if g.ShouldSkip(p) {
 			skipped = p
 			break
 		}
@@ -278,7 +278,7 @@ func TestGenerateTasksSkipsWrongColor(t *testing.T) {
 	c := cache.NewCache()
 	result := searcher.GenerateTasks(context.Background(), c, skipped, 1, 3)
 
-	assert.Zero(t, result.CacheWrites, "SholdSkip start emits nothing")
+	assert.Zero(t, result.CacheWrites, "ShouldSkip start emits nothing")
 	assert.Zero(t, c.Seal().Len())
 }
 
@@ -361,7 +361,7 @@ func TestWriteGateRejectsOnlyDeadKeys(t *testing.T) {
 
 	rejected := make(map[path.Path]bool)
 	for start := range g.GetTotalCells() {
-		if g.SholdSkip(start) {
+		if g.ShouldSkip(start) {
 			continue
 		}
 		gateLeafWalk(g, searcher.pruner, state.NewState(start), start, depth, rejected)

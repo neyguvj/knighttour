@@ -23,21 +23,6 @@ type Result struct {
 	PrunedForcedChain int // write gate: forced-chain overload/cycle (generation phases)
 }
 
-// Add folds other into r field by field. other is passed by pointer: Result
-// is a wide counter block and copying it per merge would be pure overhead.
-func (r *Result) Add(other *Result) {
-	r.TotalPathsFound += other.TotalPathsFound
-	r.CacheWrites += other.CacheWrites
-	r.CacheHits += other.CacheHits
-	r.CacheMisses += other.CacheMisses
-	r.Pruned += other.Pruned
-	r.PrunedDeadEnd += other.PrunedDeadEnd
-	r.PrunedNoCont += other.PrunedNoCont
-	r.PrunedDisconn += other.PrunedDisconn
-	r.PrunedEndpoints += other.PrunedEndpoints
-	r.PrunedForcedChain += other.PrunedForcedChain
-}
-
 // CountPrune records one pruned branch under the reason returned by the pruner.
 // Hot path: exactly one counter update; NoReason is ignored defensively (it
 // means "not pruned"). The aggregate Pruned field is refreshed by Finalize.
