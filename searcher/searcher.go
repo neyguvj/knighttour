@@ -5,7 +5,6 @@ import (
 
 	"knighttour/cache"
 	"knighttour/graph"
-	"knighttour/path"
 	"knighttour/pruner"
 	"knighttour/state"
 	"knighttour/symmetry"
@@ -15,6 +14,8 @@ import (
 // Searcher is the pure traversal layer (specs/searcher.md): DFS backtracking
 // over bitmasks with pruning plus the generation phases and the reversal
 // count-DFS. It owns no memo tables — the caches belong to the calling loop.
+// The task carrier between phases is cache.Entry (canonical mask + end-class
+// tag, plan 18); the package builds no keys of its own types.
 type Searcher struct {
 	graph  *graph.Graph
 	sym    *symmetry.Symmetry
@@ -32,12 +33,13 @@ func NewSearcher(g *graph.Graph, sym *symmetry.Symmetry) *Searcher {
 }
 
 // GenerateTasks is the single descent from a start (specs/searcher.md): DFS
-// from a canonical start down to depth, writing each leaf prefix straight into
-// c as its D4-canonical placement (state, end) with the group's orbit weight —
-// both the gen-A intermediate table and the task-cache go this way (ADR-018).
-// A leaf is written only when it passes the write gate; gate cuts are counted
-// in the Result breakdown. ShouldSkip starts emit nothing. Statistics:
-// CacheWrites counts written prefixes.
+// from a canonical start down to depth, writing each leaf placement into c as
+// its D4-canonical class form — CanonicalClass(state,end) → Set(K, rep,
+// weight) with the group's orbit weight; both the gen-A intermediate table and
+// the task-cache go this way (ADR-018). A leaf is written only when it passes
+// the write gate; gate cuts are counted in the Result breakdown. ShouldSkip
+// starts emit nothing. Statistics: CacheWrites counts Set emissions (class
+// contributions).
 func (s *Searcher) GenerateTasks(ctx context.Context, c cache.Sink, start int, orbitSize uint64, depth int) (result types.Result) {
 	if s.graph.ShouldSkip(start) {
 		return result
@@ -48,50 +50,55 @@ func (s *Searcher) GenerateTasks(ctx context.Context, c cache.Sink, start int, o
 }
 
 // ExtendTask is phase B of task-cache generation: it continues the task
-// descent from an already canonical entry p with its aggregated weight down
-// to the target depth. An entry at or beyond the depth (degenerate split,
-// precomputeDepth ≤ base) writes itself as-is without the gate — it is
-// exactly the phase-A leaf of the same key/par, already gated by the same
-// check; descending further would lose its record. Below the threshold leaves
-// are written canonicalized like in GenerateTasks, passing the gate there.
-// No ShouldSkip check: roots were filtered by phase A.
-func (s *Searcher) ExtendTask(ctx context.Context, c cache.Sink, p path.Path, weight uint64, depth int) (result types.Result) {
-	if p.State().CountBits() >= depth {
-		c.Set(p, weight)
+// descent from an already canonical entry e (mask + end-class tag) with its
+// aggregated weight down to the target depth. An entry at or beyond the depth
+// (degenerate split, precomputeDepth ≤ base) writes itself as-is into the
+// same slot (e.Mask, e.Rep) without the gate — it is exactly the phase-A leaf
+// of the same class, already gated by the same check; descending further
+// would lose its record. Below the threshold leaves are written canonicalized
+// like in GenerateTasks, passing the gate there. The descent from e.Rep is
+// legal: rep is a real cell of the mask and f is constant on the class. No
+// ShouldSkip check: roots were filtered by phase A.
+func (s *Searcher) ExtendTask(ctx context.Context, c cache.Sink, e cache.Entry, depth int) (result types.Result) {
+	if e.Mask.CountBits() >= depth {
+		c.Set(e.Mask, e.Rep, e.Weight)
 		result.CacheWrites++
 		result.Finalize()
 		return result
 	}
-	s.dfsTask(ctx, p.State(), p.End(), depth, weight, c, &result)
+	s.dfsTask(ctx, e.Mask, int(e.Rep), depth, e.Weight, c, &result)
 	result.Finalize()
 	return result
 }
 
-// CountPathsWithCacheReversal counts the full completions of p with early
-// stop at level totalCells−d (specs/searcher.md): at that level the remainder
-// U = full \ T is answered by Σ W(canon(U,u))/orbitSize over u ∈ N(t) ∩ U from
-// c instead of descending to a full board. c == nil or 2d > totalCells → full
-// descent without any cache access (the reversal duality is unreachable).
-// Statistics: TotalPathsFound, CacheHits/CacheMisses per lookup, pruning by
-// reason.
-func (s *Searcher) CountPathsWithCacheReversal(ctx context.Context, p path.Path, c *cache.View, d int) (result types.Result) {
+// CountPathsWithCacheReversal counts the full completions of task (mask, end =
+// task.Rep) with early stop at level totalCells−d (specs/searcher.md): at that
+// level the remainder U = full \ T is answered by Σ W(K)[rep(u)]/orbitSize
+// over u ∈ N(t) ∩ U from c instead of descending to a full board. task.Weight
+// is not used — the calling contour does the weighting. The memo is read
+// through the lock-free cache.View (ADR-031, plan 16): the count phase runs
+// after the generation barrier and Seal, no writers exist. c == nil or
+// 2d > totalCells → full descent without any cache access (the reversal
+// duality is unreachable). Statistics: TotalPathsFound, CacheHits/CacheMisses
+// per class probe, pruning by reason.
+func (s *Searcher) CountPathsWithCacheReversal(ctx context.Context, task cache.Entry, c *cache.View, d int) (result types.Result) {
 	stopLevel := -1 // disabled sentinel: full descent
 	if c != nil && 2*d <= s.graph.GetTotalCells() {
 		stopLevel = s.graph.GetTotalCells() - d
 	}
-	result.TotalPathsFound = s.dfsCount(ctx, p.State(), p.End(), stopLevel, c, &result)
+	result.TotalPathsFound = s.dfsCount(ctx, task.Mask, int(task.Rep), stopLevel, c, &result)
 	result.Finalize()
 	return result
 }
 
 // dfsTask is the single generation descent shared by GenerateTasks and
-// ExtendTask: on a leaf it writes the canonical placement into the cache with
-// the group's weight (specs/searcher.md). Before the write the forced-chain
-// gate (ShouldPruneState) drops keys with zero completions — pruned leaves pay
-// the check but not the canonicalization, and one hook covers both tables. It
-// is not callback-unified with dfsCount: recursion with a function parameter
-// never inlines, and the base case is the only difference — duplicating the
-// loop is cheaper.
+// ExtendTask: on a leaf it writes the canonical class placement into the sink
+// with the group's weight (specs/searcher.md). Before the write the forced-
+// chain gate (ShouldPruneState) drops classes with zero completions — pruned
+// leaves pay the check but not the canonicalization, and one hook covers both
+// tables. It is not callback-unified with dfsCount: recursion with a function
+// parameter never inlines, and the base case is the only difference —
+// duplicating the loop is cheaper.
 func (s *Searcher) dfsTask(ctx context.Context, st state.State, end, depth int, weight uint64, c cache.Sink, res *types.Result) {
 	if ctx.Err() != nil {
 		return
@@ -103,7 +110,8 @@ func (s *Searcher) dfsTask(ctx context.Context, st state.State, end, depth int, 
 			res.CountPrune(reason)
 			return
 		}
-		c.Set(s.sym.Canonicalize(st, end), weight)
+		K, rep, _ := s.sym.CanonicalClass(st, end) // orbitSize is the reader's
+		c.Set(K, rep, weight)
 		res.CacheWrites++
 		return
 	}
@@ -124,7 +132,7 @@ func (s *Searcher) dfsTask(ctx context.Context, st state.State, end, depth int, 
 }
 
 // dfsCount is the reversal count-DFS: full descent (a full board counts 1)
-// unless stopLevel ≥ 0 and the visit count hits it exactly, where Completions
+// unless stopLevel ≥ 0 and the visit count hits it exactly, where completions
 // answers through the task cache. Steps grow bits one at a time, so == suffices.
 func (s *Searcher) dfsCount(ctx context.Context, st state.State, end, stopLevel int, c *cache.View, res *types.Result) int {
 	if ctx.Err() != nil {
@@ -160,25 +168,36 @@ func (s *Searcher) dfsCount(ctx context.Context, st state.State, end, stopLevel 
 
 // completions answers f(T,end) at the stop level for U = unvisited: every
 // completion of (T,t) reverses to a suffix covering exactly U and ending at a
-// neighbor u of t, so f(T,t) = Σ_{u∈U, u~t} h(U,u). The task-cache weight of
-// canon(U,u) is the sum of orbit sizes over all depth-d prefixes in that key's
-// fiber — W = orbitSize·h(U,u) — hence the exact division (specs/searcher.md,
-// ADR-011). Missing entries contribute 0 (no such prefix ⇒ h == 0); every
-// lookup is attributed to res without atomics (one Result per worker).
+// neighbor u of t, so f(T,t) = Σ_{u∈U, u~t} h(U,u). The canonical frame is
+// computed once per mask — all ends of this remainder share one K — and the
+// memo takes exactly one Get(K) per call (specs/searcher.md, plan 18). Each
+// candidate u moves into K's coordinates through the frame (TransformCell) and
+// collapses to its class tag (ClassRep); the answer is the histogram slot
+// Weight(rep) divided by CellOrbitSize — exact, because a class weight is a
+// sum of orbit sizes of that class (generalization of ADR-011 from pairs to
+// classes). An absent mask answers every probe as a miss; an absent class
+// misses just that probe. Writer and reader call the same symmetry functions,
+// so canonicalization agrees by construction. Every probe is attributed to res
+// without atomics (one Result per worker).
 func (s *Searcher) completions(unvisited state.State, end int, c *cache.View, res *types.Result) int {
 	cand := s.graph.GetNeighborMask(end).Intersect(unvisited)
-	states := s.sym.TransformStates(unvisited)
+	K, frame, stab := s.sym.CanonicalMaskFrame(unvisited)
+	val, maskFound := c.Get(K)
 
 	found := 0
 	for u := range cand.AllVisited() {
-		canonical, orbitSize := s.sym.CanonicalFromStates(states, int(u))
-		weight, ok := c.Get(canonical)
+		if !maskFound {
+			res.CacheMisses++
+			continue
+		}
+		rep := s.sym.ClassRep(stab, s.sym.TransformCell(frame, int(u)))
+		weight, ok := val.Weight(rep)
 		if !ok {
 			res.CacheMisses++
 			continue
 		}
 		res.CacheHits++
-		found += int(weight / uint64(orbitSize))
+		found += int(weight / uint64(s.sym.CellOrbitSize(stab, int(rep))))
 	}
 	return found
 }

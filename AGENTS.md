@@ -223,8 +223,6 @@ Reusable utilities live in `tools/` (Python 3, stdlib-only), described in `specs
   - Methods: `GetNeighbors()`, `GetDegree()`, `GetNeighborMask()`, `ShouldSkip()` (color parity skip for odd boards)
 - **state/** – `State` type (uint64 bitboard) tracking visited positions
   - Bit manipulation operations: Visit, Unvisit, IsVisited, CountBits, Intersect, Union, Invert, AllVisited
-- **path/** – `Path` value type (state + end); the single key of every table
-  (D4-canonical placements in gen A and in the task cache)
 - **types/** – Shared `Result` struct (TotalPathsFound, CacheWrites, CacheHits/Misses, Pruned breakdown)
 - **searcher/** – DFS over bitmasks with dead-end pruning; no memo tables of its own
   - Methods: `GenerateTasks()` (the single from-start descent into a `cache.Cache` — writes both
@@ -246,16 +244,22 @@ Reusable utilities live in `tools/` (Python 3, stdlib-only), described in `specs
   cancellation only; phase policy (batch/capacity formulas, clamps) stays in counter
 - **pruner/** – Stateless necessary-condition pruning (L0 local dead-end + L1 global checks):
   - `Pruner` – `ShouldPruneAfterVisit()` (hot O(deg) check, returns first prune Reason)
-- **cache/** – One sharded weight table `Cache` (128 shards, hashed by State only; ADR-018):
-  additive `Set()` (`+= w`, zero no-op) under a writers-only Mutex; reads go through the sealed
-  `View` handle from `Seal()` — lock-free `Get()`, `Len()` and the dispatch walk
-  `All(ctx) iter.Seq[Entry]` over the live maps (write → seal → read, plan 16). Serves both the
-  short-lived gen-A intermediate (materialized to a worklist via `View.All`, then GC'd) and the
-  task cache (lives until the end of the count phase, never drained). No copying Snapshot
+- **cache/** – One sharded "mask → end-class histogram" table `Cache` (128 shards, hashed by
+  mask only; ADR-018, plan 18): additive `Set(K, rep, w)` (`data[K][rep] += w`, zero no-op) into
+  a pointer-free `uint64 → uint64` map — tagged value word: inline `(rep:8|W:56)` at k=1, slab ref
+  `(k:7|idx:56)` at k≥2 into a per-shard append-only `[]uint64` slab with `cap(k)=2^⌈log₂k⌉`
+  blocks and same-capacity free-basket recycling on copy-on-append growth; reads go through the
+  sealed `View` handle from `Seal()` — lock-free `Get(K) (Value, bool)` with `Value.Weight(rep)`,
+  `Len()` (mask count) and the dispatch walk `All(ctx) iter.Seq[Entry]` expanding one
+  `Entry{Mask, Rep, Weight}` per class over the live maps (write → seal → read, plan 16). Serves
+  both the short-lived gen-A intermediate (materialized to a worklist via `View.All`, then GC'd)
+  and the task cache (lives until the end of the count phase, never drained). No copying Snapshot
   (it doubled peak memory on large boards).
 - **symmetry/** – Exploits board symmetries to reduce search space
   - 8 symmetries: rotations and reflections
-  - Methods: `GetCanonicalPosition()`, `GetOrbitSize()`, `GetCanonicalGroups()`, `Canonicalize()`
+  - Methods: `GetCanonicalPosition()`, `GetOrbitSize()`, `GetCanonicalGroups()`; the shared
+    writer/reader class form `CanonicalClass()` (canonical mask + end-class tag + orbit size)
+    and its hot-path parts `CanonicalMaskFrame()`, `TransformCell()`, `ClassRep()`, `CellOrbitSize()`
 - **monitoring/** – Progress reporting (`Monitor` interface, `RealMonitor`, `FakeMonitor`)
 
 

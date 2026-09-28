@@ -4,6 +4,7 @@ import (
 	"context"
 	"runtime/metrics"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -13,7 +14,7 @@ import (
 	"knighttour/cache"
 	"knighttour/graph"
 	"knighttour/monitoring"
-	"knighttour/path"
+	"knighttour/pruner"
 	"knighttour/state"
 )
 
@@ -169,13 +170,18 @@ func TestTerminatedContextPartialRun(t *testing.T) {
 	}
 }
 
-// tableWeight sums every record's weight via one sealed All walk, asserting
-// positivity along the way (specs/cache.md: zeros are never stored).
-func tableWeight(t *testing.T, c *cache.Cache) uint64 {
+// tableWeight sums every class slot's weight via one sealed All walk,
+// asserting positivity and divisibility by orbit (0 skips it) along the way
+// (specs/cache.md: zeros are never stored; specs/counter.md: class weights
+// are multiples of the contributing group's orbit).
+func tableWeight(t *testing.T, c *cache.Cache, orbit uint64) uint64 {
 	t.Helper()
 	total := uint64(0)
 	for e := range c.Seal().All(context.Background()) {
 		assert.Positive(t, e.Weight, "weight must be positive")
+		if orbit > 1 {
+			assert.Zero(t, e.Weight%orbit, "class slot weight multiple of orbit")
+		}
 		total += e.Weight
 	}
 	return total
@@ -198,7 +204,7 @@ func TestGenerateIntermediateWeightsMatchOrbits(t *testing.T) {
 
 		groupCache := cache.NewCache()
 		result := counter.searcher.GenerateTasks(ctx, groupCache, group.Canonical, uint64(group.OrbitSize), base)
-		totalWeight := tableWeight(t, groupCache)
+		totalWeight := tableWeight(t, groupCache, uint64(group.OrbitSize))
 
 		assert.Equal(t, uint64(result.CacheWrites)*uint64(group.OrbitSize), totalWeight,
 			"group %d: total weight equals prefixes * orbit size", group.Canonical)
@@ -224,7 +230,7 @@ func TestGenerateIntermediateStopsAtBaseDepth(t *testing.T) {
 	entries := counter.generateIntermediate(context.Background(), monitoring.NewFakeMonitor(), 8, 7)
 	assert.NotEmpty(t, entries)
 	for _, e := range entries {
-		assert.Equal(t, TwoPhaseBaseDepth, e.Path.State().CountBits())
+		assert.Equal(t, TwoPhaseBaseDepth, e.Mask.CountBits())
 	}
 }
 
@@ -350,7 +356,7 @@ func dispatchProbe(tb testing.TB, n, batch, bufferSlots int) []uint64 {
 	tb.Helper()
 	c := cache.NewCache()
 	for i := range n {
-		c.Set(path.New(state.State(i), 0), uint64(i+1))
+		c.Set(state.State(i), 0, uint64(i+1))
 	}
 	view := c.Seal()
 	require.Equal(tb, n, view.Len())
@@ -411,7 +417,7 @@ func TestDispatchEntriesExactOnceUnderBackpressure(t *testing.T) {
 func taskCacheAtDepth(c *Counter, ctx context.Context, depth int) *cache.Cache {
 	taskCache := cache.NewCache()
 	for _, e := range c.generateIntermediate(ctx, monitoring.NewFakeMonitor(), 4, depth) {
-		taskCache.Set(e.Path, e.Weight)
+		taskCache.Set(e.Mask, e.Rep, e.Weight)
 	}
 	return taskCache
 }
@@ -424,18 +430,30 @@ func sequentialTotal(t *testing.T, c *Counter, ctx context.Context, taskCache *c
 	memo := taskCache.Seal()
 	want := uint64(0)
 	for e := range memo.All(ctx) {
-		res := c.searcher.CountPathsWithCacheReversal(ctx, e.Path, memo, depth)
+		res := c.searcher.CountPathsWithCacheReversal(ctx, e, memo, depth)
 		want += uint64(res.TotalPathsFound) * e.Weight
 	}
 	assert.Equal(t, uint64(1728), want, "the sequential reference must count the whole 5x5 tour total")
 	return want
 }
 
-// The counting channel dispatch delivers every task-cache record to the
-// consumers exactly once (specs/counter.md): the parallel total equals the
-// sequential Σ w·f(task) reference and the phase completes exactly View.Len()
-// tasks, whatever the worker count — including a below-ceiling table with the
-// Beff formula active. FIFO walk order is the contract of plan 16.
+// countClasses unfolds one sealed walk into its per-class Entry count.
+func countClasses(tb testing.TB, view *cache.View) int {
+	tb.Helper()
+	n := 0
+	for range view.All(context.Background()) {
+		n++
+	}
+	return n
+}
+
+// The counting channel dispatch delivers every expanded class task of the
+// table to the consumers exactly once (specs/counter.md): the parallel total
+// equals the sequential Σ w·f(task) reference, the phase completes exactly
+// the All walk's class count — never fewer than View.Len() masks — whatever
+// the worker count, including a below-ceiling table with the Beff formula
+// active. AddTasks registers the mask estimate. FIFO walk order is the
+// contract of plan 16.
 func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -450,10 +468,13 @@ func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			taskCache := taskCacheAtDepth(c, ctx, tt.depth)
-			items := taskCache.Seal().Len()
-			require.Positive(t, items)
+			view := taskCache.Seal()
+			masks := view.Len()
+			classes := countClasses(t, view)
+			require.Positive(t, masks)
+			require.GreaterOrEqual(t, classes, masks, "one Entry per class")
 			if tt.depth == 1 {
-				require.Less(t, items, dispatchClaimBatch, "the table must stay below the batch ceiling")
+				require.Less(t, masks, dispatchClaimBatch, "the table must stay below the batch ceiling")
 			}
 
 			want := sequentialTotal(t, c, ctx, taskCache, tt.depth)
@@ -463,8 +484,8 @@ func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
 				got := c.countTasks(ctx, fm, workers, taskCache, tt.depth, dispatchCapacityPerConsumer)
 				assert.Equal(t, want, got, "workers=%d: dispatch must not drop or duplicate records", workers)
 				counting := fm.Phase("counting")
-				assert.Equal(t, uint64(items), counting.Completed, "workers=%d: every record counted exactly once", workers)
-				assert.Equal(t, uint64(items), counting.Tasks, "workers=%d: AddTasks saw the whole table", workers)
+				assert.Equal(t, uint64(classes), counting.Completed, "workers=%d: every class task counted exactly once", workers)
+				assert.Equal(t, uint64(masks), counting.Tasks, "workers=%d: AddTasks saw the mask estimate", workers)
 			}
 		})
 	}
@@ -542,4 +563,70 @@ func TestCancelDuringCountingGivesPartialTotal(t *testing.T) {
 	assert.LessOrEqual(t, got, full, "a partial total never exceeds the full one")
 	counting := spy.Phase("counting")
 	assert.Equal(t, uint64(1), counting.Completed, "the batches after the first counted task are drained without counting")
+}
+
+// gatedLeafCount is an independent brute-force walk for one start: plain
+// backtracking mirroring the production pruning hooks (ShouldPruneAfterVisit
+// on every visit, ShouldPruneState at the leaf), counting surviving leaves at
+// the target depth. No symmetry, no bitboard DFS — the reference Σ W of a
+// class-packed table is the number of such raw leaves over all non-skipped
+// starts (each raw prefix contributes exactly once to its class slot).
+func gatedLeafCount(g *graph.Graph, start, depth int) uint64 {
+	pr := pruner.New(g)
+	total := g.GetTotalCells()
+
+	var walk func(cur int, st state.State) uint64
+	walk = func(cur int, st state.State) uint64 {
+		if st.CountBits() >= depth {
+			if cut, _ := pr.ShouldPruneState(cur, st.Invert(total)); cut {
+				return 0
+			}
+			return 1
+		}
+		unvisited := st.Invert(total)
+		found := uint64(0)
+		for _, n := range g.GetNeighbors(cur) {
+			if !st.IsVisited(n) {
+				newUnvisited := unvisited.Unvisit(n)
+				if !newUnvisited.IsEmpty() {
+					if cut, _ := pr.ShouldPruneAfterVisit(n, newUnvisited); cut {
+						continue
+					}
+				}
+				found += walk(n, st.Visit(n))
+			}
+		}
+		return found
+	}
+	return walk(start, state.NewState(start))
+}
+
+// Plan 18 on 7×7 at small split depths: the class-packed task cache (gen A
+// base + gen B extension) conserves total weight against the brute-force raw
+// leaf count — merging ends of one mask into histogram slots neither loses nor
+// duplicates contributions, with the write gate applied identically.
+func TestTaskCacheWeightConservation7x7(t *testing.T) {
+	const size = 7
+	g := graph.New(size)
+	c := NewCounter(g)
+	ctx := context.Background()
+
+	for _, depth := range []int{6, 7} {
+		t.Run("depth"+strconv.Itoa(depth), func(t *testing.T) {
+			var want uint64
+			for start := range g.GetTotalCells() {
+				if g.ShouldSkip(start) {
+					continue
+				}
+				want += gatedLeafCount(g, start, depth)
+			}
+			require.Positive(t, want)
+
+			intermediate := c.generateIntermediate(ctx, monitoring.NewFakeMonitor(), 4, depth)
+			taskCache := c.extendTasks(ctx, monitoring.NewFakeMonitor(), 4, intermediate, depth)
+			got := tableWeight(t, taskCache, 0)
+
+			assert.Equal(t, want, got, "Σ class-slot weights == raw gated leaf count at depth %d", depth)
+		})
+	}
 }

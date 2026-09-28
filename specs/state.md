@@ -58,4 +58,4 @@ TrailingZeroBits, AllVisited, String — по одному табличному 
 
 ## Связанные
 
-`specs/searcher.md` (горячий DFS), `specs/path.md`.
+`specs/searcher.md` (горячий DFS).

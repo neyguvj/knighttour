@@ -69,7 +69,7 @@ func TestApplyTransform(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := s.applyIdx(0, tt.pos)
+			result := s.TransformCell(0, tt.pos)
 			if result != tt.pos && !tt.wantSame {
 				assert.Equal(t, tt.pos, result, "ApplyTransform(0, %d)", tt.pos)
 			}
@@ -80,7 +80,7 @@ func TestApplyTransform(t *testing.T) {
 		pos := 0
 		results := make(map[int]bool)
 		for i := range 8 {
-			result := s.applyIdx(uint8(i), pos)
+			result := s.TransformCell(uint8(i), pos)
 			results[result] = true
 		}
 		assert.Len(t, results, 4, "corner position unique transforms")
@@ -90,7 +90,7 @@ func TestApplyTransform(t *testing.T) {
 		pos := 1
 		results := make(map[int]bool)
 		for i := range 8 {
-			result := s.applyIdx(uint8(i), pos)
+			result := s.TransformCell(uint8(i), pos)
 			results[result] = true
 		}
 		assert.Len(t, results, 8, "edge position unique transforms")
@@ -100,7 +100,7 @@ func TestApplyTransform(t *testing.T) {
 		pos := 6 // (1,1)
 		results := make(map[int]bool)
 		for i := range 8 {
-			result := s.applyIdx(uint8(i), pos)
+			result := s.TransformCell(uint8(i), pos)
 			results[result] = true
 		}
 		assert.Len(t, results, 4, "diagonal position %d unique transforms", pos)
@@ -284,144 +284,6 @@ func TestGetCanonicalGroups(t *testing.T) {
 	})
 }
 
-func TestCanonicalize(t *testing.T) {
-	s := NewSymmetry(5)
-
-	tests := []struct {
-		name  string
-		state state.State
-		end   int
-	}{
-		{"single cell", 1 << uint64(7), 7},
-		{"two cells", (1 << 7) | (1 << 8), 8},
-		{"corner pair", (1 << 0) | (1 << 4), 4},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			canonical := s.Canonicalize(tt.state, tt.end)
-
-			assert.True(t, canonical.End() >= 0 && canonical.End() < 25, "canonical end in range")
-			assert.Equal(t, tt.state.CountBits(), canonical.State().CountBits(), "bit count preserved")
-
-			twice := s.Canonicalize(canonical.State(), canonical.End())
-			assert.Equal(t, canonical, twice, "canonicalization is idempotent")
-		})
-	}
-
-	t.Run("all symmetries give same canonical", func(t *testing.T) {
-		st, end := state.NewState(23, 12), 12
-		canonical := s.Canonicalize(st, end)
-
-		for i := range numTransforms {
-			symSt := s.transformState(uint8(i), st)
-			symEnd := s.applyIdx(uint8(i), end)
-			assert.Equal(t, canonical, s.Canonicalize(symSt, symEnd), "transform %d", i)
-		}
-	})
-
-	t.Run("full board state preserved", func(t *testing.T) {
-		fullState := state.State((1 << 25) - 1)
-		canonical := s.Canonicalize(fullState, 24)
-		assert.Equal(t, 25, canonical.State().CountBits(), "canonical visited cells")
-	})
-
-	t.Run("states from different orbits stay separate", func(t *testing.T) {
-		// Center cell orbit is a singleton; corner orbit never contains center.
-		center := s.Canonicalize(state.NewState(12), 12)
-		corner := s.Canonicalize(state.NewState(0), 0)
-		assert.NotEqual(t, center.State(), corner.State(), "different orbits")
-	})
-
-	t.Run("symmetric cells merge", func(t *testing.T) {
-		// Cells 0 and 4 share an orbit on 5x5.
-		a := s.Canonicalize(state.NewState(0), 0)
-		b := s.Canonicalize(state.NewState(4), 4)
-		assert.Equal(t, a, b, "same-orbit single-cell tasks merge")
-	})
-}
-
-func TestCanonicalizeWithOrbitSize(t *testing.T) {
-	s := NewSymmetry(5)
-
-	bruteForceOrbitSize := func(st state.State, end int) int {
-		type pair struct {
-			st  state.State
-			end uint8
-		}
-		seen := make(map[pair]bool)
-		for i := range numTransforms {
-			seen[pair{s.transformState(uint8(i), st), uint8(s.applyIdx(uint8(i), end))}] = true
-		}
-		return len(seen)
-	}
-
-	tests := []struct {
-		name      string
-		state     state.State
-		end       int
-		wantOrbit int
-	}{
-		{"center cell is fixed by all transforms", state.NewState(12), 12, 1},
-		{"corner cell orbit", state.NewState(0), 0, 4},
-		{"two cells", (1 << 7) | (1 << 8), 8, bruteForceOrbitSize((1<<7)|(1<<8), 8)},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			canonical, orbitSize := s.CanonicalizeWithOrbitSize(tt.state, tt.end)
-
-			assert.Equal(t, tt.wantOrbit, orbitSize, "orbit size")
-			assert.Equal(t, s.Canonicalize(tt.state, tt.end), canonical, "canonical matches Canonicalize")
-		})
-	}
-
-	t.Run("matches brute force over random-ish states", func(t *testing.T) {
-		for _, cells := range [][]int{{0, 1}, {12, 6}, {24, 18, 17}, {2, 3, 8}} {
-			st := state.NewState(cells...)
-			end := cells[len(cells)-1]
-			_, orbitSize := s.CanonicalizeWithOrbitSize(st, end)
-			assert.Equal(t, bruteForceOrbitSize(st, end), orbitSize, "cells %v", cells)
-		}
-	})
-
-	t.Run("orbit size is invariant over the orbit", func(t *testing.T) {
-		st, end := state.NewState(23, 12), 12
-		_, base := s.CanonicalizeWithOrbitSize(st, end)
-		for i := range numTransforms {
-			_, got := s.CanonicalizeWithOrbitSize(s.transformState(uint8(i), st), s.applyIdx(uint8(i), end))
-			assert.Equal(t, base, got, "transform %d", i)
-		}
-	})
-
-	t.Run("batch API matches one-shot canonicalization", func(t *testing.T) {
-		st := state.NewState(3, 7, 12, 18)
-		states := s.TransformStates(st)
-		for end := range 25 {
-			want, wantOrbit := s.CanonicalizeWithOrbitSize(st, end)
-			got, gotOrbit := s.CanonicalFromStates(states, end)
-			assert.Equal(t, want, got, "end %d", end)
-			assert.Equal(t, wantOrbit, gotOrbit, "end %d", end)
-		}
-	})
-}
-
-func TestCanonicalizeLexicographicMinimum(t *testing.T) {
-	s := NewSymmetry(5)
-
-	st := state.NewState(20, 21)
-	end := 21
-	canonical := s.Canonicalize(st, end)
-
-	for i := range numTransforms {
-		cand := s.Canonicalize(s.transformState(uint8(i), st), s.applyIdx(uint8(i), end))
-		assert.LessOrEqual(t, canonical.State(), cand.State(), "canonical state is minimal in orbit")
-		if canonical.State() == cand.State() {
-			assert.LessOrEqual(t, canonical.End(), cand.End(), "canonical end is minimal for equal states")
-		}
-	}
-}
-
 func TestPropertyOrbitSizePlus(t *testing.T) {
 	s := NewSymmetry(5)
 
@@ -444,15 +306,15 @@ func TestPropertyTransformInvolutions(t *testing.T) {
 
 	t.Run("identity is involution", func(t *testing.T) {
 		for i := range 25 {
-			r1 := s.applyIdx(0, i)
+			r1 := s.TransformCell(0, i)
 			assert.Equal(t, i, r1, "identity transform")
 		}
 	})
 
 	t.Run("180 rotation twice = identity", func(t *testing.T) {
 		for i := range 25 {
-			r1 := s.applyIdx(2, i)
-			r2 := s.applyIdx(2, r1)
+			r1 := s.TransformCell(2, i)
+			r2 := s.TransformCell(2, r1)
 			assert.Equal(t, i, r2, "180° twice = identity")
 		}
 	})
@@ -460,8 +322,8 @@ func TestPropertyTransformInvolutions(t *testing.T) {
 	t.Run("reflection twice = identity", func(t *testing.T) {
 		for refIdx := 4; refIdx < 8; refIdx++ {
 			for i := range 25 {
-				r1 := s.applyIdx(uint8(refIdx), i)
-				r2 := s.applyIdx(uint8(refIdx), r1)
+				r1 := s.TransformCell(uint8(refIdx), i)
+				r2 := s.TransformCell(uint8(refIdx), r1)
 				assert.Equal(t, i, r2, "reflection %d twice = identity", refIdx)
 			}
 		}
@@ -483,19 +345,9 @@ func TestApplyTransformToStateWithLookup(t *testing.T) {
 
 		assert.Equal(t, 1, result.CountBits(), "transformed state bit count")
 
-		pos7Transformed := s.applyIdx(1, 7)
+		pos7Transformed := s.TransformCell(1, 7)
 		assert.True(t, result.IsVisited(pos7Transformed), "transformed position visited")
 	})
-}
-
-func TestCanonicalizeStateConsistency(t *testing.T) {
-	s := NewSymmetry(5)
-
-	canonical := s.Canonicalize((1<<0)|(1<<4)|(1<<8), 8)
-	assert.Equal(t, 3, canonical.State().CountBits(), "canonical state bit count")
-
-	canonical2 := s.Canonicalize(state.NewState(12), 12)
-	assert.True(t, canonical2.State().IsVisited(canonical2.End()), "center task keeps its cell")
 }
 
 func TestMultipleSizes(t *testing.T) {

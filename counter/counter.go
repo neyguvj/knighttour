@@ -9,7 +9,6 @@ import (
 	"knighttour/cache"
 	"knighttour/graph"
 	"knighttour/monitoring"
-	"knighttour/path"
 	"knighttour/searcher"
 	"knighttour/symmetry"
 	"knighttour/workerpool"
@@ -150,8 +149,7 @@ func (c *Counter) extendTasks(ctx context.Context, monitor monitoring.Monitor, w
 		staging := taskCache.NewStaging(stagingFlushLimit)
 		defer staging.Flush()
 		for i := range idx {
-			e := intermediate[i]
-			result := c.searcher.ExtendTask(ctx, staging, e.Path, e.Weight, precomputeDepth)
+			result := c.searcher.ExtendTask(ctx, staging, intermediate[i], precomputeDepth)
 			monitor.ReportSubtask(&result)
 			monitor.ReportTaskCompleted()
 		}
@@ -175,8 +173,9 @@ func effectiveBatch(records, consumers, claimB, granularityC int) int {
 
 // entryBatch is one element of the counting dispatch channel (plan 16): up to
 // Beff records copied by value into a fixed [dispatchClaimBatch] array
-// (8 + 24·16 = 392 B), so sending allocates nothing beyond the preallocated
-// channel buffer. Beff ≤ dispatchClaimBatch always holds by effectiveBatch.
+// (8 + 24·16 = 392 B — cache.Entry stays 24 B in the mask+rep format, plan
+// 18), so sending allocates nothing beyond the preallocated channel buffer.
+// Beff ≤ dispatchClaimBatch always holds by effectiveBatch.
 type entryBatch struct {
 	n     int
 	items [dispatchClaimBatch]cache.Entry
@@ -202,6 +201,9 @@ func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, wo
 	// Seal is the barrier read: every gen-B writer finished before this call,
 	// so the lock-free memo and the dispatch walk see all records (plan 16).
 	view := taskCache.Seal()
+	// records counts masks, not class tasks (classes ≥ masks): a lower-bound
+	// estimate for the consumer clamp, Beff and capacity formulas — delivery
+	// correctness never depends on its exactness (specs/counter.md, plan 18).
 	records := view.Len()
 	monitor.AddTasks(records)
 
@@ -219,7 +221,7 @@ func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, wo
 		},
 		func(ctx context.Context, b entryBatch) {
 			for _, e := range b.items[:b.n] {
-				c.countOneTask(ctx, monitor, view, precomputeDepth, e.Path, e.Weight, &total)
+				c.countOneTask(ctx, monitor, view, precomputeDepth, e, &total)
 			}
 		})
 
@@ -264,16 +266,17 @@ func sendBatch(ctx context.Context, ch chan<- entryBatch, b *entryBatch) bool {
 	}
 }
 
-// countOneTask runs the early-stop count-DFS for a single task and folds its
-// weighted path count and per-task statistics into the shared counters. It is
-// invoked from a counting consumer, off every lock; a terminated context
-// skips the task (partial-run semantics, specs/counter.md).
-func (c *Counter) countOneTask(ctx context.Context, monitor monitoring.Monitor, memo *cache.View, precomputeDepth int, p path.Path, weight uint64, total *atomic.Uint64) {
+// countOneTask runs the early-stop count-DFS for a single class task (mask +
+// rep as end, specs/counter.md) and folds its weighted path count and
+// per-task statistics into the shared counters. It is invoked from a counting
+// consumer, off every lock; a terminated context skips the task (partial-run
+// semantics, specs/counter.md).
+func (c *Counter) countOneTask(ctx context.Context, monitor monitoring.Monitor, memo *cache.View, precomputeDepth int, task cache.Entry, total *atomic.Uint64) {
 	if ctx.Err() != nil {
 		return
 	}
-	result := c.searcher.CountPathsWithCacheReversal(ctx, p, memo, precomputeDepth)
-	paths := uint64(result.TotalPathsFound) * weight
+	result := c.searcher.CountPathsWithCacheReversal(ctx, task, memo, precomputeDepth)
+	paths := uint64(result.TotalPathsFound) * task.Weight
 	total.Add(paths)
 	monitor.ReportPathsFound(int(paths))
 	monitor.ReportSubtask(&result)
@@ -281,9 +284,9 @@ func (c *Counter) countOneTask(ctx context.Context, monitor monitoring.Monitor, 
 }
 
 // generateIntermediate runs phase A: DFS from every canonical start group to
-// base = min(precomputeDepth, TwoPhaseBaseDepth), writing D4-canonical
-// prefixes directly into an intermediate cache.Cache via Set (specs/counter.md,
-// ADR-018). After the workerpool.Run barrier stops all writers, the table is
+// base = min(precomputeDepth, TwoPhaseBaseDepth), writing D4-canonical class
+// placements directly into an intermediate cache.Cache via Set
+// (specs/counter.md, ADR-018). After the workerpool.Run barrier stops all writers, the table is
 // materialized into phase B's independent-task worklist and dropped to the GC.
 func (c *Counter) generateIntermediate(ctx context.Context, monitor monitoring.Monitor, workers, precomputeDepth int) []cache.Entry {
 	monitor.BeginPhase("gen A")
@@ -307,10 +310,11 @@ func (c *Counter) generateIntermediate(ctx context.Context, monitor monitoring.M
 }
 
 // materializeWorklist seals the gen-A table (its writers stopped at the Run
-// barrier) and flattens it into the phase-B worklist with a single
-// All walk into a Len-sized slice — no intermediate copies beyond the slice
-// itself (specs/counter.md). A terminated context leaves the partial worklist
-// (partial-run semantics; the iterator has no other failure mode).
+// barrier) and flattens it into the phase-B worklist with a single All walk —
+// expanded, one Entry per end class — into a slice preallocated from
+// View.Len() (a mask count, only a lower bound on classes; specs/cache.md). A
+// terminated context leaves the partial worklist (partial-run semantics; the
+// iterator has no other failure mode).
 func materializeWorklist(ctx context.Context, intermediate *cache.Cache) []cache.Entry {
 	view := intermediate.Seal()
 	entries := make([]cache.Entry, 0, view.Len())

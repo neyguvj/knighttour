@@ -2,6 +2,7 @@ package searcher
 
 import (
 	"context"
+	"math/rand"
 	"strconv"
 	"testing"
 
@@ -10,7 +11,6 @@ import (
 
 	"knighttour/cache"
 	"knighttour/graph"
-	"knighttour/path"
 	"knighttour/pruner"
 	"knighttour/state"
 	"knighttour/symmetry"
@@ -72,13 +72,16 @@ func TestFullCountViaGenerateTasksMatchesKnownTotal(t *testing.T) {
 
 	var total int64
 	for _, e := range allTasks(t, c) {
-		assert.Equal(t, g.GetTotalCells(), e.Path.State().CountBits(), "leaf must cover the whole board")
+		assert.Equal(t, g.GetTotalCells(), e.Mask.CountBits(), "leaf must cover the whole board")
 		total += int64(e.Weight)
 	}
 
 	assert.Equal(t, int64(1728), total, "Σ orbit weights over full-depth leaves == plain count")
 }
 
+// Leaves are class slots at the target depth: every emitted mask sits exactly
+// at depth and its weight is a multiple of the group's orbit size (a slot
+// sums per-prefix contributions of that orbit).
 func TestGenerateTasksEmitsCanonicalPrefixes(t *testing.T) {
 	g := graph.New(5)
 	sym := symmetry.NewSymmetry(5)
@@ -89,8 +92,9 @@ func TestGenerateTasksEmitsCanonicalPrefixes(t *testing.T) {
 
 	assert.Positive(t, result.CacheWrites, "depth=3 must emit prefixes")
 	for _, e := range allTasks(t, c) {
-		assert.Equal(t, 3, e.Path.State().CountBits(), "every prefix sits at target depth")
+		assert.Equal(t, 3, e.Mask.CountBits(), "every prefix sits at target depth")
 		assert.Positive(t, e.Weight)
+		assert.Zero(t, e.Weight%4, "slot weight is a multiple of the group orbit")
 	}
 }
 
@@ -120,8 +124,9 @@ func buildTaskCache(g *graph.Graph, searcher *Searcher, d int) *cache.Cache {
 }
 
 // allTasks flattens a task-cache into one slice via the sealed View's All
-// walk — the lock-free direct iteration the count phase uses (plan 16). A
-// single walk keeps the append race-free without an extra lock.
+// walk — expanded per class, the lock-free direct iteration the count phase
+// uses (plan 16, plan 18). A single walk keeps the append race-free without an
+// extra lock.
 func allTasks(tb testing.TB, c *cache.Cache) []cache.Entry {
 	tb.Helper()
 	view := c.Seal()
@@ -133,9 +138,9 @@ func allTasks(tb testing.TB, c *cache.Cache) []cache.Entry {
 }
 
 // The reversal identity Σ_tasks W·f == plain count, pinned per split depth
-// against the naive brute-force total (1728). A sample of tasks is checked
-// task-by-task with naiveCountFrom: f(task) must equal the plain completions
-// of (state, end), not merely sum up right.
+// against the naive brute-force total (1728). A sample of class tasks is
+// checked task-by-task with naiveCountFrom: f(mask, rep as end) must equal the
+// plain completions of that placement, not merely sum up right.
 func TestReversalMatchesBruteForceAllDepths(t *testing.T) {
 	const size = 5
 	const naiveSample = 8
@@ -147,15 +152,16 @@ func TestReversalMatchesBruteForceAllDepths(t *testing.T) {
 	for d := 1; d <= g.GetTotalCells()/2; d++ {
 		t.Run("depth"+strconv.Itoa(d), func(t *testing.T) {
 			taskCache := buildTaskCache(g, searcher, d)
-			require.Positive(t, taskCache.Seal().Len())
+			view := taskCache.Seal()
+			require.Positive(t, view.Len())
 
 			var sum uint64
 			for i, e := range allTasks(t, taskCache) {
-				res := searcher.CountPathsWithCacheReversal(context.Background(), e.Path, taskCache.Seal(), d)
+				res := searcher.CountPathsWithCacheReversal(context.Background(), e, view, d)
 				sum += e.Weight * uint64(res.TotalPathsFound)
 
 				if i < naiveSample {
-					ref := naiveCountFrom(g, e.Path.State(), e.Path.End())
+					ref := naiveCountFrom(g, e.Mask, int(e.Rep))
 					assert.Equal(t, uint64(ref), uint64(res.TotalPathsFound), "task %d: f must match the brute force", i)
 				}
 			}
@@ -165,22 +171,24 @@ func TestReversalMatchesBruteForceAllDepths(t *testing.T) {
 }
 
 // Degenerate phase B: an entry already at the target depth is written as-is
-// (no descent, no re-canonicalization).
+// into its own (mask, rep) slot — no descent, no re-canonicalization.
 func TestExtendTaskWritesEntryAsIsAtTargetDepth(t *testing.T) {
 	g := graph.New(5)
 	sym := symmetry.NewSymmetry(5)
 	searcher := NewSearcher(g, sym)
 
-	p := path.New(state.State(0).Visit(0).Visit(6), 6)
+	e := cache.Entry{Mask: state.State(0).Visit(0).Visit(6), Rep: 6, Weight: 3}
 
 	c := cache.NewCache()
-	result := searcher.ExtendTask(context.Background(), c, p, 3, 2)
+	result := searcher.ExtendTask(context.Background(), c, e, 2)
 
 	assert.Equal(t, 1, result.CacheWrites, "entry at target depth writes itself")
 	view := c.Seal()
-	weight, found := view.Get(p)
-	assert.True(t, found, "record must be stored as-is under the entry key")
-	assert.Equal(t, uint64(3), weight)
+	val, found := view.Get(e.Mask)
+	require.True(t, found, "record must be stored as-is under the entry mask")
+	w, ok := val.Weight(e.Rep)
+	assert.True(t, ok, "class slot must be the entry's rep")
+	assert.Equal(t, uint64(3), w)
 	assert.Equal(t, 1, view.Len())
 }
 
@@ -205,7 +213,8 @@ func TestCountPathsWithCacheReversalFullDescentIdentities(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			for start := range g.GetTotalCells() {
 				st := state.NewState(start)
-				res := searcher.CountPathsWithCacheReversal(context.Background(), path.New(st, start), tt.c, tt.d)
+				task := cache.Entry{Mask: st, Rep: uint8(start)}
+				res := searcher.CountPathsWithCacheReversal(context.Background(), task, tt.c, tt.d)
 				assert.Equal(t, naiveCountFrom(g, st, start), res.TotalPathsFound, "start %d", start)
 				assert.Zero(t, res.CacheHits+res.CacheMisses, "full descent must not consult the cache")
 			}
@@ -214,48 +223,49 @@ func TestCountPathsWithCacheReversalFullDescentIdentities(t *testing.T) {
 }
 
 // The stop fires exactly at level totalCells−d: a task whose bits already sit
-// at the stop level answers through Completions immediately — every u ∈
-// N(end)∩U is looked up once and nothing else. An empty cache gives 0 paths
-// with exactly |N(end)∩U| misses; seeding one canonical key with its orbit
-// weight contributes exactly W/orbitSize == 1 per candidate sharing that key.
+// at the stop level answers through completions immediately — every u ∈
+// N(end)∩U is one class probe and nothing else. An empty cache gives 0 paths
+// with exactly |N(end)∩U| misses; seeding one class slot with its orbit
+// weight contributes exactly W/orbitSize == 1 per candidate of that class,
+// while candidates of other classes keep missing (per-class accounting).
 func TestReversalStopLookupsHappenAtStopLevel(t *testing.T) {
 	const size = 5
 	total := size * size
 	g := graph.New(size)
-	sym := symmetry.NewSymmetry(size)
+	sym := symmetry.NewSymmetry(5)
 	searcher := NewSearcher(g, sym)
 
 	st := state.NewState(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12) // bits == stopLevel
-	p := path.New(st, 12)
+	task := cache.Entry{Mask: st, Rep: 12}
 	d := total / 2 // stopLevel = total−d = 13 == bits: immediate completions
 	unvisited := st.Invert(total)
 
 	cand := g.GetNeighborMask(12).Intersect(unvisited)
 	require.Positive(t, cand.CountBits())
 
-	res := searcher.CountPathsWithCacheReversal(context.Background(), p, cache.NewCache().Seal(), d)
+	res := searcher.CountPathsWithCacheReversal(context.Background(), task, cache.NewCache().Seal(), d)
 	assert.Zero(t, res.TotalPathsFound, "empty cache answers zero completions")
 	assert.Zero(t, res.CacheHits)
-	assert.Equal(t, cand.CountBits(), res.CacheMisses, "one lookup per candidate end at the stop level")
+	assert.Equal(t, cand.CountBits(), res.CacheMisses, "one class probe per candidate end at the stop level")
 
 	var u0 int
 	for u := range cand.AllVisited() {
 		u0 = u
 		break
 	}
-	canonical, orbitSize := sym.CanonicalizeWithOrbitSize(unvisited, u0)
+	K, rep, orbitSize := sym.CanonicalClass(unvisited, u0)
 	c := cache.NewCache()
-	c.Set(canonical, uint64(orbitSize))
+	c.Set(K, rep, uint64(orbitSize))
 
 	want := 0
 	for u := range cand.AllVisited() {
-		if sym.Canonicalize(unvisited, u) == canonical {
+		if k, r, _ := sym.CanonicalClass(unvisited, u); k == K && r == rep {
 			want++
 		}
 	}
 
-	res = searcher.CountPathsWithCacheReversal(context.Background(), p, c.Seal(), d)
-	assert.Equal(t, want, res.TotalPathsFound, "each candidate under the seeded key adds W/orbitSize == 1")
+	res = searcher.CountPathsWithCacheReversal(context.Background(), task, c.Seal(), d)
+	assert.Equal(t, want, res.TotalPathsFound, "each candidate in the seeded class adds W/orbitSize == 1")
 	assert.Equal(t, want, res.CacheHits)
 	assert.Equal(t, cand.CountBits()-want, res.CacheMisses)
 }
@@ -283,7 +293,7 @@ func TestGenerateTasksSkipsWrongColor(t *testing.T) {
 }
 
 // Phase B through a batched Staging sink must land exactly the task-cache that
-// direct writes produce (plan 15): same keys, same summed weights.
+// direct writes produce (ADR-031): same class slots, same summed weights.
 func TestExtendTaskViaStagingMatchesDirect(t *testing.T) {
 	g := graph.New(5)
 	sym := symmetry.NewSymmetry(5)
@@ -300,10 +310,13 @@ func TestExtendTaskViaStagingMatchesDirect(t *testing.T) {
 	}
 	require.NotEmpty(t, worklist)
 
-	dump := func(c *cache.Cache) map[path.Path]uint64 {
-		m := make(map[path.Path]uint64)
+	dump := func(c *cache.Cache) map[state.State]map[uint8]uint64 {
+		m := make(map[state.State]map[uint8]uint64)
 		for e := range c.Seal().All(ctx) {
-			m[e.Path] = e.Weight
+			if m[e.Mask] == nil {
+				m[e.Mask] = make(map[uint8]uint64)
+			}
+			m[e.Mask][e.Rep] = e.Weight
 		}
 		return m
 	}
@@ -312,24 +325,86 @@ func TestExtendTaskViaStagingMatchesDirect(t *testing.T) {
 	staged := cache.NewCache()
 	sink := staged.NewStaging(7) // force several auto-flushes across the worklist
 	for _, e := range worklist {
-		searcher.ExtendTask(ctx, direct, e.Path, e.Weight, 6)
-		searcher.ExtendTask(ctx, sink, e.Path, e.Weight, 6)
+		searcher.ExtendTask(ctx, direct, e, 6)
+		searcher.ExtendTask(ctx, sink, e, 6)
 	}
 	sink.Flush()
 
 	assert.Equal(t, dump(direct), dump(staged), "batched writes land the same table")
 }
 
+// --- writer/reader canonicalization agreement (specs/searcher.md) ---
+
+// randomPlacement is a deterministic (mask, end) test pair with end ∈ mask.
+type randomPlacement struct {
+	st  state.State
+	end int
+}
+
+// randomPlacements draws count random placements from a fixed seed.
+func randomPlacements(size int, seed int64, count int) []randomPlacement {
+	rnd := rand.New(rand.NewSource(seed))
+	total := size * size
+	out := make([]randomPlacement, 0, count)
+	for range count {
+		var st state.State
+		for range 1 + rnd.Intn(total) {
+			st = st.Visit(rnd.Intn(total))
+		}
+		end := 0
+		for u := range st.AllVisited() {
+			end = u
+		}
+		out = append(out, randomPlacement{st, end})
+	}
+	return out
+}
+
+// The writer's CanonicalClass and the reader's composition
+// CanonicalMaskFrame → TransformCell → ClassRep are one and the same class
+// form on random placements (fixed seed), and the result does not depend on
+// which argmin frame the reader happened to get.
+func TestWriterReaderCanonicalizationAgree(t *testing.T) {
+	sym := symmetry.NewSymmetry(5)
+	for _, p := range randomPlacements(5, 1811, 200) {
+		K, rep, orbitSize := sym.CanonicalClass(p.st, p.end)
+
+		frameK, frame, stab := sym.CanonicalMaskFrame(p.st)
+		c := sym.TransformCell(frame, p.end)
+		assert.Equal(t, K, frameK, "shared mask")
+		assert.Equal(t, rep, sym.ClassRep(stab, c), "reader form equals writer form")
+		assert.Equal(t, orbitSize, sym.CellOrbitSize(stab, int(rep)), "shared orbit size")
+	}
+
+	t.Run("argmin-frame independence on the full board", func(t *testing.T) {
+		// Every transform is an argmin frame of the full mask, so this probes
+		// the class form against all eight frames at once.
+		full := state.State(1<<25 - 1)
+		K, _, stab := sym.CanonicalMaskFrame(full)
+		for end := range 25 {
+			wantK, rep, orbitSize := sym.CanonicalClass(full, end)
+			assert.Equal(t, wantK, K, "mask")
+			assert.Positive(t, orbitSize)
+			for f := range symmetry.NumTransforms {
+				c := sym.TransformCell(uint8(f), end)
+				assert.Equalf(t, rep, sym.ClassRep(stab, c), "end %d frame %d", end, f)
+				assert.Equalf(t, orbitSize, sym.CellOrbitSize(stab, int(rep)), "end %d frame %d", end, f)
+			}
+		}
+	})
+}
+
 // --- write gate lemma (specs/searcher.md) ---
 
 // gateLeafWalk mirrors the dfsTask descent — L0/L1 pruning included — down to
-// a fixed depth and applies the write gate at every leaf, collecting the keys
-// it rejects.
-func gateLeafWalk(g *graph.Graph, pr *pruner.Pruner, st state.State, end, depth int, rejected map[path.Path]bool) {
+// a fixed depth and applies the write gate at every leaf, collecting the end
+// classes it rejects in canonical form.
+func gateLeafWalk(g *graph.Graph, sym *symmetry.Symmetry, pr *pruner.Pruner, st state.State, end, depth int, rejected map[cache.Entry]bool) {
 	if st.CountBits() == depth {
 		todo := st.Invert(g.GetTotalCells())
 		if cut, _ := pr.ShouldPruneState(end, todo); cut {
-			rejected[path.New(st, end)] = true
+			K, rep, _ := sym.CanonicalClass(st, end)
+			rejected[cache.Entry{Mask: K, Rep: rep}] = true
 		}
 		return
 	}
@@ -342,34 +417,34 @@ func gateLeafWalk(g *graph.Graph, pr *pruner.Pruner, st state.State, end, depth 
 				continue
 			}
 		}
-		gateLeafWalk(g, pr, st.Visit(n), n, depth, rejected)
+		gateLeafWalk(g, sym, pr, st.Visit(n), n, depth, rejected)
 	}
 }
 
-// The soundness lemma of the write gate: every generation leaf the gate
-// rejects has f(key) = 0 — no Hamiltonian path from the end covers the
-// remainder. Exhaustive descent on 5×5 to a fixed depth (the production
-// L0/L1 pruning included), each rejected key re-checked against the
-// independent brute-force oracle.
-func TestWriteGateRejectsOnlyDeadKeys(t *testing.T) {
+// The soundness lemma of the write gate: every generation leaf-class the gate
+// rejects has f(class) = 0 — no Hamiltonian path from the class end covers the
+// remainder. Exhaustive descent on 5×5 to a fixed depth (the production L0/L1
+// pruning included), each rejected class re-checked against the independent
+// brute-force oracle at its representative.
+func TestWriteGateRejectsOnlyDeadClasses(t *testing.T) {
 	const size = 5
 	const depth = 12 // half the board: the gate fires, the oracle stays cheap
 
 	g := graph.New(size)
-	sym := symmetry.NewSymmetry(size)
+	sym := symmetry.NewSymmetry(5)
 	searcher := NewSearcher(g, sym)
 
-	rejected := make(map[path.Path]bool)
+	rejected := make(map[cache.Entry]bool)
 	for start := range g.GetTotalCells() {
 		if g.ShouldSkip(start) {
 			continue
 		}
-		gateLeafWalk(g, searcher.pruner, state.NewState(start), start, depth, rejected)
+		gateLeafWalk(g, sym, searcher.pruner, state.NewState(start), start, depth, rejected)
 	}
 
-	require.NotEmpty(t, rejected, "the gate must reject some depth-%d keys on 5x5", depth)
-	for key := range rejected {
-		assert.Zero(t, naiveCountFrom(g, key.State(), key.End()),
-			"rejected key %v must have f = 0", key)
+	require.NotEmpty(t, rejected, "the gate must reject some depth-%d classes on 5x5", depth)
+	for class := range rejected {
+		assert.Zero(t, naiveCountFrom(g, class.Mask, int(class.Rep)),
+			"rejected class %v/%d must have f = 0", class.Mask, class.Rep)
 	}
 }

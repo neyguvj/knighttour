@@ -126,7 +126,8 @@ func reportBenchMetrics(b *testing.B, m *monitoring.FakeMonitor) {
 	// Task-cache lookups of the counting phase at the reversal stop level.
 	b.ReportMetric(float64(counting.CacheHits), "cacheHits/op")
 	b.ReportMetric(float64(counting.CacheMisses), "cacheMisses/op")
-	// Task-cache records after the write gate (countTasks publishes View.Len as Tasks).
+	// Task-cache masks after the write gate (countTasks publishes View.Len —
+	// the mask count of plan 18, a lower bound on class tasks — as Tasks).
 	b.ReportMetric(float64(counting.Tasks), "taskEntries/op")
 }
 

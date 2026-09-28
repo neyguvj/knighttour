@@ -31,12 +31,11 @@ graph.New(N) → counter.ParallelCountWithDepth(ctx, monitor, workers, depth)
 | Пакет | Спека | Ответственность |
 |-------|-------|-----------------|
 | state | [state.md](state.md) | Битборд посещённых клеток (uint64) и побитовые операции |
-| path | [path.md](path.md) | Единый ключ `(state,end)` всех таблиц |
 | graph | [graph.md](graph.md) | Предвычисленный граф ходов коня + маски соседей |
-| symmetry | [symmetry.md](symmetry.md) | D4-симметрии, канонизация пар и стартовых групп |
+| symmetry | [symmetry.md](symmetry.md) | D4-симметрии, каноническая форма «маска + класс конца», стартовые группы |
 | types | [types.md](types.md) | `Result` — носитель статистики подзадачи |
 | pruner | [pruner.md](pruner.md) | Отсечение тупиков (L0/L1) |
-| cache | [cache.md](cache.md) | Единая аддитивная таблица «ключ → Σ весов» (промежуточная gen A + task-cache) |
+| cache | [cache.md](cache.md) | Единая аддитивная таблица «маска → гистограмма классов концов» (промежуточная gen A + task-cache) |
 | searcher | [searcher.md](searcher.md) | DFS, генерационные фазы A/B, count-DFS |
 | counter | [counter.md](counter.md) | Оркестрация трёх фаз, параллелизм, симметрии |
 | workerpool | [workerpool.md](workerpool.md) | Механика параллелизма фаз: `Run` (курсор+барьер), `Fanout[T]` (канал+дренаж) |
