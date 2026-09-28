@@ -202,10 +202,10 @@ func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, wo
 	// so the lock-free memo and the dispatch walk see all records (plan 16).
 	view := taskCache.Seal()
 	// records counts masks, not class tasks (classes ≥ masks): a lower-bound
-	// estimate for the consumer clamp, Beff and capacity formulas — delivery
-	// correctness never depends on its exactness (specs/counter.md, plan 18).
+	// estimate for the consumer clamp, Beff and capacity formulas only — the
+	// phase's task total is registered batch by batch in dispatchEntries, so
+	// monitoring never reads this number (specs/counter.md, plan 18).
 	records := view.Len()
-	monitor.AddTasks(records)
 
 	consumers := max(min(workers, records), 1)
 	batch := effectiveBatch(records, consumers, dispatchClaimBatch, dispatchGranularityC)
@@ -217,7 +217,7 @@ func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, wo
 	var total atomic.Uint64
 	workerpool.Fanout(ctx, consumers, (capacity+batch-1)/batch,
 		func(ctx context.Context, out chan<- entryBatch) {
-			dispatchEntries(ctx, view, batch, out)
+			dispatchEntries(ctx, view, batch, monitor, out)
 		},
 		func(ctx context.Context, b entryBatch) {
 			for _, e := range b.items[:b.n] {
@@ -229,11 +229,16 @@ func (c *Counter) countTasks(ctx context.Context, monitor monitoring.Monitor, wo
 }
 
 // dispatchEntries streams the sealed table through ch in full batches of Beff
-// records (the walk's tail, if any, is the final send). A terminated context
-// ends the underlying All walk at the next shard boundary and aborts sends —
-// the partial prefix already delivered stays dispatched, the tail is dropped
-// (partial-run semantics, specs/counter.md). The calling contour closes ch.
-func dispatchEntries(ctx context.Context, view *cache.View, batch int, ch chan<- entryBatch) {
+// records (the walk's tail, if any, is the final send). Each batch is
+// registered with the monitor before it is handed over, so a task enters the
+// phase total strictly before it can be reported completed — progress never
+// exceeds 100% and its denominator converges to the exact class-task count
+// (specs/counter.md). A terminated context ends the underlying All walk at the
+// next shard boundary and aborts sends — the partial prefix already delivered
+// stays dispatched, the tail is dropped (partial-run semantics, specs/counter.md);
+// a dropped batch stays registered, so a cancelled phase simply ends below
+// 100%. The calling contour closes ch.
+func dispatchEntries(ctx context.Context, view *cache.View, batch int, monitor monitoring.Monitor, ch chan<- entryBatch) {
 	var b entryBatch
 	for e := range view.All(ctx) {
 		b.items[b.n] = e
@@ -241,12 +246,14 @@ func dispatchEntries(ctx context.Context, view *cache.View, batch int, ch chan<-
 		if b.n < batch {
 			continue
 		}
+		monitor.AddTasks(b.n)
 		if !sendBatch(ctx, ch, &b) {
 			return
 		}
 		b.n = 0
 	}
 	if b.n > 0 && ctx.Err() == nil {
+		monitor.AddTasks(b.n)  // registered even if the send loses the ctx race
 		sendBatch(ctx, ch, &b) // the walk's tail, deliverable like any full batch
 	}
 }

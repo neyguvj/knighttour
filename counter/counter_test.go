@@ -5,6 +5,7 @@ import (
 	"runtime/metrics"
 	"slices"
 	"strconv"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -351,7 +352,8 @@ func TestEffectiveBatch(t *testing.T) {
 // through dispatchEntries into a channel of bufferSlots batch slots and one
 // consumer, returning the delivered weights in arrival order. Batch sizes are
 // pinned on the way: never above Beff, at most one short tail — whole-slot
-// sends only (specs/counter.md).
+// sends only; every dispatched record is registered with the monitor
+// (specs/counter.md).
 func dispatchProbe(tb testing.TB, n, batch, bufferSlots int) []uint64 {
 	tb.Helper()
 	c := cache.NewCache()
@@ -362,8 +364,10 @@ func dispatchProbe(tb testing.TB, n, batch, bufferSlots int) []uint64 {
 	require.Equal(tb, n, view.Len())
 
 	ch := make(chan entryBatch, bufferSlots)
+	fm := monitoring.NewFakeMonitor()
+	fm.BeginPhase("counting") // AddTasks needs an active phase
 	go func() {
-		dispatchEntries(context.Background(), view, batch, ch)
+		dispatchEntries(context.Background(), view, batch, fm, ch)
 		close(ch) // the walk is done — mirrors countTasks.
 	}()
 
@@ -378,6 +382,7 @@ func dispatchProbe(tb testing.TB, n, batch, bufferSlots int) []uint64 {
 		}
 	}
 	assert.Equal(tb, (n+batch-1)/batch, batches, "full batches plus at most one tail")
+	assert.Equal(tb, uint64(n), fm.Phase("counting").Tasks, "every dispatched record was registered")
 	return got
 }
 
@@ -452,8 +457,9 @@ func countClasses(tb testing.TB, view *cache.View) int {
 // equals the sequential Σ w·f(task) reference, the phase completes exactly
 // the All walk's class count — never fewer than View.Len() masks — whatever
 // the worker count, including a below-ceiling table with the Beff formula
-// active. AddTasks registers the mask estimate. FIFO walk order is the
-// contract of plan 16.
+// active. AddTasks registers exactly the dispatched class tasks, so the phase
+// ends with Tasks == Completed == classes. FIFO walk order is the contract of
+// plan 16.
 func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -485,10 +491,52 @@ func TestCountTasksDeliversEachEntryOnce(t *testing.T) {
 				assert.Equal(t, want, got, "workers=%d: dispatch must not drop or duplicate records", workers)
 				counting := fm.Phase("counting")
 				assert.Equal(t, uint64(classes), counting.Completed, "workers=%d: every class task counted exactly once", workers)
-				assert.Equal(t, uint64(masks), counting.Tasks, "workers=%d: AddTasks saw the mask estimate", workers)
+				assert.Equal(t, uint64(classes), counting.Tasks, "workers=%d: AddTasks registered every dispatched class task", workers)
 			}
 		})
 	}
+}
+
+// progressSpyMonitor fails the test when a completion is reported while the
+// phase's registered total lags behind it — the invariant of registering each
+// batch before sending it (specs/counter.md: progress never exceeds 100%).
+type progressSpyMonitor struct {
+	monitoring.Monitor
+	t     *testing.T
+	tasks atomic.Uint64
+	done  atomic.Uint64
+}
+
+func (s *progressSpyMonitor) AddTasks(count int) {
+	s.tasks.Add(uint64(count))
+	s.Monitor.AddTasks(count)
+}
+
+func (s *progressSpyMonitor) ReportTaskCompleted() {
+	if s.done.Add(1) > s.tasks.Load() {
+		s.t.Error("task completed before it was registered — progress would exceed 100%")
+	}
+	s.Monitor.ReportTaskCompleted()
+}
+
+// The counting phase registers a task strictly before dispatching it, so at
+// no point can completions outrun the total (specs/counter.md). The spy runs
+// against a table above the batch ceiling with several consumers, so sends,
+// registrations and completions genuinely interleave under -race.
+func TestCountingProgressNeverExceedsRegistered(t *testing.T) {
+	c := NewCounter(graph.New(5))
+	ctx := context.Background()
+	taskCache := taskCacheAtDepth(c, ctx, 4)
+	classes := countClasses(t, taskCache.Seal())
+	require.Positive(t, classes)
+
+	fm := monitoring.NewFakeMonitor()
+	got := c.countTasks(ctx, &progressSpyMonitor{Monitor: fm, t: t}, 8, taskCache, 4, dispatchCapacityPerConsumer)
+
+	assert.Positive(t, got, "the phase must count something")
+	counting := fm.Phase("counting")
+	assert.Equal(t, uint64(classes), counting.Tasks, "registered total converges to the class-task count")
+	assert.Equal(t, counting.Tasks, counting.Completed, "phase ends at exactly 100%")
 }
 
 // A buffer far smaller than the record count makes every send block until the

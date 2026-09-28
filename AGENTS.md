@@ -286,7 +286,7 @@ Available benchmarks in `counter/benchmark_test.go`:
   FakeMonitor counters as extra metrics (`genA_ms/op`, `genB_ms/op`, `cnt_ms/op`,
   `writesA/op`, `writesB/op`, `prunedA/op`, `prunedB/op`, `prunedL2A/op`,
   `prunedL2B/op` (write-gate chain cuts per generation phase), `taskEntries/op`
-  (task-cache item count), `cacheHits/op`, `cacheMisses/op`) plus memory
+  (counting-phase class-task count), `cacheHits/op`, `cacheMisses/op`) plus memory
   (`peakRSS_MB/op` — per-process max RSS,
   `totalAllocMB/op` — per-iteration allocation delta)
 - there are NO environment variables in the benchmark code (ADR-020): which boards run is
