@@ -58,7 +58,8 @@ skill `workflow`.
 - `specs/tools/README.md` — index of reusable utilities (`tools/`), one card `specs/tools/<tool>.md`
   per tool. Reuse before writing scripts (see «Shared tools»).
 - Authoring guides are skills: `spec-writing`, `plan-writing` (loaded when editing `specs/`),
-  `readme-writing` (loaded when editing `README.md`), `tools` (loaded when adding a reusable script).
+  `readme-writing` (loaded when editing `README.md`), `tools` (loaded when adding a reusable script),
+  `doc-style` (Russian prose standard — glossary, banned calques; loaded on any docs edit).
 
 ## README (showcase)
 

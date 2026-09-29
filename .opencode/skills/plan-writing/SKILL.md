@@ -36,6 +36,7 @@ description: Guide for authoring optimization/experiment plans in specs/plans/. 
 
 ## Правила
 
+- Русский язык прозы и принятые термины — по скиллу `doc-style` (глоссарий, запрещённые кальки).
 - Имя: `NN-<slug>.md`, следующий номер по максимуму в `specs/plans/`.
 - Производительный план обязан содержать конкретные бенч-точки (`make bench-size N=… DEPTHS=…`)
   и порог принятия — иначе reviewer отклонит.
