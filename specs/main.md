@@ -2,8 +2,9 @@
 
 ## Ответственность
 
-Разбор и валидация аргументов, сборка компонентов (graph → counter), запуск мониторинга и
-подсчёта, корректное завершение по сигналу.
+Пакет `main` — точка входа программы. Он разбирает аргументы командной строки и проверяет их,
+собирает компоненты (`graph` → `counter`), запускает мониторинг и подсчёт. Здесь же устроено
+корректное завершение по сигналу (graceful shutdown).
 
 ## Флаги командной строки
 
@@ -11,49 +12,54 @@
 |------|----------|--------------|
 | `-size` | 5–8 | 5 |
 | `-workers` | ≥ 1 | `runtime.NumCPU()` |
-| `-precompute-depth` | 1 … `size²/2` (sentinel 0 → авто) | `counter.DefaultPrecomputeDepth(size)` |
+| `-precompute-depth` | 1 … `size²/2`; без флага глубина выбирается автоматически | `counter.DefaultPrecomputeDepth(size)` |
 | `-gc-percent` | ≥ 0 (0 — не трогать GC рантайма) | 40 (`counter.DefaultGCPercentReversal`) |
 
-Валидация (`parseArgs`): явный 0 у `-precompute-depth` → ошибка; отрицательный
-`-gc-percent` → ошибка (режим «GC off» не допускается); неизвестные флаги → ошибка
-(`flag.ContinueOnError`, вывод в stderr). Глубина разреза глубже половины доски дуальна
-обращению тура.
+Валидацией занимается `parseArgs`, и при неверном вводе она возвращает ошибку. Явно переданный
+`-precompute-depth 0` считается ошибкой: нуль означает отсутствие флага, а не допустимую глубину.
+Отрицательный `-gc-percent` тоже запрещён — выключить сборщик мусора этим флагом нельзя. Неизвестные
+флаги приводят к ошибке разбора: набор создаётся с `flag.ContinueOnError`, а сообщение идёт в stderr.
+Верхняя граница глубины равна `size²/2`: разрез глубже половины доски повторяет уже рассмотренное
+обращение тура и потому бесполезен.
 
 ## Структуры и функции
 
 ```go
-type appArgs struct { size, workers, precomputeDepth, gcPercent int }
+type appArgs struct {
+	size            int
+	workers         int
+	precomputeDepth int
+	gcPercent       int
+}
 
 func parseArgs(args []string) (*appArgs, error)
-func run(ctx context.Context, monitor monitoring.Monitor, args *appArgs) uint64 // graph+counter → счёт
+func run(ctx context.Context, monitor monitoring.Monitor, args *appArgs) uint64
 ```
 
-`run` собирает `graph.New(size)` + `counter.NewCounter`, передаёт `-gc-percent` в
-`counter.SetGCPercent` (ADR-014) и запускает `ParallelCountWithDepth`. Внешний env `GOGC`
-в прогоне перезаписывается этим значением.
+Функция `run` строит граф доски через `graph.New(size)` и счётчик через `counter.NewCounter`.
+Значение `-gc-percent` передаётся в `counter.SetGCPercent` и действует всё время конвейера (ADR-014),
+перезаписывая переменную окружения `GOGC`, если она задана извне. После этого `run` вызывает
+`ParallelCountWithDepth` и возвращает найденное число туров.
 
-## Graceful shutdown (Ctrl+C)
+## Корректное завершение по сигналу
 
-`signal.NotifyContext(os.Interrupt, SIGTERM)`:
-
-- первый сигнал отменяет контекст → воркеры завершаются по `ctx.Err()`,
-  `ParallelCountWithDepth` возвращается;
-- печатается сообщение о прерывании;
-- отложенный `monitor.Finish()` печатает частичный финальный отчёт по фазам;
-- второй Ctrl+C завершает мгновенно (`NotifyContext` сам снимает обработчик).
+`main` подписывается на `os.Interrupt` и `SIGTERM` через `signal.NotifyContext`. Первый сигнал
+отменяет контекст; воркеры замечают `ctx.Err()` и сворачиваются, а `ParallelCountWithDepth`
+возвращает управление. Затем программа печатает сообщение о прерывании. Отложенный вызов
+`monitor.Finish()` выводит частичный итоговый отчёт по фазам. Повторный сигнал останавливает
+процесс сразу: `signal.NotifyContext` снимает обработчик после первой доставки.
 
 ## Ограничения и edge cases
 
-- Единственный конвейер подсчёта (ADR-016); выбор схемы флагом не предусмотрен.
-- `-gc-percent` эффективен по умолчанию: штатный прогон идёт конвейером с пониженным
-  GOGC (ADR-014).
-- Обработка сигналов проверяется вручную (`kill -INT <pid>` → частичный отчёт без паники).
+- Подсчёт идёт единственным конвейером (ADR-016); выбрать другую схему флагом нельзя.
+- Значение `-gc-percent` применяется уже по умолчанию, поэтому штатный прогон идёт с пониженным GOGC (ADR-014).
+- Обработку сигналов проверяют вручную: `kill -INT <pid>` должен дать частичный отчёт без паники.
 
 ## Тесты
 
-`main_test.go`: `TestParseArgs` — табличные кейсы валидации всех флагов и границ, включая
-отрицательный `-gc-percent` и дефолтные значения; `TestRunCountMatchesReference` — `run` с
-FakeMonitor для 5×5 == 1728.
+В `main_test.go` два теста. `TestParseArgs` таблично проверяет валидацию всех флагов и их границ —
+включая отрицательный `-gc-percent`, явный нуль глубины и значения по умолчанию. 
+`TestRunCountMatchesReference` вызывает `run` с `FakeMonitor` на доске 5×5 и ожидает результат 1728.
 
 ## Связанные
 
