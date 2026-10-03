@@ -90,6 +90,54 @@ func runDepths(b *testing.B, size int, depths []int) {
 	}
 }
 
+// BenchmarkGenCensus measures the generation-only census (plan 19): phases A+B
+// into cache.NullSink — no task-cache, no count phase — so a depth costs only
+// prefix enumeration with O(1) phase-B memory. Subtests are size{N}/depth{D}
+// and the -bench filter of the caller decides which run (ADR-020). Published
+// metrics are the generation counters and phase timings only: peak RSS is
+// meaningless here (the sink allocates nothing) and there is no counting.
+func BenchmarkGenCensus(b *testing.B) {
+	for _, size := range benchmarkSizes {
+		b.Run("size"+strconv.Itoa(size), func(b *testing.B) {
+			runCensusDepths(b, size, sweepDepths(size))
+		})
+	}
+}
+
+// runCensusDepths runs one board size over the given depths as `depth{D}`
+// census subtests. No tour-count verification: the census never counts tours.
+func runCensusDepths(b *testing.B, size int, depths []int) {
+	workers := runtime.NumCPU()
+	c := NewCounter(graph.New(size))
+
+	for _, depth := range depths {
+		b.Run("depth"+strconv.Itoa(depth), func(b *testing.B) {
+			for b.Loop() {
+				m := monitoring.NewFakeMonitor()
+				ctx := context.Background()
+				m.Start(ctx)
+				c.CensusWithDepth(ctx, m, workers, depth)
+				m.Finish()
+				reportCensusMetrics(b, m)
+			}
+		})
+	}
+}
+
+// reportCensusMetrics publishes the generation-phase counters of a census run —
+// the same columns the full benchmark reads from gen A/gen B.
+func reportCensusMetrics(b *testing.B, m *monitoring.FakeMonitor) {
+	genA := m.Phase("gen A")
+	genB := m.Phase("gen B")
+
+	b.ReportMetric(ms(genA.Duration), "genA_ms/op")
+	b.ReportMetric(ms(genB.Duration), "genB_ms/op")
+	b.ReportMetric(float64(genA.CacheWrites), "writesA/op")
+	b.ReportMetric(float64(genB.CacheWrites), "writesB/op")
+	b.ReportMetric(float64(genA.Pruned), "prunedA/op")
+	b.ReportMetric(float64(genB.Pruned), "prunedB/op")
+}
+
 // descending returns from..to (inclusive), e.g. 4..2 → [4 3 2].
 func descending(from, to int) []int {
 	d := make([]int, max(from-to+1, 0))

@@ -80,19 +80,29 @@ func capacityFor(k int) int { return 1 << bits.Len64(uint64(k-1)) }
 func freeClass(capacity int) int { return bits.TrailingZeros64(uint64(capacity)) }
 
 // Sink is the write side of the table: an additive contributor of weighted
-// end classes of a mask. Both *Cache (direct write) and *Staging (batched
-// write, ADR-031) implement it, so generation descents do not care which one
-// they emit into. The writer canonicalizes K and rep with the shared symmetry
-// function; to this package the tag is opaque, only its range (< 128, the
-// inline tag headroom) is part of the contract.
+// end classes of a mask. *Cache (direct write), *Staging (batched write,
+// ADR-031) and NullSink (census discard) implement it, so generation descents
+// do not care which one they emit into. The writer canonicalizes K and rep
+// with the shared symmetry function; to this package the tag is opaque, only
+// its range (< 128, the inline tag headroom) is part of the contract.
 type Sink interface {
 	// Set adds one contribution data[K][rep] += weight; a zero weight is a no-op.
 	Set(K state.State, rep uint8, weight uint64)
 }
 
+// NullSink is a Sink that discards every contribution (the generation census,
+// plan 19): the descent's Result counters do the counting, so no table is
+// needed and phase-B memory stays O(1). It carries no state — one value is
+// safe to share across goroutines.
+type NullSink struct{}
+
+// Set drops the contribution.
+func (NullSink) Set(state.State, uint8, uint64) {}
+
 var (
 	_ Sink = (*Cache)(nil)
 	_ Sink = (*Staging)(nil)
+	_ Sink = NullSink{}
 )
 
 // shardIndex hashes the mask only, so all classes of one mask live in one

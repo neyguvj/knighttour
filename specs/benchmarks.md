@@ -22,7 +22,20 @@ make bench-table LOG=bench.log       # рендер markdown-таблиц (tools
 # в целях make за него отвечает DEPTHS, здесь шаблон ^depth(a|b)$.
 # Полный проход по диапазону глубин для 8×8 (32 точки × часы) идёт недели.
 go test -v -run='^$' -bench='BenchmarkCountAllTours/size[56]' -benchmem ./counter/
+
+# Ген-ценз (план 19): фазы gen A и gen B пишут в сток, без task-cache и count-фазы;
+# память фазы B постоянна, время растёт только с числом префиксов. Отбор точек — тот же
+# фильтр -bench; тяжёлые доски под глобальным замком, как и остальные часовые точки:
+flock ../kt-bench.lock go test -run='^$' -bench='BenchmarkGenCensus/size8/^depth(16|17)$' ./counter/
 ```
+
+## Ген-ценз `BenchmarkGenCensus` (план 19)
+
+Тот же отбор досок и глубин фильтром `-bench`, что у `BenchmarkCountAllTours`: подтесты
+`size{N}/depth{D}`, глубины от `size²/2` до нижнего предела. Публикует только счётчики
+генерации и время фаз: `genA_ms`, `genB_ms`, `writesA/B`, `prunedA/B`. Peak RSS не публикуется:
+фаза B пишет в сток и почти не аллоцирует, count-фазы нет. Счётчики тождественны полному прогону
+той же глубины — это закреплено тестом эквивалентности (`specs/counter.md`).
 
 ## Отбор досок — фильтры `-bench`, переменных окружения нет
 

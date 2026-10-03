@@ -676,3 +676,14 @@ func TestBasketReuseOnRelocation(t *testing.T) {
 	assert.Equal(t, want, walkAll(t, v), "both masks read back exactly after reuse")
 	assert.Equal(t, 2, v.Len())
 }
+
+// NullSink discards every contribution: Set never panics and keeps no state
+// (the interface conformance is the compile-time assertion in cache.go; the
+// "matches the full run's counters" side is pinned by counter census tests).
+func TestNullSinkDiscards(t *testing.T) {
+	var s Sink = NullSink{}
+	require.NotPanics(t, func() {
+		s.Set(state.State(1), 2, 3)
+		s.Set(state.State(1), 2, 0)
+	})
+}

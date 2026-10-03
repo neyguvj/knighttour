@@ -136,26 +136,56 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 // returned table is not yet sealed — the caller stops all writers via the Run
 // barrier before counting.
 func (c *Counter) extendTasks(ctx context.Context, monitor monitoring.Monitor, workers int, intermediate []cache.Entry, precomputeDepth int) *cache.Cache {
+	taskCache := cache.NewCache()
+	c.extendInto(ctx, monitor, workers, intermediate, precomputeDepth, func() (cache.Sink, func()) {
+		// One private Staging per worker (plan 15); the deferred release runs
+		// on every exit path — exhausted worklist or cancelled ctx — so
+		// buffered leaves are no less visible than direct writes.
+		staging := taskCache.NewStaging(stagingFlushLimit)
+		return staging, staging.Flush
+	})
+	return taskCache
+}
+
+// extendInto is the phase-B worker loop (specs/counter.md): min(workers, n)
+// workers claim worklist indices from one atomic cursor (claim contention
+// stays an order of magnitude below the task count, ADR-031) and extend each
+// entry to depth through a per-worker sink built by newSink. The release it
+// returns runs on every worker exit — it flushes a batching writer and is a
+// no-op for the census discard sink (plan 19).
+func (c *Counter) extendInto(ctx context.Context, monitor monitoring.Monitor, workers int, intermediate []cache.Entry, depth int, newSink func() (cache.Sink, func())) {
 	monitor.BeginPhase("gen B")
 	monitor.AddTasks(len(intermediate))
 
-	taskCache := cache.NewCache()
-	// Chunk workers claiming indices from one atomic cursor: claim contention
-	// stays an order of magnitude below the task count (ADR-031).
 	workerpool.New(workers).Run(ctx, len(intermediate), func(ctx context.Context, idx iter.Seq[int]) {
-		// One private Staging per worker (plan 15); the deferred Flush runs on
-		// every exit path — exhausted worklist or cancelled ctx — so buffered
-		// leaves are no less visible than direct writes.
-		staging := taskCache.NewStaging(stagingFlushLimit)
-		defer staging.Flush()
+		sink, release := newSink()
+		defer release()
 		for i := range idx {
-			result := c.searcher.ExtendTask(ctx, staging, intermediate[i], precomputeDepth)
+			result := c.searcher.ExtendTask(ctx, sink, intermediate[i], depth)
 			monitor.ReportSubtask(&result)
 			monitor.ReportTaskCompleted()
 		}
 	})
+}
 
-	return taskCache
+// CensusWithDepth runs the generation-only census (specs/counter.md, plan 19):
+// phase A as in the full pipeline plus phase B writing into cache.NullSink —
+// no task-cache is built and the count phase never runs, so phase-B memory is
+// O(1) while the monitor's gen A/gen B snapshots stay identical to a full run
+// at the same depth (the descent's Result counters produce them). The GC scope
+// applies exactly as in ParallelCountWithDepth so gen B timings stay comparable.
+// censusDepth is bounded only by the board size: the 2d ≤ size² duality gate
+// belongs to the count phase, which this call skips.
+func (c *Counter) CensusWithDepth(ctx context.Context, monitor monitoring.Monitor, workers, censusDepth int) {
+	if c.gcPercent > 0 {
+		prev := debug.SetGCPercent(c.gcPercent)
+		defer debug.SetGCPercent(prev)
+	}
+
+	intermediate := c.generateIntermediate(ctx, monitor, workers, censusDepth)
+	c.extendInto(ctx, monitor, workers, intermediate, censusDepth, func() (cache.Sink, func()) {
+		return cache.NullSink{}, func() {}
+	})
 }
 
 // effectiveBatch computes the phase's single dispatch granularity Beff once at

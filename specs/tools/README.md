@@ -10,6 +10,7 @@
 | Тул | Путь | Назначение | Когда звать |
 |-----|------|------------|-------------|
 | bench-table | [`tools/bench_table.py`](../../tools/bench_table.py) | Рендер `go test -bench` лога в markdown-таблицы (по доскам, глубины по убыванию, K/M/G-скейлинг) | Любой markdown из бенч-логов: README, ADR, отчёт ([карточка](bench-table.md)) |
+| prefix_extrapolate | [`tools/prefix_extrapolate.py`](../../tools/prefix_extrapolate.py) | Фит и экстраполяция кривой числа префиксов `P(d)` из бенч-логов, holdout-проверка модели, оценка памяти переносом плотности | Оценка глубин за пределами измеренного окна (8×8), полосы ошибок модели ([карточка](prefix_extrapolate.md)) |
 
 ## Правила ведения
 

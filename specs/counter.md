@@ -29,6 +29,13 @@ func (c *Counter) ParallelCountWithDepth(ctx context.Context, monitor monitoring
 // То же на глубине по умолчанию для данной доски.
 func (c *Counter) ParallelCount(ctx context.Context, monitor monitoring.Monitor, workers int) uint64
 
+// Ген-ценз (план 19): фазы gen A и gen B пишут в сток cache.NullSink — task-cache не
+// заводится, count-фаза не идёт. Снимки монитора по генерационным фазам равны снимкам
+// полного прогона той же глубины. Верхняя граница глубины size²/2 не применяется: условие
+// дуальности относится к count-фазе, которой здесь нет.
+func (c *Counter) CensusWithDepth(ctx context.Context, monitor monitoring.Monitor,
+    workers, censusDepth int)
+
 // Диагностика:
 func (c *Counter) SetGCPercent(p int)   // GOGC на время конвейера (ADR-014): при p > 0 значение
                                         // ставится на входе и восстанавливается на выходе;
@@ -127,6 +134,16 @@ task-cache при выходе из цикла обработки задач. А
 и восстанавливается при выходе. Пиком фазы остаётся живая task-cache, а запас памяти над ней стоит
 слишком дорого.
 
+### Ген-ценз (`CensusWithDepth`, план 19)
+
+Тот же генерационный спуск, но фаза B пишет в `cache.NullSink`: фабрика писателя на воркер
+возвращает сток со пустой заменой вместо `Staging`. Task-cache не заводится, `Seal` и count-фаза
+не выполняются, поэтому память фазы B постоянна. Счётчики записей и отсечений считает спуск в
+`types.Result`, потому снимки монитора фаз gen A и gen B совпадают с полным прогоном той же
+глубины. GOGC применяется как в полном прогоне, чтобы время gen B оставалось сравнимым.
+Глубина ценза ограничена только размером доски (валидацией вызывающего контура): без count-фазы
+условие дуальности `2d ≤ size²` не действует.
+
 ## Инварианты и корректность
 
 - Каждое класс-размещение глубины `a` проходит ровно через один слот `(K, rep)`: граф и pruner
@@ -195,6 +212,10 @@ task-cache при выходе из цикла обработки задач. А
   (`TestCancelDuringCountingGivesPartialTotal`).
 - GC-ручка (ADR-014): итог не зависит от `SetGCPercent(0|40)`, а после завершения конвейера процент
   рантайма восстановлен (`TestGCPercentAppliesAndRestores`).
+- Ген-ценз (план 19): табличный тест на 5×5 (все глубины) и 6×6 (выборка) — снимки `FakeMonitor`
+  ценза по фазам gen A и gen B равны снимкам полного прогона той же глубины
+  (`TestCensusMatchesFullRunGeneration`); отменённый ctx даёт частичный снимок без паники
+  (`TestCensusTerminatedContextIsPartial`).
 
 ## Связанные
 

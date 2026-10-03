@@ -678,3 +678,60 @@ func TestTaskCacheWeightConservation7x7(t *testing.T) {
 		})
 	}
 }
+
+// depthRange returns 1..size²/2 — the full split window of a board size.
+func depthRange(size int) []int {
+	d := make([]int, size*size/2)
+	for i := range d {
+		d[i] = i + 1
+	}
+	return d
+}
+
+// The generation census must reproduce the full pipeline's generation counters
+// exactly (specs/counter.md, plan 19): same descent with a discarding sink, so
+// the gen A/gen B snapshots match depth by depth; counting-phase numbers are
+// absent from the census by design.
+func TestCensusMatchesFullRunGeneration(t *testing.T) {
+	tests := []struct {
+		name   string
+		depths []int
+		size   int
+	}{
+		{name: "5x5 all depths", size: 5, depths: depthRange(5)},
+		// 6×6 sweeps are slow; sample shallow + the default-ish middle + ceiling.
+		{name: "6x6 sampled depths", size: 6, depths: []int{1, 3, 5, 8, 14, 18}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := NewCounter(graph.New(tt.size))
+			for _, depth := range tt.depths {
+				full := monitoring.NewFakeMonitor()
+				c.ParallelCountWithDepth(context.Background(), full, 4, depth)
+
+				census := monitoring.NewFakeMonitor()
+				c.CensusWithDepth(context.Background(), census, 4, depth)
+
+				for _, phase := range []string{"gen A", "gen B"} {
+					want, got := full.Phase(phase), census.Phase(phase)
+					want.Duration, got.Duration = 0, 0 // wall time differs by design
+					assert.Equal(t, want, got, "size=%d depth=%d phase=%q", tt.size, depth, phase)
+				}
+			}
+		})
+	}
+}
+
+// A terminated context must end the census as a partial run without a panic
+// (specs/counter.md): nothing gets claimed, so no writes are reported.
+func TestCensusTerminatedContextIsPartial(t *testing.T) {
+	c := NewCounter(graph.New(5))
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	m := monitoring.NewFakeMonitor()
+	require.NotPanics(t, func() { c.CensusWithDepth(ctx, m, 4, 6) })
+	assert.Zero(t, m.Phase("gen A").CacheWrites)
+	assert.Zero(t, m.Phase("gen B").Completed)
+}
