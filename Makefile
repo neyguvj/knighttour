@@ -1,4 +1,4 @@
-.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-table clean
+.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-table clean
 
 all: check
 
@@ -60,6 +60,13 @@ bench-size:
 # e.g. make bench-8x8 DEPTHS=32; without it the default cap ^depth(32|30)$ runs.
 bench-8x8:
 	go test -v -run='^$$' -bench='BenchmarkCountAllTours/size8$(DEPTH_FILTER_8X8)' -benchmem -benchtime=1x -timeout=24h ./counter/
+
+# Sampling count-phase census (plan 20): real task-cache, then a fixed sample of class
+# tasks with per-task time budgets. Heavy boards run under ../kt-bench.lock like other
+# long points. Usage: make bench-count-census N=<5|6|7|8> [DEPTHS=10,12]
+bench-count-census:
+	@if [ -z "$(N)" ]; then echo "usage: make bench-count-census N=<5|6|7|8> [DEPTHS=10,12]"; exit 2; fi
+	go test -v -run='^$$' -bench='BenchmarkCountCensus/size$(N)$(call target_filter,$(N))' -benchmem -benchtime=1x -timeout=48h ./counter/
 
 # Render a markdown table from a benchmark log: make bench-table LOG=bench.log
 bench-table:
