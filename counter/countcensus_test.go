@@ -116,33 +116,20 @@ type censusSampleOutcome struct {
 }
 
 // sampleAndCount walks the sealed table twice: the first pass counts class
-// tasks and fixes the stride, the second collects every stride-th entry up to
-// the sample cap (two passes cost minutes even on the biggest tables, against
-// hours of counting). Each sampled task is then measured once under its own
-// budget in the shared worker pool — task independence (the memo is read-only)
-// makes concurrent measurement valid and caps the point at sample×budget/
-// workers wall time; aborted tasks keep only the fact of exceeding it.
+// tasks and fixes the stride, the second collects every stride-th entry via
+// strideSample up to the sample cap (two passes cost minutes even on the
+// biggest tables, against hours of counting). Each sampled task is then
+// measured once under its own budget in the shared worker pool — task
+// independence (the memo is read-only) makes concurrent measurement valid and
+// caps the point at sample×budget/workers wall time; aborted tasks keep only
+// the fact of exceeding it.
 func sampleAndCount(ctx context.Context, c *Counter, view *cache.View, depth, sampleN, workers int, budget time.Duration) countCensusStats {
 	var total uint64
 	for range view.All(ctx) {
 		total++
 	}
 
-	stride := uint64(1)
-	if sampleN > 0 && total > uint64(sampleN) {
-		stride = (total + uint64(sampleN) - 1) / uint64(sampleN) // ceil: collects ≤ sampleN entries
-	} else if sampleN > 0 {
-		sampleN = 0 // the whole table fits the cap: measure everything
-	}
-
-	sampled := make([]cache.Entry, 0, max(min(int(total), max(sampleN, 0)), 1))
-	var i uint64
-	for e := range view.All(ctx) {
-		if sampleN <= 0 || i%stride == 0 {
-			sampled = append(sampled, e)
-		}
-		i++
-	}
+	sampled := strideSample(ctx, view, total, sampleN)
 
 	outcomes := make([]censusSampleOutcome, len(sampled))
 	workerpool.New(workers).Run(ctx, len(sampled), func(ctx context.Context, idx iter.Seq[int]) {
@@ -169,6 +156,28 @@ func sampleAndCount(ctx context.Context, c *Counter, view *cache.View, depth, sa
 		stats.totalPaths += o.paths
 	}
 	return stats
+}
+
+// strideSample collects every stride-th record of the sealed table with the
+// exact denominator total (stride = ceil(total/sampleN); sampleN ≤ 0 or a
+// table that fits the cap collect everything). Unbiased and free of full
+// materialization; callers needing a reproducible order sort the result (the
+// walk order of a Go map is not one) — see collectMemoSample.
+func strideSample(ctx context.Context, view *cache.View, total uint64, sampleN int) []cache.Entry {
+	stride := uint64(1)
+	if sampleN > 0 && total > uint64(sampleN) {
+		stride = (total + uint64(sampleN) - 1) / uint64(sampleN) // ceil: collects ≤ sampleN entries
+	}
+
+	sampled := make([]cache.Entry, 0, max(min(int(total), max(sampleN, 0)), 1))
+	var i uint64
+	for e := range view.All(ctx) {
+		if stride == 1 || i%stride == 0 {
+			sampled = append(sampled, e)
+		}
+		i++
+	}
+	return sampled
 }
 
 // measureCensusTask counts one sampled task into its disjoint outcome slot. A

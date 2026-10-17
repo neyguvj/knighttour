@@ -1,4 +1,4 @@
-.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-table clean
+.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-memo-census bench-table clean
 
 all: check
 
@@ -67,6 +67,17 @@ bench-8x8:
 bench-count-census:
 	@if [ -z "$(N)" ]; then echo "usage: make bench-count-census N=<5|6|7|8> [DEPTHS=10,12]"; exit 2; fi
 	go test -v -run='^$$' -bench='BenchmarkCountCensus/size$(N)$(call target_filter,$(N))' -benchmem -benchtime=1x -timeout=48h ./counter/
+
+# State-reuse census (plan 22): replica count-DFS over a stride sample of the real task-cache,
+# states below the cut window folded into one Bloom filter. Heavy boards run under
+# ../kt-bench.lock like other long points. Depth selection is the memoCensusPoints table in
+# the benchmark code — NOT target_filter: its ADR-015 default (^depth(32|30)$ for size8) names
+# depths the census table does not define, which would silently run zero points on 8×8. Only an
+# explicit DEPTHS narrows the table here (specs/benchmarks.md «Ценз переиспользования состояний»).
+# Usage: make bench-memo-census N=<5|6|7|8> [DEPTHS=10,12]
+bench-memo-census:
+	@if [ -z "$(N)" ]; then echo "usage: make bench-memo-census N=<5|6|7|8> [DEPTHS=10,12]"; exit 2; fi
+	go test -v -run='^$$' -bench='BenchmarkMemoReuseCensus/size$(N)$(DEPTH_FILTER)' -benchmem -benchtime=1x -timeout=48h ./counter/
 
 # Render a markdown table from a benchmark log: make bench-table LOG=bench.log
 bench-table:
