@@ -44,6 +44,8 @@ graph.New(N) → counter.ParallelCountWithDepth(ctx, monitor, workers, depth)
 | workerpool | [workerpool.md](workerpool.md) | Механика параллелизма: `Run` (счётчик + барьер), `Fanout[T]` (канал + дочитывание) |
 | monitoring | [monitoring.md](monitoring.md) | Прогресс по фазам (Real/Fake) |
 | main | [main.md](main.md) | CLI, сборка компонентов, завершение по сигналу |
+| zdd | [zdd.md](zdd.md) | Построитель ZDD гамильтонова семейства и ценз пиков: измерительный инструмент вне конвейера подсчёта (план 23, ADR-040) |
+| internal/memtest | [internal/memtest.md](internal/memtest.md) | Тестовая поддержка вне конвейера: зонды памяти процесса (пик резидента, счётчик выделений) |
 
 ## Куда что писать
 

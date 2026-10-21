@@ -15,6 +15,7 @@ import (
 
 	"knighttour/cache"
 	"knighttour/graph"
+	"knighttour/internal/memtest"
 	"knighttour/monitoring"
 	"knighttour/pruner"
 	"knighttour/state"
@@ -608,7 +609,7 @@ func reportMemoCensusMetrics(b *testing.B, s memoCensusStats) {
 	b.ReportMetric(cut, "nodeCutX/op")
 	b.ReportMetric(float64(s.aborted), "aborted/op")
 	b.ReportMetric(ms(s.dur), "census_ms/op")
-	b.ReportMetric(float64(peakRSSBytes())/(1<<20), "peakRSS_MB/op")
+	b.ReportMetric(float64(memtest.PeakRSSBytes())/(1<<20), "peakRSS_MB/op")
 }
 
 // reportMemoCensusLevels publishes per-level metrics and returns the node-cut

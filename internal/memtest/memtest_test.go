@@ -1,4 +1,4 @@
-package counter
+package memtest
 
 import (
 	"fmt"
@@ -10,24 +10,7 @@ import (
 	"testing"
 )
 
-// peakRSSBytes returns the process-wide resident set peak in bytes.
-//
-// IMPORTANT: this is a per-process maximum that never decreases — when several
-// board sizes run in one benchmark process the value corresponds to the most
-// memory-hungry subtest, not to the current iteration. Use `make bench-size N=…`
-// (one process per board) for meaningful numbers; see specs/counter.md.
-func peakRSSBytes() uint64 { return peakRSSOS() }
-
-// totalAllocBytes returns the cumulative bytes allocated by the process since
-// start (monotonic). Deltas around a benchmark iteration measure allocation
-// churn reproducibly, unlike the RSS peak.
-func totalAllocBytes() uint64 {
-	var m runtime.MemStats
-	runtime.ReadMemStats(&m)
-	return m.TotalAlloc
-}
-
-const peakRSSChildEnv = "PEAKRSS_CHILD"
+const peakRSSChildEnv = "MEMTEST_PEAK_CHILD"
 
 // TestPeakRSSUnits guards the darwin/linux unit mismatch (rusage Maxrss is in
 // bytes on darwin, kilobytes on linux). It runs a fresh child process — inside
@@ -42,7 +25,7 @@ func TestPeakRSSUnits(t *testing.T) {
 		for i := range leak {
 			leak[i] = byte(i)
 		}
-		peak := peakRSSBytes()
+		peak := PeakRSSBytes()
 		runtime.KeepAlive(leak)
 		fmt.Println("peak:", peak)
 		return

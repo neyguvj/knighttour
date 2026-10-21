@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"knighttour/graph"
+	"knighttour/internal/memtest"
 	"knighttour/monitoring"
 )
 
@@ -73,12 +74,12 @@ func runDepths(b *testing.B, size int, depths []int) {
 				// Start/Finish close the last phase so its duration is readable.
 				m := monitoring.NewFakeMonitor()
 				ctx := context.Background()
-				alloc0 := totalAllocBytes()
+				alloc0 := memtest.TotalAllocBytes()
 				m.Start(ctx)
 				got := c.ParallelCountWithDepth(ctx, m, workers, depth)
 				m.Finish()
-				peak := peakRSSBytes() // read before reporting: allocation below must not count
-				totalAlloc := totalAllocBytes() - alloc0
+				peak := memtest.PeakRSSBytes() // read before reporting: allocation below must not count
+				totalAlloc := memtest.TotalAllocBytes() - alloc0
 				if verify && got != want {
 					b.Fatalf("size%d depth%d: got %d tours, want %d", size, depth, got, want)
 				}

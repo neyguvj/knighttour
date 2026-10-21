@@ -1,4 +1,4 @@
-.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-memo-census bench-table clean
+.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-memo-census bench-zdd-census bench-table clean
 
 all: check
 
@@ -78,6 +78,16 @@ bench-count-census:
 bench-memo-census:
 	@if [ -z "$(N)" ]; then echo "usage: make bench-memo-census N=<5|6|7|8> [DEPTHS=10,12]"; exit 2; fi
 	go test -v -run='^$$' -bench='BenchmarkMemoReuseCensus/size$(N)$(DEPTH_FILTER)' -benchmem -benchtime=1x -timeout=48h ./counter/
+
+# ZDD live-node census (plan 23): reduced-diagram builds of the Hamiltonian families on
+# 5×5–7×7 boards, one board per process for an honest peakRSS_MB/op. Heavy points run
+# under ../kt-bench.lock like other long points. No DEPTHS: the builder has no cut depth —
+# family and order are selected by the {paths|cycles}/{row|narrow} subtest segments and
+# the size filter only (specs/benchmarks.md «Ценз живых узлов ZDD», ADR-020).
+# Usage: make bench-zdd-census N=<5|6|7>
+bench-zdd-census:
+	@if [ -z "$(N)" ]; then echo "usage: make bench-zdd-census N=<5|6|7>"; exit 2; fi
+	go test -v -run='^$$' -bench='BenchmarkZDDCensus/size$(N)' -benchmem -benchtime=1x -timeout=48h ./zdd/
 
 # Render a markdown table from a benchmark log: make bench-table LOG=bench.log
 bench-table:

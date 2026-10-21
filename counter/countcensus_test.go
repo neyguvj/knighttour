@@ -14,6 +14,7 @@ import (
 
 	"knighttour/cache"
 	"knighttour/graph"
+	"knighttour/internal/memtest"
 	"knighttour/monitoring"
 	"knighttour/types"
 	"knighttour/workerpool"
@@ -262,7 +263,7 @@ func reportCensusCountMetrics(b *testing.B, s countCensusStats) {
 	b.ReportMetric(float64(s.misses), "sampleMisses/op")
 	b.ReportMetric(ms(s.genA), "genA_ms/op")
 	b.ReportMetric(ms(s.genB), "genB_ms/op")
-	b.ReportMetric(float64(peakRSSBytes())/(1<<20), "peakRSS_MB/op")
+	b.ReportMetric(float64(memtest.PeakRSSBytes())/(1<<20), "peakRSS_MB/op")
 }
 
 // TestCountCensusFullSampleMatchesPipeline pins the harness to the pipeline: a

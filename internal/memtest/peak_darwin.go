@@ -1,6 +1,6 @@
 //go:build darwin
 
-package counter
+package memtest
 
 import "syscall"
 
