@@ -102,6 +102,9 @@ func runZDDCensusPoint(b *testing.B, nVerts int, edges [][2]int, pt zddCensusPoi
 		}
 		b.ReportMetric(float64(d.LiveNodes()), "nodes/op")
 		b.ReportMetric(float64(d.LevelPeak()), "levelPeak/op")
+		b.ReportMetric(float64(d.memoEntries), "memoEntries/op")
+		b.ReportMetric(float64(d.zeroEntries), "zeroEntries/op")
+		b.ReportMetric(float64(d.zeroHits), "zeroHits/op")
 		b.ReportMetric(float64(dur.Microseconds())/1e3, "census_ms/op")
 		b.ReportMetric(float64(memtest.PeakRSSBytes())/(1<<20), "peakRSS_MB/op")
 	}

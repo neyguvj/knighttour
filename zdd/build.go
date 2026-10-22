@@ -105,9 +105,9 @@ type builder struct {
 	a      arena
 	stBuf  []*state
 	keyBuf [][]byte
-	memo   memoTable
 	uniq   uniqueTable
 	f      frontier
+	memo   memoTables
 	fam    Family
 }
 
@@ -133,14 +133,15 @@ func (b *builder) stateAt(level int) *state {
 	return s
 }
 
-// keyAt returns a cleared scratch key buffer for a level, sized for width slots.
+// keyAt returns a cleared scratch key buffer for a level, sized for width
+// slot bytes plus the mark byte.
 func (b *builder) keyAt(level, width int) []byte {
 	for len(b.keyBuf) <= level {
 		b.keyBuf = append(b.keyBuf, nil)
 	}
 	k := b.keyBuf[level]
-	if cap(k) < 3+width {
-		k = make([]byte, 0, 3+width)
+	if cap(k) < 1+width {
+		k = make([]byte, 0, 1+width)
 	}
 	k = k[:0]
 	b.keyBuf[level] = k
@@ -162,8 +163,8 @@ func (b *builder) dfs(i int, st *state) uint32 {
 		}
 		return idZero
 	}
-	key := packKey(i, st, b.keyAt(i, len(st.deg)))
-	if id, ok := b.memo.get(key); ok {
+	key := packKey(st, b.keyAt(i, len(st.deg)))
+	if id, ok := b.memo.get(i, key); ok {
 		return id
 	}
 	high := idZero
@@ -175,7 +176,7 @@ func (b *builder) dfs(i int, st *state) uint32 {
 		low = b.dfs(i+1, child)
 	}
 	id := b.uniq.findOrAdd(&b.a, uint32(i), low, high)
-	b.memo.put(key, id)
+	b.memo.put(i, key, id)
 	if over := b.overCap(); over != nil {
 		b.err = over
 	}

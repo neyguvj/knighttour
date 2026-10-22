@@ -13,7 +13,10 @@
 // an OverCapError before it exhausts process memory.
 package zdd
 
-import "bytes"
+import (
+	"bytes"
+	"encoding/binary"
+)
 
 const (
 	idNil  uint32 = iota // "no node": empty table slot and arena sentinel index
@@ -152,80 +155,161 @@ func (t *uniqueTable) grow(a *arena) {
 	}
 }
 
-// memoSlot addresses one stored frontier key; length 0 marks an empty slot
-// because real keys are at least three bytes long. The key offset is uint64:
-// on heavy points the key arena crosses 4 GiB while still inside the default
-// byte budget (the measured 6×6 Paths build keeps ~250M keys × ~15 B plus
-// append spare), so a 32-bit offset would wrap and make get() slice out of
-// range.
-type memoSlot struct {
-	keyOff uint64 // offset of the key inside memoTable.keys
-	length uint32
-	id     uint32 // ZDD node representing that residual subfunction
+// Slot layout of the per-level memo tables (plan 24 lever A). Every slot is a
+// fixed stride inside one flat byte array: a little-endian uint32 node id
+// followed by the inline packed key. The empty marker is idNil — dfs never
+// returns it — so occupancy shows from the id word alone, and no length field
+// is needed: the level fixes the frontier width and thereby the key length.
+const (
+	memoIDBytes    = 4  // id word at the head of every memo slot
+	memoStartSlots = 64 // initial slots per level table before the first doubling
+)
+
+// growLoad* bound the load factor of a level table: growth doubles capacity
+// once occupancy reaches 7/8 (plan 24 lever A).
+const (
+	growLoadNum = 7
+	growLoadDen = 8
+)
+
+// levelMemo is one decision level's open-addressing map from packed frontier
+// states to ZDD node ids, with linear probing. Slots live in a single flat
+// byte slice of stride memoIDBytes+keyLen bytes each; keys are compared in
+// full on a probe hit, so equal states share exactly one entry. Without this
+// memo the top-down construction would recompute shared subtrees
+// exponentially often.
+type levelMemo struct {
+	slots  []byte // stride-byte groups: LE uint32 id + inline key; zero group = empty
+	keyLen int    // bytes per key, fixed for the level (frontier width + mark byte)
+	count  int    // occupied slots (nothing is ever deleted), drives growth
 }
 
-// memoTable maps a packed frontier key (level, per-slot degree|label, ends) to
-// the ZDD node of that residual subfunction. Open addressing with linear
-// probing; keys are appended to one byte arena and compared in full on a probe
-// hit, so equal states always share exactly one entry. Without this memo the
-// top-down construction would recompute shared subtrees exponentially often.
-type memoTable struct {
-	slots []memoSlot
-	keys  []byte
-	count int
-}
+// stride returns the byte size of one slot of this level's table.
+func (t *levelMemo) stride() int { return memoIDBytes + t.keyLen }
 
-// newMemoTable returns an empty table with a modest initial capacity.
-func newMemoTable() *memoTable {
-	return &memoTable{slots: make([]memoSlot, 1<<10)}
-}
-
-// get looks key up in the memo.
-func (t *memoTable) get(key []byte) (uint32, bool) {
-	mask := uint64(len(t.slots) - 1)
+// get looks key up, returning false for an unallocated or missing entry.
+func (t *levelMemo) get(key []byte) (uint32, bool) {
+	if len(t.slots) == 0 {
+		return idNil, false
+	}
+	stride := t.stride()
+	mask := uint64(len(t.slots)/stride - 1)
 	h := mixBytes(key) & mask
 	for {
-		s := &t.slots[h]
-		if s.length == 0 {
+		s := t.slots[h*uint64(stride) : (h+1)*uint64(stride)]
+		id := binary.LittleEndian.Uint32(s)
+		if id == idNil {
 			return idNil, false
 		}
-		if s.length == uint32(len(key)) && bytes.Equal(t.keys[s.keyOff:s.keyOff+uint64(s.length)], key) {
-			return s.id, true
+		if bytes.Equal(s[memoIDBytes:], key) {
+			return id, true
 		}
 		h = (h + 1) & mask
 	}
 }
 
-// put stores key → id; keys already present are never re-inserted by the
-// build path (put runs only after a get miss).
-func (t *memoTable) put(key []byte, id uint32) {
-	mask := uint64(len(t.slots) - 1)
+// put stores key → id in the first empty slot found; keys already present are
+// never re-inserted by the build path (put runs only after a get miss).
+func (t *levelMemo) put(key []byte, id uint32) {
+	stride := t.stride()
+	mask := uint64(len(t.slots)/stride - 1)
 	h := mixBytes(key) & mask
-	for t.slots[h].length != 0 {
+	for {
+		s := t.slots[h*uint64(stride) : (h+1)*uint64(stride)]
+		if binary.LittleEndian.Uint32(s) == idNil {
+			binary.LittleEndian.PutUint32(s, id)
+			copy(s[memoIDBytes:], key)
+			t.count++
+			return
+		}
 		h = (h + 1) & mask
-	}
-	t.slots[h] = memoSlot{keyOff: uint64(len(t.keys)), length: uint32(len(key)), id: id}
-	t.keys = append(t.keys, key...)
-	t.count++
-	if t.count*4 >= len(t.slots)*3 {
-		t.grow()
 	}
 }
 
-// grow doubles the table and reinserts stored keys.
-func (t *memoTable) grow() {
+// memoTables holds one levelMemo per decision level (plan 24 lever A): the
+// level selects the table, so keys carry no level bytes and every key in a
+// table has the same length. Up to m ≤ 168 level headers cost nothing worth
+// naming; each table allocates its slots on first insert and doubles while
+// loaded past growLoadNum/growLoadDen. Growth transients stay per level
+// instead of doubling one global array.
+//
+// The bytes field is the running sum of allocated slot arrays — the memo part
+// of the builder's byte budget, kept incremental so overCap stays O(1) across
+// many tables. The census counters (plan 24) track insertions and zero-result
+// traffic; they never change behavior and are deterministic like the build
+// itself.
+type memoTables struct {
+	levels []levelMemo // index = edge position in [0, m); slots nil until first insert
+
+	bytes       int64 // reserved bytes of all slot arrays (current allocations only)
+	memoEntries int   // stored entries across levels = total insertions
+	zeroEntries int   // entries whose value was idZero (dead-end states)
+	zeroHits    int   // get hits that returned idZero
+}
+
+// newMemoTables returns an empty memo for a build with m decision levels.
+func newMemoTables(m int) *memoTables {
+	return &memoTables{levels: make([]levelMemo, m)}
+}
+
+// get looks the level's state key up in that level's table, counting hits
+// that return the zero terminal.
+func (mt *memoTables) get(level int, key []byte) (uint32, bool) {
+	id, ok := mt.levels[level].get(key)
+	if ok && id == idZero {
+		mt.zeroHits++
+	}
+	return id, ok
+}
+
+// put stores key → id at the given level, allocating or growing the level's
+// table as needed. All keys of a level pack to the same length because the
+// frontier width is fixed per level; the first insert records that length.
+func (mt *memoTables) put(level int, key []byte, id uint32) {
+	mt.memoEntries++
+	if id == idZero {
+		mt.zeroEntries++
+	}
+	t := &mt.levels[level]
+	if len(t.slots) == 0 {
+		t.keyLen = len(key)
+		mt.reserve(t, memoStartSlots)
+	}
+	t.put(key, id)
+	if t.count*growLoadDen >= len(t.slots)/t.stride()*growLoadNum {
+		mt.grow(t)
+	}
+}
+
+// grow doubles the level's table and reinserts every entry, recomputing
+// hashes from the inline keys.
+func (mt *memoTables) grow(t *levelMemo) {
+	stride := t.stride()
 	old := t.slots
-	t.slots = make([]memoSlot, len(old)*2)
-	mask := uint64(len(t.slots) - 1)
-	for _, s := range old {
-		if s.length == 0 {
+	mt.reserve(t, 2*len(old)/stride)
+	mask := uint64(len(t.slots)/stride - 1)
+	for i := 0; i < len(old); i += stride {
+		id := binary.LittleEndian.Uint32(old[i:])
+		if id == idNil {
 			continue
 		}
-		key := t.keys[s.keyOff : s.keyOff+uint64(s.length)]
+		key := old[i+memoIDBytes : i+stride]
 		h := mixBytes(key) & mask
-		for t.slots[h].length != 0 {
+		for binary.LittleEndian.Uint32(t.slots[h*uint64(stride):]) != idNil {
 			h = (h + 1) & mask
 		}
-		t.slots[h] = s
+		s := t.slots[h*uint64(stride) : (h+1)*uint64(stride)]
+		binary.LittleEndian.PutUint32(s, id)
+		copy(s[memoIDBytes:], key)
 	}
+}
+
+// reserve gives t a slot array of nSlots entries and books the delta into the
+// budget sum. Only current allocations count: the replaced array leaves the
+// model even though it stays resident until the GC frees it, matching the
+// previous capacity-based accounting.
+func (mt *memoTables) reserve(t *levelMemo, nSlots int) {
+	oldBytes := int64(len(t.slots))
+	t.slots = make([]byte, nSlots*t.stride())
+	mt.bytes += int64(len(t.slots)) - oldBytes
 }

@@ -14,6 +14,12 @@ type Diagram struct {
 	order     []int   // position → original edge index (needed by All)
 	root      uint32  // root node id (idZero for an empty family)
 	levelPeak int     // max non-terminal nodes sharing one variable level
+
+	// Memo-table census at build end (plan 24): internal to the package,
+	// published only by BenchmarkZDDCensus. Zero for a skipped build.
+	memoEntries int
+	zeroEntries int
+	zeroHits    int
 }
 
 // Build constructs the reduced ZDD of the Hamiltonian edge-set family fam of
@@ -35,7 +41,7 @@ func Build(nVerts int, edges [][2]int, fam Family, order []int) (*Diagram, error
 	if err != nil {
 		return nil, err
 	}
-	b := &builder{f: *f, a: *newArena(), uniq: *newUniqueTable(), memo: *newMemoTable(), fam: fam}
+	b := &builder{f: *f, a: *newArena(), uniq: *newUniqueTable(), memo: *newMemoTables(f.m), fam: fam}
 	root := idZero
 	if !f.empty && (fam != Cycles || !parityEmptyCycles(nVerts, edges)) {
 		root = b.build()
@@ -43,7 +49,15 @@ func Build(nVerts int, edges [][2]int, fam Family, order []int) (*Diagram, error
 			return nil, b.err
 		}
 	}
-	return &Diagram{arena: b.a.nodes, order: b.f.order, root: root, levelPeak: peakLevel(&b.a, f.m)}, nil
+	return &Diagram{
+		arena:       b.a.nodes,
+		order:       b.f.order,
+		root:        root,
+		levelPeak:   peakLevel(&b.a, f.m),
+		memoEntries: b.memo.memoEntries,
+		zeroEntries: b.memo.zeroEntries,
+		zeroHits:    b.memo.zeroHits,
+	}, nil
 }
 
 // LevelPeak returns the maximum number of non-terminal nodes on one diagram

@@ -172,7 +172,7 @@ func newState(width int) *state {
 	return &state{deg: make([]uint8, width), lab: make([]uint8, width)}
 }
 
-// packKey serializes (level, degrees+labels, ends|sealed) into the memo key:
+// packKey serializes (per-slot degrees+labels, ends|sealed) into the memo key:
 // one byte per slot with degree in bits 0..2 and the component label above it.
 // The active vertex set is fixed per level, so slot data alone identifies the
 // state; labels are canonical (contiguous from 0). A labelled component owns
@@ -181,9 +181,10 @@ func newState(width int) *state {
 // 32 components, not width/2; label values stay below 32 and the packing
 // never overflows. Labels are therefore comparable byte-for-byte. The last
 // byte carries ends in bits 0..1 (it only ever reaches 2 before rejection)
-// and the Cycles sealed flag in bit 2.
-func packKey(level int, st *state, buf []byte) []byte {
-	buf = append(buf, byte(level), byte(level>>8))
+// and the Cycles sealed flag in bit 2. The level itself is not part of the
+// key: the per-level memo table it goes into fixes the frontier width and
+// thereby the key length (plan 24 lever A).
+func packKey(st *state, buf []byte) []byte {
 	for s := range st.deg {
 		buf = append(buf, st.deg[s]|st.lab[s]<<3)
 	}

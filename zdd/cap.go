@@ -30,35 +30,34 @@ func (e *OverCapError) Error() string {
 func (e *OverCapError) Unwrap() error { return ErrOverCap }
 
 // Element sizes of the build structures; a test pins them against the real
-// type sizes so the budget model cannot drift from the layout silently.
+// type sizes so the budget model cannot drift from the layout silently. The
+// per-level memo tables need no constant: their reserved bytes are summed
+// incrementally into memoTables.bytes as slot arrays are allocated.
 const (
 	nodeBytes     = 24 // znode: variable/low/high uint32 + weight uint64
 	uniqSlotBytes = 4  // unique-table slot: one uint32 arena id
-	memoSlotBytes = 16 // memo slot: uint64 key offset + uint32 length + uint32 id
 )
 
 // DefaultArenaCap is the initial soft ceiling on the summed reserved bytes of
-// the build structures (builder.liveBytes). The memo table dominates memory,
-// not the node arena: the measured 6×6 Paths narrow-order build keeps only
-// ~2.5·10^5 live nodes but ~2.5·10^8 memo entries — a memo:nodes ratio near
-// 10^3, because every dead-end state is memoized while zero-suppression
-// keeps almost none of them as nodes. A node-count ceiling therefore never
-// fires where memory actually runs out (the old default of 2^28 live nodes
-// corresponds to ~15 GB of memo bytes on that point).
+// the build structures (builder.liveBytes). The memo tables dominate memory,
+// not the node arena: nearly every visited frontier state becomes a memo
+// entry, while zero-suppression keeps only a fraction of them as nodes. A
+// node-count ceiling therefore never fires where memory actually runs out.
 //
-// Per-memo-entry layout, measured at a 2 GiB probe cutoff of the same point
-// (50.3M entries): slot array ~21 B amortised at the 0.75 load factor + packed
-// key ~15 B + append spare ≈ 61 reserved bytes per entry; the full build
-// (~250M entries) needs ≈ 15 GB of live bytes.
+// Per-memo-entry budget under the plan-24 lever-A layout: one slot per entry
+// at stride 4 B id + (frontier width + 1) key bytes, grown only past a load
+// of 0.875 and with no separate key arena — ≈ stride/0.875 reserved bytes per
+// entry. The ADR-040 layout before it cost ≈ 61 B per entry (16 B slot array
+// at load 0.75 + a ~15 B packed-key arena with append spare); the measured
+// numbers of the current layout are recorded in ADR-041.
 //
 // One growth step overshoots the ceiling by at most one table doubling (the
 // check runs after the step), and the realloc transients keep the previous
-// slot array and key arena resident until the GC frees them: measured peak
-// RSS ≈ 1.8× reserved bytes at the cutoff (the census-order points; bad edge
-// orders reach higher transients). The default 16 GiB keeps even a
-// budget-filling build under up to ~34 GB — inside the 36 GB census machine
-// with margin for the runtime — while leaving room above the ~15 GB needed by
-// the measured full 6×6 Paths point.
+// slot array resident until the GC frees them: measured peak RSS ≈ 1.8×
+// reserved bytes at the cutoff (the census-order points; bad edge orders
+// reach higher transients). The default 16 GiB keeps even a budget-filling
+// build under up to ~34 GB — inside the 36 GB census machine with margin for
+// the runtime.
 const DefaultArenaCap = 1 << 34
 
 // arenaCap is the internal soft ceiling in budget bytes (no env or flag
@@ -67,14 +66,13 @@ const DefaultArenaCap = 1 << 34
 var arenaCap = DefaultArenaCap
 
 // liveBytes returns the reserved bytes of every build structure: the node
-// arena, the unique-table slots and the memo table's key arena and slots.
-// Capacities count, not lengths — the reserve is what the resident set sees,
-// and both append-style arenas keep spare capacity between growth steps.
+// arena, the unique-table slots and the per-level memo tables. Capacities
+// count, not lengths — the reserve is what the resident set sees; the memo
+// part is the running allocation sum maintained by memoTables.reserve.
 func (b *builder) liveBytes() int64 {
 	return int64(cap(b.a.nodes))*nodeBytes +
 		int64(cap(b.uniq.slots))*uniqSlotBytes +
-		int64(cap(b.memo.keys)) +
-		int64(cap(b.memo.slots))*memoSlotBytes
+		b.memo.bytes
 }
 
 // overCap returns the cutoff error once the reserved bytes have crossed
