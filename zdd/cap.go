@@ -53,12 +53,14 @@ const (
 //
 // One growth step overshoots the ceiling by at most one table doubling (the
 // check runs after the step), and the realloc transients keep the previous
-// slot array resident until the GC frees them: measured peak RSS ≈ 1.8×
-// reserved bytes at the cutoff (the census-order points; bad edge orders
-// reach higher transients). The default 16 GiB keeps even a budget-filling
-// build under up to ~34 GB — inside the 36 GB census machine with margin for
-// the runtime.
-const DefaultArenaCap = 1 << 34
+// slot array resident until the GC frees them: on this per-level layout the
+// plan-25 calibration probe (6×6 Paths narrow at an 8 GiB cap) measured peak
+// RSS ≈ 1.41× reserved bytes at the cutoff. The default follows the plan-25
+// formula min(24, ⌊32 / r̂⌋) GiB with a floor of 16: with the measured
+// r̂ = 1.41 it lands at 22 GiB, keeping even a budget-filling build under
+// ~32 GiB — inside the 36 GB census machine with margin for the runtime
+// (full probe numbers: ADR-042).
+const DefaultArenaCap = 22 << 30
 
 // arenaCap is the internal soft ceiling in budget bytes (no env or flag
 // handle, ADR-020); tests lower it directly and restore it afterwards. It
