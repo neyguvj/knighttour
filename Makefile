@@ -1,4 +1,4 @@
-.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-memo-census bench-zdd-census bench-table clean
+.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-memo-census bench-zdd-census bench-split-census bench-table clean
 
 all: check
 
@@ -88,6 +88,17 @@ bench-memo-census:
 bench-zdd-census:
 	@if [ -z "$(N)" ]; then echo "usage: make bench-zdd-census N=<5|6|7>"; exit 2; fi
 	go test -v -run='^$$' -bench='BenchmarkZDDCensus/size$(N)' -benchmem -benchtime=1x -timeout=48h ./zdd/
+
+# Half-cut split census (plan 26): half-board layer DP down to interface states σ
+# and connectivity gluing on 5×5–7×7 boards, one board per process for an honest
+# peakRSS_MB/op. Heavy points run under ../kt-bench.lock like other long points.
+# No DEPTHS: the half engine has no cut depth — family and seam variant are selected
+# by the {paths|cycles}/{straight|mirror} subtest segments and the size filter only
+# (specs/benchmarks.md «Ценз разреза пополам со склейкой», ADR-020).
+# Usage: make bench-split-census N=<5|6|7>
+bench-split-census:
+	@if [ -z "$(N)" ]; then echo "usage: make bench-split-census N=<5|6|7>"; exit 2; fi
+	go test -v -run='^$$' -bench='BenchmarkSplitCensus/size$(N)' -benchmem -benchtime=1x -timeout=48h ./split/
 
 # Render a markdown table from a benchmark log: make bench-table LOG=bench.log
 bench-table:
