@@ -70,11 +70,17 @@ var arenaCap = DefaultArenaCap
 // liveBytes returns the reserved bytes of every build structure: the node
 // arena, the unique-table slots and the per-level memo tables. Capacities
 // count, not lengths — the reserve is what the resident set sees; the memo
-// part is the running allocation sum maintained by memoTables.reserve.
+// part is the running allocation sum maintained by memoTables.reserve. In
+// open-seam mode otherBytes adds what the rest of the session (the sibling
+// half's memo, frozen at build end) already pins in the shared registry.
 func (b *builder) liveBytes() int64 {
-	return int64(cap(b.a.nodes))*nodeBytes +
+	live := int64(cap(b.a.nodes))*nodeBytes +
 		int64(cap(b.uniq.slots))*uniqSlotBytes +
 		b.memo.bytes
+	if b.otherBytes != nil {
+		live += b.otherBytes()
+	}
+	return live
 }
 
 // overCap returns the cutoff error once the reserved bytes have crossed

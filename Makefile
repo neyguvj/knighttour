@@ -1,4 +1,4 @@
-.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-memo-census bench-zdd-census bench-split-census bench-table clean
+.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-memo-census bench-zdd-census bench-split-census bench-zdd-half-census bench-table clean
 
 all: check
 
@@ -99,6 +99,17 @@ bench-zdd-census:
 bench-split-census:
 	@if [ -z "$(N)" ]; then echo "usage: make bench-split-census N=<5|6|7>"; exit 2; fi
 	go test -v -run='^$$' -bench='BenchmarkSplitCensus/size$(N)' -benchmem -benchtime=1x -timeout=48h ./split/
+
+# ZDD half census (plan 27): open-seam half-board ZDD builds, σ distributions and
+# gluing on 5×5–7×7 boards, one board per process for an honest peakRSS_MB/op.
+# Heavy points run under ../kt-bench.lock like other long points.
+# No DEPTHS: the open-seam mode has no cut depth — family and seam variant are
+# selected by the {paths|cycles}[/mirror] subtest segments and the size filter
+# only (specs/benchmarks.md «Ценз ZDD половин», ADR-020).
+# Usage: make bench-zdd-half-census N=<5|6|7>
+bench-zdd-half-census:
+	@if [ -z "$(N)" ]; then echo "usage: make bench-zdd-half-census N=<5|6|7>"; exit 2; fi
+	go test -v -run='^$$' -bench='BenchmarkZDDHalfCensus/size$(N)' -benchmem -benchtime=1x -timeout=48h ./zdd/
 
 # Render a markdown table from a benchmark log: make bench-table LOG=bench.log
 bench-table:

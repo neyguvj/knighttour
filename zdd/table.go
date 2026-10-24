@@ -187,6 +187,23 @@ type levelMemo struct {
 // stride returns the byte size of one slot of this level's table.
 func (t *levelMemo) stride() int { return memoIDBytes + t.keyLen }
 
+// forEach visits every stored entry's (id, key) pair in slot order. The key
+// slice aliases the slot bytes and must not be retained past the callback.
+// The open-seam σ pass replays the build level by level with it; slot order
+// is deterministic, so the pass stays bit-reproducible.
+func (t *levelMemo) forEach(fn func(id uint32, key []byte)) {
+	if len(t.slots) == 0 {
+		return
+	}
+	stride := t.stride()
+	for i := 0; i < len(t.slots); i += stride {
+		id := binary.LittleEndian.Uint32(t.slots[i:])
+		if id != idNil {
+			fn(id, t.slots[i+memoIDBytes:i+stride])
+		}
+	}
+}
+
 // get looks key up, returning false for an unallocated or missing entry.
 func (t *levelMemo) get(key []byte) (uint32, bool) {
 	if len(t.slots) == 0 {
