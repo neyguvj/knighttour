@@ -1,4 +1,4 @@
-.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-memo-census bench-zdd-census bench-split-census bench-zdd-half-census bench-table clean
+.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-memo-census bench-zdd-census bench-split-census bench-zdd-half-census bench-pairs-probe bench-table clean
 
 all: check
 
@@ -110,6 +110,15 @@ bench-split-census:
 bench-zdd-half-census:
 	@if [ -z "$(N)" ]; then echo "usage: make bench-zdd-half-census N=<5|6|7>"; exit 2; fi
 	go test -v -run='^$$' -bench='BenchmarkZDDHalfCensus/size$(N)' -benchmem -benchtime=1x -timeout=48h ./zdd/
+
+# Pair-count probe (plan 28): MITM confirmation of a pairs.Matrix row, one
+# board per process for an honest peakRSS_MB/op. Heavy points run under
+# ../kt-bench.lock like other long points. No DEPTHS: the cut boundary is the
+# k{M} subtest segment and the point table in the benchmark code (plan 28 step 3).
+# Usage: make bench-pairs-probe N=<5|6>
+bench-pairs-probe:
+	@if [ -z "$(N)" ]; then echo "usage: make bench-pairs-probe N=<5|6>"; exit 2; fi
+	go test -v -run='^$$' -bench='BenchmarkPairsProbe/size$(N)' -benchmem -benchtime=1x -timeout=24h ./pairs/
 
 # Render a markdown table from a benchmark log: make bench-table LOG=bench.log
 bench-table:
