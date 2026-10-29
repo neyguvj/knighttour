@@ -1,4 +1,4 @@
-.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-memo-census bench-zdd-census bench-split-census bench-zdd-half-census bench-pairs-probe bench-table clean
+.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-memo-census bench-zdd-census bench-split-census bench-zdd-half-census bench-pairs-probe bench-pairs-census bench-table clean
 
 all: check
 
@@ -119,6 +119,18 @@ bench-zdd-half-census:
 bench-pairs-probe:
 	@if [ -z "$(N)" ]; then echo "usage: make bench-pairs-probe N=<5|6>"; exit 2; fi
 	go test -v -run='^$$' -bench='BenchmarkPairsProbe/size$(N)' -benchmem -benchtime=1x -timeout=24h ./pairs/
+
+# Pair-decomposition census (plan 29): row-descent progress profile and the MITM
+# half-path capacity curve, one process per point for an honest peakRSS_MB/op.
+# Heavy points run under ../kt-bench.lock like other long points. SUBTEST selects a
+# point or a segment of the point tables in the benchmark code (row/s0/t6h, pfx16,
+# sfx); segments match unanchored, so name one point exactly (or anchor it). Without
+# SUBTEST every point of the board runs — days on 8x8, so pass it for heavy points
+# (specs/benchmarks.md «Ценз попарного разложения»). Logs: work/29-8x8-pairs-census/.
+# Usage: make bench-pairs-census N=<5|6|8> [SUBTEST=<point segment>]
+bench-pairs-census:
+	@if [ -z "$(N)" ]; then echo "usage: make bench-pairs-census N=<5|6|8> [SUBTEST=<point segment>]"; exit 2; fi
+	go test -v -run='^$$' -bench='BenchmarkPairs(Census|HalfCensus)/size$(N)$(if $(SUBTEST),/$(SUBTEST),)' -benchmem -benchtime=1x -timeout=48h ./pairs/
 
 # Render a markdown table from a benchmark log: make bench-table LOG=bench.log
 bench-table:
