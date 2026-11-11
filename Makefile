@@ -1,4 +1,4 @@
-.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-memo-census bench-zdd-census bench-split-census bench-zdd-half-census bench-pairs-probe bench-pairs-census bench-table clean
+.PHONY: all check fmt vet build test lint fix modernize bench bench-deep bench-size bench-8x8 bench-count-census bench-memo-census bench-zdd-census bench-split-census bench-zdd-half-census bench-pairs-probe bench-pairs-census bench-halfprof bench-table clean
 
 all: check
 
@@ -131,6 +131,18 @@ bench-pairs-probe:
 bench-pairs-census:
 	@if [ -z "$(N)" ]; then echo "usage: make bench-pairs-census N=<5|6|8> [SUBTEST=<point segment>]"; exit 2; fi
 	go test -v -run='^$$' -bench='BenchmarkPairs(Census|HalfCensus)/size$(N)$(if $(SUBTEST),/$(SUBTEST),)' -benchmem -benchtime=1x -timeout=48h ./pairs/
+
+# Half-profile census (plan 30): per-group time, profile-table sizes and resident
+# peak of the Chernov–McKay half join, one process per point for an honest
+# peakRSS_MB/op. Points are size{N}/g{s}-{t} over all D4 orbit representatives;
+# heavy points run under ../kt-bench.lock like other long points. SUBTEST selects
+# one group segment (e.g. g0-8); segments match unanchored, so name it exactly.
+# Without SUBTEST every group of the board runs — hours on 7x7/8x8, so pass it for
+# heavy boards (specs/benchmarks.md «Полупрофильный ценз»). Logs: work/30-half-profile-join/.
+# Usage: make bench-halfprof N=<5|6|7|8> [SUBTEST=g<s>-<t>[/p<P>|/x<MB>]]
+bench-halfprof:
+	@if [ -z "$(N)" ]; then echo "usage: make bench-halfprof N=<5|6|7|8> [SUBTEST=g<s>-<t>[/p<P>|/x<MB>]]"; exit 2; fi
+	go test -v -run='^$$' -bench='BenchmarkHalfprofCensus/size$(N)$(if $(SUBTEST),/$(SUBTEST),)' -benchmem -benchtime=1x -timeout=48h ./halfprof/
 
 # Render a markdown table from a benchmark log: make bench-table LOG=bench.log
 bench-table:
