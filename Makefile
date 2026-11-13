@@ -139,9 +139,9 @@ bench-pairs-census:
 # one group segment (e.g. g0-8); segments match unanchored, so name it exactly.
 # Without SUBTEST every group of the board runs — hours on 7x7/8x8, so pass it for
 # heavy boards (specs/benchmarks.md «Полупрофильный ценз»). Logs: work/30-half-profile-join/.
-# Usage: make bench-halfprof N=<5|6|7|8> [SUBTEST=g<s>-<t>[/p<P>|/x<MB>]]
+# Usage: make bench-halfprof N=<5|6|7|8> [SUBTEST=g<s>-<t>[/p<P>|/x<MB>|/dp]]
 bench-halfprof:
-	@if [ -z "$(N)" ]; then echo "usage: make bench-halfprof N=<5|6|7|8> [SUBTEST=g<s>-<t>[/p<P>|/x<MB>]]"; exit 2; fi
+	@if [ -z "$(N)" ]; then echo "usage: make bench-halfprof N=<5|6|7|8> [SUBTEST=g<s>-<t>[/p<P>|/x<MB>|/dp]]"; exit 2; fi
 	go test -v -run='^$$' -bench='BenchmarkHalfprofCensus/size$(N)$(if $(SUBTEST),/$(SUBTEST),)' -benchmem -benchtime=1x -timeout=48h ./halfprof/
 
 # Render a markdown table from a benchmark log: make bench-table LOG=bench.log

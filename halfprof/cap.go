@@ -59,6 +59,10 @@ func (b *memBudget) reserve(extra int64) error {
 	return nil
 }
 
+// release returns no-longer-needed bytes to the budget (flat DP generation
+// arrays swap their backing store under this accounting).
+func (b *memBudget) release(n int64) { b.used -= n }
+
 // capHit marks a refused budget growth; Unwrap binds it to ErrOverCap.
 type capHit struct{ need int64 }
 
